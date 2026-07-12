@@ -11,6 +11,7 @@ import { QueueModule } from './infrastructure/queue/queue.module';
 import { SearchEngineModule } from './infrastructure/search-engine/search-engine.module';
 import { FileProcessorModule } from './features/file-processor/file-processor.module';
 import { MastraModule } from './features/mastra/mastra.module';
+import { SearchServiceModule } from './features/search-service/search-service.module';
 
 /**
  * Composition root. Import order is load-bearing:
@@ -38,6 +39,7 @@ import { MastraModule } from './features/mastra/mastra.module';
 
     // Feature modules (application layer goes here as it grows).
     FileProcessorModule,
+    SearchServiceModule,
 
     // Mastra AI — must remain last.
     MastraModule,
