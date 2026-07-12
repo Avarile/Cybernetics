@@ -22,7 +22,7 @@ CLI-time concerns (migrations/seeders); load-bearing bootstrap ordering document
 | Framework | NestJS 11 (Express platform) | `@nestjs/common`, `@nestjs/core`, `@nestjs/platform-express`, `reflect-metadata`, `rxjs` |
 | Compiler | **SWC** + `tsc --noEmit` type-check | `@swc/core`, `@swc/cli` |
 | Config | `@nestjs/config` + **Zod 3** | `@nestjs/config`, `zod@3` |
-| Database | **Drizzle ORM** (node-postgres) + **PostgreSQL** | `drizzle-orm`, `pg`; `drizzle-kit` (dev) for migrations |
+| Database | TypeORM 1.x + **PostgreSQL** | `@nestjs/typeorm`, `typeorm`, `pg` (custom seed runner — see §10) |
 | Cache | Redis (cache-manager v7 / Keyv) + raw ioredis for sessions | `@nestjs/cache-manager`, `cache-manager`, `@keyv/redis`, `keyv`, `ioredis` |
 | Logger | Pino | `nestjs-pino`, `pino`, `pino-http`, `pino-pretty` (dev) |
 | Health | Terminus | `@nestjs/terminus` |
@@ -32,7 +32,7 @@ CLI-time concerns (migrations/seeders); load-bearing bootstrap ordering document
 | Testing | Jest via SWC | `jest`, `@swc/jest`, `@nestjs/testing`, `supertest` |
 
 **Dev tooling:** `@nestjs/cli`, `@nestjs/schematics`, `typescript`, `@types/node`, `@types/jest`,
-`@types/supertest`, `ts-node` (seed runner), `eslint`, `prettier`.
+`@types/supertest`, `ts-node` (TypeORM CLI data-source), `eslint`, `prettier`.
 
 ## 3. Folder Structure
 
@@ -40,8 +40,7 @@ CLI-time concerns (migrations/seeders); load-bearing bootstrap ordering document
 Cybernetics/
 ├── nest-cli.json                 # builder: "swc", typeCheck: true
 ├── .swcrc                        # decorators + decoratorMetadata + legacyDecorator + sourceMaps
-├── drizzle.config.ts             # drizzle-kit CLI config (schema path, out dir, dbCredentials)
-├── package.json                  # pnpm scripts: build, start:dev, typecheck, db:generate/migrate, seed, test
+├── package.json                  # pnpm scripts: build, start:dev, typecheck, migration:*, seed, test
 ├── tsconfig.json / tsconfig.build.json
 ├── jest.config.js                # @swc/jest transform
 ├── .env.example
@@ -60,12 +59,12 @@ Cybernetics/
 │   │       └── sentry.config.ts
 │   ├── infrastructure/
 │   │   ├── database/
-│   │   │   ├── database.module.ts    # @Global: PG_POOL + DRIZZLE providers + shutdown lifecycle
-│   │   │   ├── drizzle.constants.ts  # PG_POOL / DRIZZLE tokens + DrizzleDB type
-│   │   │   ├── schema/               # code-first tables; common.ts = baseColumns (id + timestamps)
-│   │   │   ├── migrations/           # drizzle-kit output (SQL + snapshot)
-│   │   │   ├── seeders/              # Seeder interface(run(db)) + seed.ts runner
-│   │   │   └── repositories/         # BaseRepository<TTable> over Drizzle + custom repositories
+│   │   │   ├── database.module.ts    # TypeOrmModule.forRootAsync(ConfigService)
+│   │   │   ├── data-source.ts        # standalone DataSource for the TypeORM CLI (migrations + seeders)
+│   │   │   ├── entities/             # *.entity.ts + a BaseEntity (id / createdAt / updatedAt)
+│   │   │   ├── migrations/           # generated migration files
+│   │   │   ├── seeders/              # Seeder interface + seed.ts runner
+│   │   │   └── repositories/         # base repository + custom repository providers
 │   │   ├── cache/
 │   │   │   ├── cache.module.ts       # @nestjs/cache-manager (Redis/Keyv store), global
 │   │   │   ├── redis.provider.ts     # ioredis client provider (REDIS_CLIENT token)
@@ -108,15 +107,11 @@ Cybernetics/
 boot if env is invalid. Exposes namespaced typed configs (`app`, `database`, `redis`, `sentry`) via
 `registerAs`, so consumers inject strongly-typed config instead of raw `process.env`.
 
-**DatabaseModule** (global) — hand-rolled Drizzle wiring (no official Nest module). A `PG_POOL` provider
-builds a `pg` `Pool` from `ConfigService`; a `DRIZZLE` provider wraps it with
-`drizzle(pool, { schema, logger })` and is exported as the typed `DrizzleDB` (`NodePgDatabase<typeof
-schema>`); a `DatabaseConnection` lifecycle provider `pool.end()`s on shutdown (mirrors
-`RedisClientLifecycle`). Schema is **code-first** under `schema/` — `common.ts`'s `baseColumns` (UUID pk +
-timestamps) replaces the old `BaseEntity`. `drizzle-kit` (via root `drizzle.config.ts`) drives migrations
-(`db:generate` → `db:migrate`, **forward-only**, no revert) and the seed runner (`seed.ts`); runtime DI and
-CLI-time are decoupled. Services inject `DRIZZLE` directly or extend `BaseRepository<TTable>`
-(`findAll`/`findById`/`create`/`deleteById` over the Drizzle query builder).
+**DatabaseModule** — `TypeOrmModule.forRootAsync` fed by `ConfigService`. A **separate** `data-source.ts`
+(same options) is what the TypeORM CLI uses for `migration:generate/run/revert` and for the custom seed
+runner (`seed.ts`) — runtime DI and CLI-time are intentionally decoupled. `entities/`, `migrations/`, `seeders/`,
+`repositories/` are folders/providers, not sub-modules. Feature modules obtain repositories via
+`TypeOrmModule.forFeature([...])`. A `BaseEntity` supplies `id`, `createdAt`, `updatedAt`.
 
 **CacheModule** (global) — general-purpose caching through `@nestjs/cache-manager` backed by a Redis
 (Keyv) store. Also provides a raw **ioredis** client (`REDIS_CLIENT` token) reused by the session cache and
@@ -128,9 +123,8 @@ config, secret redaction, `pino-pretty` transport in dev only). `main.ts` calls
 `app.useLogger(app.get(Logger))` so Nest's logger is Pino end-to-end; `pino-http` gives request logging
 with correlation ids.
 
-**HealthModule** — `@nestjs/terminus`. `GET /health` aggregates a DB check (custom
-`DatabaseHealthIndicator` running `SELECT 1` on `PG_POOL`), a Redis ping, and memory indicators for
-liveness/readiness probes.
+**HealthModule** — `@nestjs/terminus`. `GET /health` aggregates a DB ping, a Redis ping, and memory
+indicators for liveness/readiness probes.
 
 **QueueModule** — `@nestjs/bullmq` `BullModule.forRootAsync` on the shared Redis connection. Queue
 registration + a `@Processor`/`WorkerHost` example under `processors/`; scheduled/repeatable jobs
@@ -208,20 +202,20 @@ LOG_LEVEL=info
 **Jest** — transform via `@swc/jest` loading `.swcrc`, so tests compile with SWC too.
 
 **pnpm scripts** — `build` (`nest build`), `start` / `start:dev` (`nest start [--watch]`), `typecheck`
-(`tsc --noEmit`), `db:generate` / `db:migrate` / `db:studio` (drizzle-kit against `drizzle.config.ts`),
-`seed` (custom seed runner), `test`, `test:e2e`.
+(`tsc --noEmit`), `migration:generate|run|revert` (TypeORM CLI against `data-source.ts`), `seed`
+(custom seed runner), `test`, `test:e2e`.
 
 ## 8. Dependency Manifest
 
 **Runtime:** `@nestjs/common` `@nestjs/core` `@nestjs/platform-express` `reflect-metadata` `rxjs`
-`@nestjs/config` `zod` (v3) `drizzle-orm` `pg` `@nestjs/cache-manager`
+`@nestjs/config` `zod` (v3) `@nestjs/typeorm` `typeorm` `pg` `@nestjs/cache-manager`
 `cache-manager` `@keyv/redis` `keyv` `ioredis` `nestjs-pino` `pino` `pino-http` `@nestjs/terminus`
 `@nestjs/bullmq` `bullmq` `@sentry/nestjs` `@sentry/profiling-node` `@mastra/core` `@mastra/nestjs`.
 
 **Dev:** `@nestjs/cli` `@nestjs/schematics` `@nestjs/testing` `typescript` (5.x) `@types/node` `@types/jest`
-`@types/supertest` `@types/express` `@types/pg` `drizzle-kit` `@swc/core` `@swc/cli` `@swc/jest` `jest`
-`supertest` `ts-node` `tsconfig-paths` `dotenv` `pino-pretty` `eslint` `prettier` `@eslint/js`
-`typescript-eslint` `eslint-plugin-prettier` `globals`.
+`@types/supertest` `@types/express` `@swc/core` `@swc/cli` `@swc/jest` `jest` `supertest` `ts-node`
+`tsconfig-paths` `dotenv` `pino-pretty` `eslint` `prettier` `@eslint/js` `typescript-eslint`
+`eslint-plugin-prettier` `globals`.
 
 ## 9. Build & Run
 
@@ -229,8 +223,6 @@ LOG_LEVEL=info
 pnpm install
 cp .env.example .env
 docker compose up -d          # local PostgreSQL + Redis
-pnpm db:generate              # generate SQL migrations from schema/ (once tables exist)
-pnpm db:migrate               # apply migrations
 pnpm start:dev                # or: pnpm build && pnpm start:prod
 curl localhost:3000/health    # {"status":"ok", ...}
 ```
@@ -247,14 +239,12 @@ catch-all last. Notable version realities in the current npm ecosystem:
   `ts-node`, and Nest's type-checker don't yet support. 5.9.x is the compatible choice.
 - **Zod pinned to v3** — Mastra's transitive AI SDK requires `zod@^3.23.8`; using v3 keeps one Zod version
   across env validation and Mastra.
-- **ORM: Drizzle (not TypeORM).** The DB layer was migrated from TypeORM to **Drizzle ORM**
-  (`drizzle-orm` 0.45.x, node-postgres driver over a `pg` Pool; `drizzle-kit` 0.31.x for migrations).
-  Wiring is hand-rolled (`DRIZZLE`/`PG_POOL` tokens) to match the repo's existing style — no community
-  Nest-Drizzle package. Migrations are **forward-only** (no down/revert); rollback = a new migration.
-  Verified: `pnpm db:generate` reads config + schema, and `/health`'s DB check (`SELECT 1`) reports `up`.
-- **Resolved majors:** `drizzle-orm@0.45`, `cache-manager@7`, `@sentry/nestjs@10`, `nestjs-pino@4`. APIs
-  used are stable across these.
-- **`dotenv`** added (dev) so the seed runner and `drizzle.config.ts` load `.env` under pnpm's strict
+- **`typeorm-extension` dropped** — it doesn't support TypeORM 1.x (peer `~0.3.0`). Seeding is a small,
+  dependency-free runner instead: `Seeder` interface + `seeders/index.ts` + `seed.ts` driving the
+  `DataSource` directly.
+- **Resolved majors:** `typeorm@1`, `cache-manager@7`, `@sentry/nestjs@10`, `nestjs-pino@4`. APIs used are
+  stable across these.
+- **`dotenv`** added (dev) so the standalone `data-source.ts` / seed runner load `.env` under pnpm's strict
   `node_modules`.
 - **Minor:** `*.spec.ts` files are also emitted to `dist/` by the SWC builder (harmless; excluded from the
   runtime path). Add a `.swcrc`-level ignore later if a cleaner `dist` is desired.
