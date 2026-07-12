@@ -1,12 +1,8 @@
 import type { FileRow } from '../../infrastructure/database/schema/file.schema';
 
-/** The acting principal. `id === null` denotes the system / internal caller. */
-export interface FilePrincipal {
-  id: string | null;
-}
-
-/** System principal for internal (agent / pipeline) callers. */
-export const SYSTEM_PRINCIPAL: FilePrincipal = { id: null };
+// Principal now lives in src/common; kept re-exported under the domain name.
+export type { Principal as FilePrincipal } from '../../common/principal';
+export { SYSTEM_PRINCIPAL } from '../../common/principal';
 
 /** Public-facing file metadata — what the API and service return. */
 export interface FileMetadata {

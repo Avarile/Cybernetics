@@ -9,7 +9,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
-import { CurrentUser } from './current-user.decorator';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import {
   completeUploadSchema,
   type CompleteUploadDto,
@@ -19,7 +19,7 @@ import {
   type InitiateUploadDto,
 } from './dto/initiate-upload.dto';
 import { queryFilesSchema, type QueryFilesDto } from './dto/query-files.dto';
-import { ZodValidationPipe } from './dto/zod-validation.pipe';
+import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { FileService } from './file.service';
 import type { FilePrincipal } from './file.types';
 

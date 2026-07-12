@@ -6,7 +6,8 @@ import {
 import type { ConfigService } from '@nestjs/config';
 import { FileService } from './file.service';
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+// Test doubles are intentionally loosely typed.
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
 
 function makeRow(overrides: Record<string, any> = {}) {
   return {
