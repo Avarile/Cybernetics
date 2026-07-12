@@ -7,7 +7,5 @@
  *
  * Example:
  *   export * from './user.schema';
- *
- * Empty for now (scaffold).
  */
-export {};
+export * from './file.schema';

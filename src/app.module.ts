@@ -3,10 +3,12 @@ import { ConfigModule } from './config/config.module';
 import { CacheModule } from './infrastructure/cache/cache.module';
 import { SessionCacheModule } from './infrastructure/cache/session/session-cache.module';
 import { DatabaseModule } from './infrastructure/database/database.module';
+import { FileManageModule } from './infrastructure/file-manage/file-manage.module';
 import { HealthModule } from './infrastructure/health/health.module';
 import { LoggerModule } from './infrastructure/logger/logger.module';
 import { ObservabilityModule } from './infrastructure/observability/sentry.module';
 import { QueueModule } from './infrastructure/queue/queue.module';
+import { FileProcessorModule } from './features/file-processor/file-processor.module';
 import { MastraModule } from './features/mastra/mastra.module';
 
 /**
@@ -29,9 +31,11 @@ import { MastraModule } from './features/mastra/mastra.module';
     CacheModule,
     SessionCacheModule,
     QueueModule,
+    FileManageModule,
     HealthModule,
 
     // Feature modules (application layer goes here as it grows).
+    FileProcessorModule,
 
     // Mastra AI — must remain last.
     MastraModule,

@@ -4,6 +4,7 @@ import { appConfig } from './configurations/app.config';
 import { databaseConfig } from './configurations/database.config';
 import { redisConfig } from './configurations/redis.config';
 import { sentryConfig } from './configurations/sentry.config';
+import { storageConfig } from './configurations/storage.config';
 import { validateEnv } from './env.validation';
 
 /**
@@ -22,7 +23,7 @@ import { validateEnv } from './env.validation';
       cache: true,
       expandVariables: true,
       validate: validateEnv,
-      load: [appConfig, databaseConfig, redisConfig, sentryConfig],
+      load: [appConfig, databaseConfig, redisConfig, sentryConfig, storageConfig],
     }),
   ],
 })
