@@ -1,9 +1,6 @@
 import type { Provider } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-// Note: the installed meilisearch@0.59.0 package exports its client class as
-// `Meilisearch` (not `MeiliSearch` as in older versions/docs) — see
-// node_modules/meilisearch/README.md and dist/meilisearch.d.ts.
-import { Meilisearch } from 'meilisearch';
+import { MeiliSearch } from 'meilisearch';
 import type { SearchConfig } from '../../config/configurations/search.config';
 import { MEILI_CLIENT } from './meili.constants';
 
@@ -14,9 +11,9 @@ import { MEILI_CLIENT } from './meili.constants';
 export const meiliClientProvider: Provider = {
   provide: MEILI_CLIENT,
   inject: [ConfigService],
-  useFactory: (config: ConfigService): Meilisearch => {
+  useFactory: (config: ConfigService): MeiliSearch => {
     const cfg = config.getOrThrow<SearchConfig>('search');
-    return new Meilisearch({
+    return new MeiliSearch({
       host: cfg.host,
       apiKey: cfg.apiKey,
       timeout: cfg.searchTimeoutMs,
