@@ -1,7 +1,10 @@
 import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 import { APP_SEARCH_INDEXES, IndexRegistry } from './index-registry';
-import { SEARCH_INDEXING_QUEUE, SEARCH_INDEX_DEFINITIONS } from './search.constants';
+import {
+  SEARCH_INDEXING_QUEUE,
+  SEARCH_INDEX_DEFINITIONS,
+} from './search.constants';
 import { SearchController } from './search.controller';
 import { SearchService } from './search.service';
 
