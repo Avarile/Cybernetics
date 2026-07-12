@@ -2,6 +2,7 @@ import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
 import { APP_SEARCH_INDEXES, IndexRegistry } from './index-registry';
 import { SearchIndexingProcessor } from './processors/search-indexing.processor';
+import { SearchReconciliationScheduler } from './schedulers/search-reconciliation.scheduler';
 import {
   SEARCH_INDEXING_QUEUE,
   SEARCH_INDEX_DEFINITIONS,
@@ -24,6 +25,7 @@ import { SearchService } from './search.service';
     IndexRegistry,
     SearchService,
     SearchIndexingProcessor,
+    SearchReconciliationScheduler,
   ],
   exports: [SearchService],
 })
