@@ -34,23 +34,51 @@ export class SearchIndexingProcessor extends WorkerHost {
           index: string;
           docs: Array<Record<string, unknown>>;
         };
+        this.assertNonEmptyString(index, job.name, 'index');
+        this.assertArray(docs, job.name, 'docs');
         const { taskUid } = await this.engine.addOrReplace(index, docs);
         await this.engine.waitForTask(taskUid);
         break;
       }
       case SEARCH_DELETE_DOCS_JOB: {
         const { index, ids } = job.data as { index: string; ids: string[] };
+        this.assertNonEmptyString(index, job.name, 'index');
+        this.assertArray(ids, job.name, 'ids');
         const { taskUid } = await this.engine.deleteDocuments(index, ids);
         await this.engine.waitForTask(taskUid);
         break;
       }
       case SEARCH_REINDEX_JOB: {
         const { index } = job.data as { index: string };
+        this.assertNonEmptyString(index, job.name, 'index');
         await this.reindex(index);
         break;
       }
       default:
         this.logger.warn(`Unknown job "${job.name}"`);
+    }
+  }
+
+  /** Guards against malformed job.data — an external, replayable boundary. */
+  private assertNonEmptyString(
+    value: unknown,
+    jobName: string,
+    field: string,
+  ): asserts value is string {
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(
+        `Job "${jobName}": "${field}" must be a non-empty string`,
+      );
+    }
+  }
+
+  private assertArray(
+    value: unknown,
+    jobName: string,
+    field: string,
+  ): asserts value is unknown[] {
+    if (!Array.isArray(value)) {
+      throw new Error(`Job "${jobName}": "${field}" must be an array`);
     }
   }
 

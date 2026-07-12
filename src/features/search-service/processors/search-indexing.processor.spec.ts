@@ -62,4 +62,48 @@ describe('SearchIndexingProcessor', () => {
       { id: '2' },
     ]);
   });
+
+  it('rejects index-docs when docs is not an array', async () => {
+    const { processor, engine } = makeProcessor();
+    await expect(
+      processor.process({
+        name: 'index-docs',
+        data: { index: 'docs', docs: 'not-an-array' },
+      } as Job),
+    ).rejects.toThrow(/index-docs/);
+    expect(engine.addOrReplace).not.toHaveBeenCalled();
+  });
+
+  it('rejects index-docs when index is missing', async () => {
+    const { processor, engine } = makeProcessor();
+    await expect(
+      processor.process({
+        name: 'index-docs',
+        data: { docs: [{ id: '1' }] },
+      } as Job),
+    ).rejects.toThrow(/index-docs/);
+    expect(engine.addOrReplace).not.toHaveBeenCalled();
+  });
+
+  it('rejects delete-docs when ids is not an array', async () => {
+    const { processor, engine } = makeProcessor();
+    await expect(
+      processor.process({
+        name: 'delete-docs',
+        data: { index: 'docs', ids: 'not-an-array' },
+      } as Job),
+    ).rejects.toThrow(/delete-docs/);
+    expect(engine.deleteDocuments).not.toHaveBeenCalled();
+  });
+
+  it('rejects reindex when index is not a non-empty string', async () => {
+    const { processor, engine } = makeProcessor();
+    await expect(
+      processor.process({
+        name: 'reindex',
+        data: { index: '' },
+      } as Job),
+    ).rejects.toThrow(/reindex/);
+    expect(engine.clearIndex).not.toHaveBeenCalled();
+  });
 });
