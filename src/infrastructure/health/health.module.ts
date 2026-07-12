@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TerminusModule } from '@nestjs/terminus';
 import { DatabaseHealthIndicator } from './database.health';
 import { HealthController } from './health.controller';
+import { MeiliHealthIndicator } from './meili.health';
 import { MinioHealthIndicator } from './minio.health';
 import { RedisHealthIndicator } from './redis.health';
 
@@ -12,6 +13,7 @@ import { RedisHealthIndicator } from './redis.health';
     DatabaseHealthIndicator,
     RedisHealthIndicator,
     MinioHealthIndicator,
+    MeiliHealthIndicator,
   ],
 })
 export class HealthModule {}

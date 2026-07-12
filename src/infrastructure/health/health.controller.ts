@@ -5,12 +5,13 @@ import {
   MemoryHealthIndicator,
 } from '@nestjs/terminus';
 import { DatabaseHealthIndicator } from './database.health';
+import { MeiliHealthIndicator } from './meili.health';
 import { MinioHealthIndicator } from './minio.health';
 import { RedisHealthIndicator } from './redis.health';
 
 /**
  * `GET /health` — liveness/readiness probe aggregating database, Redis, MinIO,
- * and heap-memory checks.
+ * MeiliSearch, and heap-memory checks.
  */
 @Controller('health')
 export class HealthController {
@@ -20,6 +21,7 @@ export class HealthController {
     private readonly memory: MemoryHealthIndicator,
     private readonly redis: RedisHealthIndicator,
     private readonly minio: MinioHealthIndicator,
+    private readonly meili: MeiliHealthIndicator,
   ) {}
 
   @Get()
@@ -29,6 +31,7 @@ export class HealthController {
       () => this.db.isHealthy('database'),
       () => this.redis.isHealthy('redis'),
       () => this.minio.isHealthy('minio'),
+      () => this.meili.isHealthy('meilisearch'),
       () => this.memory.checkHeap('memory_heap', 300 * 1024 * 1024),
     ]);
   }
