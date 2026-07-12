@@ -8,6 +8,7 @@ import { HealthModule } from './infrastructure/health/health.module';
 import { LoggerModule } from './infrastructure/logger/logger.module';
 import { ObservabilityModule } from './infrastructure/observability/sentry.module';
 import { QueueModule } from './infrastructure/queue/queue.module';
+import { SearchEngineModule } from './infrastructure/search-engine/search-engine.module';
 import { FileProcessorModule } from './features/file-processor/file-processor.module';
 import { MastraModule } from './features/mastra/mastra.module';
 
@@ -32,6 +33,7 @@ import { MastraModule } from './features/mastra/mastra.module';
     SessionCacheModule,
     QueueModule,
     FileManageModule,
+    SearchEngineModule,
     HealthModule,
 
     // Feature modules (application layer goes here as it grows).
