@@ -1,20 +1,38 @@
 import { INestApplication } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
-import { AppModule } from '../src/app.module';
+import { ConfigModule } from '../src/config/config.module';
+import { QueueModule } from '../src/infrastructure/queue/queue.module';
+import { SearchEngineModule } from '../src/infrastructure/search-engine/search-engine.module';
+import { SearchServiceModule } from '../src/features/search-service/search-service.module';
 
 /**
- * Search HTTP contract e2e. Boots AppModule (requires Postgres, Redis, MinIO,
- * and MeiliSearch reachable per `.env`). The app registry is empty for now, so
- * this asserts the contract: validation + unknown-index handling.
- * Run with `pnpm test:e2e -- search.e2e`.
+ * Search HTTP contract e2e. Boots a focused module set (ConfigModule +
+ * QueueModule + SearchEngineModule + SearchServiceModule) instead of the full
+ * AppModule, so this avoids pulling in MastraModule — whose
+ * `@sindresorhus/slugify` dependency is ESM-only and cannot be transformed by
+ * Jest's default config. This mirrors the pattern in `queue.e2e-spec.ts`.
+ *
+ * This still wires the real SearchController + SearchService: the MeiliSearch
+ * client is a lazy HTTP client (no connection at boot) and
+ * `SearchService.onApplicationBootstrap` is a no-op against the empty index
+ * registry, so Meili/Postgres/MinIO are not required to boot. QueueModule
+ * (BullMQ) does require a reachable Redis (see the REDIS_* vars in `.env`).
+ *
+ * The app registry is empty for now, so this asserts the contract: validation
+ * + unknown-index handling. Run with `pnpm test:e2e -- search.e2e`.
  */
 describe('Search API (e2e)', () => {
   let app: INestApplication;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
-      imports: [AppModule],
+      imports: [
+        ConfigModule,
+        QueueModule,
+        SearchEngineModule,
+        SearchServiceModule,
+      ],
     }).compile();
     app = moduleRef.createNestApplication();
     await app.init();
