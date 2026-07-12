@@ -21,9 +21,32 @@ const filesDef: RegisteredIndex = {
   ownerScope: { attribute: 'ownerId', allowPublic: true },
 };
 
+/**
+ * Second fixture with a numeric and an array-capable field, so the
+ * numeric/array branches of `toFilterClause` and the sort/facet rejection
+ * paths can be exercised without touching `filesDef`'s existing tests.
+ */
+const itemsDef: RegisteredIndex = {
+  name: 'items',
+  primaryKey: 'id',
+  searchableAttributes: ['name'],
+  filterableAttributes: ['ownerId', 'status', 'size', 'tags'],
+  sortableAttributes: ['size'],
+  allowedFilterFields: ['status', 'size', 'tags'],
+  allowedSortFields: ['size'],
+  ownerScope: { attribute: 'ownerId', allowPublic: true },
+};
+
 const config = {
   getOrThrow: () => ({ defaultPageSize: 20, maxPageSize: 100 }),
 } as unknown as ConfigService;
+
+/** Mirrors `search.service.ts`'s private `quote()` escaping rule exactly, so
+ * expected filter strings are derived from the same rule under test rather
+ * than hand-typed escape sequences. */
+function expectedQuote(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
 
 function makeService(engineOverrides: Record<string, any> = {}) {
   const engine = {
@@ -39,7 +62,7 @@ function makeService(engineOverrides: Record<string, any> = {}) {
     ...engineOverrides,
   };
   const queue = { add: jest.fn(async () => undefined) };
-  const registry = new IndexRegistry([filesDef]);
+  const registry = new IndexRegistry([filesDef, itemsDef]);
   const service = new SearchService(
     engine as any,
     registry,
@@ -125,6 +148,78 @@ describe('SearchService.search', () => {
     await expect(
       service.search('files', { q: '', page: 1 }, { id: null }),
     ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+
+  it('escapes a filter value so it cannot break out into a new clause (injection containment)', async () => {
+    const { service, engine } = makeService();
+    const malicious = 'a" OR ownerId = "x';
+    // system principal (id: null): no owner-scope clause, so this is the
+    // ONLY clause in the array — proving the malicious value stays fully
+    // contained inside the `status = "..."` clause rather than escaping
+    // into a second, attacker-controlled `OR ownerId = ...` clause.
+    await service.search(
+      'items',
+      { q: '', page: 1, filters: { status: malicious } },
+      { id: null },
+    );
+    expect(engine.search.mock.calls[0][1].filter).toEqual([
+      `status = ${expectedQuote(malicious)}`,
+    ]);
+  });
+
+  it('quotes and escapes each element of an array filter value (IN clause)', async () => {
+    const { service, engine } = makeService();
+    await service.search(
+      'items',
+      { q: '', page: 1, filters: { tags: ['a', 'b"c'] } },
+      { id: null },
+    );
+    expect(engine.search.mock.calls[0][1].filter).toEqual([
+      `tags IN [${expectedQuote('a')}, ${expectedQuote('b"c')}]`,
+    ]);
+  });
+
+  it('leaves a numeric filter value unquoted', async () => {
+    const { service, engine } = makeService();
+    await service.search(
+      'items',
+      { q: '', page: 1, filters: { size: 10 } },
+      { id: null },
+    );
+    expect(engine.search.mock.calls[0][1].filter).toEqual(['size = 10']);
+  });
+
+  it('rejects a sort on a non-allowlisted field', async () => {
+    const { service } = makeService();
+    await expect(
+      service.search(
+        'items',
+        { q: '', page: 1, sort: ['status:asc'] },
+        { id: null },
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects a sort direction other than asc/desc', async () => {
+    const { service } = makeService();
+    await expect(
+      service.search(
+        'items',
+        { q: '', page: 1, sort: ['size:sideways'] },
+        { id: null },
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects a facet not in filterableAttributes', async () => {
+    const { service } = makeService();
+    await expect(
+      service.search(
+        'items',
+        { q: '', page: 1, facets: ['secretFacet'] },
+        { id: null },
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
   });
 });
 
