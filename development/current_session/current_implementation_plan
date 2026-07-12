@@ -1,0 +1,2011 @@
+# Search Engine Module (MeiliSearch) — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Add a generic, production-grade MeiliSearch capability — an index-agnostic `SEARCH_ENGINE` provider plus a `search-service` feature (internal API for agents/pipeline + external `POST /search/:index` for users) with async indexing and server-side owner-scoping.
+
+**Architecture:** Mirrors the existing `file-manage`/`OBJECT_STORAGE` split. `src/infrastructure/search-engine` wraps the MeiliSearch client behind a DI-token abstraction (`SEARCH_ENGINE`) and a raw `MEILI_CLIENT` for health. `src/features/search-service` owns an index registry, a `SearchService` (search + async indexing), and a controller. Indexing runs off-request via a BullMQ queue + reconciliation, exactly like `file-processor`. The concrete `files` index is deferred; only the generic engine + service are built here.
+
+**Tech Stack:** NestJS 11, `meilisearch` JS client, BullMQ, Zod, Drizzle (unaffected here), Jest + `@swc/jest` + supertest.
+
+## Global Constraints
+
+- Node >= 20; package manager is `pnpm@10.16.1` — use `pnpm`, not `npm`.
+- Files stay under 500 lines; one clear responsibility per file.
+- Validate all external input at the boundary (Zod DTO + registry allowlists).
+- NEVER commit secrets or `.env`. The Meili master key is read from env only; never log, return, or hardcode it.
+- Relative imports only (no path aliases exist in `tsconfig.json`).
+- Unit tests: plain instantiation with `jest.fn()` mocks (match `src/features/file-processor/file.service.spec.ts`). Root Jest config: `rootDir: src`, pattern `.*\.spec\.ts$`. E2E: `Test.createTestingModule` + supertest, pattern `.e2e-spec.ts$` under `test/`, run with `pnpm test:e2e`.
+- Commit messages: Conventional Commits, imperative. **Do NOT add a `Co-Authored-By` trailer** (project rule #2078 — attribution not enabled).
+- Confirmed env vars already present: `MEILISEARCH_HOST`, `MEILISEARCH_PORT` (30770), `MEILISEARCH_MASTER_KEY`. Target server: MeiliSearch **v1.22.1**.
+- After each task: `pnpm build` and `pnpm test` must pass before committing.
+
+---
+
+## File Structure
+
+**Create:**
+- `src/common/principal.ts` — `Principal` + `SYSTEM_PRINCIPAL` (shared).
+- `src/common/pipes/zod-validation.pipe.ts` — moved from file-processor.
+- `src/common/decorators/current-user.decorator.ts` — moved from file-processor.
+- `src/config/configurations/search.config.ts` — `registerAs('search')`.
+- `src/infrastructure/search-engine/meili.constants.ts` — DI tokens.
+- `src/infrastructure/search-engine/search-engine.interface.ts` — abstraction + types.
+- `src/infrastructure/search-engine/meili.provider.ts` — client factory.
+- `src/infrastructure/search-engine/search-engine.service.ts` — Meili-backed impl.
+- `src/infrastructure/search-engine/search-engine.module.ts` — `@Global` module.
+- `src/infrastructure/search-engine/search-engine.service.spec.ts` — unit tests.
+- `src/infrastructure/health/meili.health.ts` — Terminus indicator.
+- `src/infrastructure/health/meili.health.spec.ts` — unit test.
+- `src/features/search-service/search.constants.ts` — queue/job names + registry token.
+- `src/features/search-service/search.types.ts` — request/response types.
+- `src/features/search-service/index-registry.ts` — `RegisteredIndex` + `IndexRegistry`.
+- `src/features/search-service/index-registry.spec.ts` — unit test.
+- `src/features/search-service/search.service.ts` — internal + search API.
+- `src/features/search-service/search.service.spec.ts` — unit tests.
+- `src/features/search-service/dto/search-query.dto.ts` — Zod schema.
+- `src/features/search-service/search.controller.ts` — `POST /search/:index`.
+- `src/features/search-service/search-service.module.ts` — feature module.
+- `src/features/search-service/processors/search-indexing.processor.ts` — BullMQ worker.
+- `src/features/search-service/processors/search-indexing.processor.spec.ts` — unit test.
+- `src/features/search-service/schedulers/search-reconciliation.scheduler.ts` — repeatable reindex.
+- `src/features/search-service/schedulers/search-reconciliation.scheduler.spec.ts` — unit test.
+- `test/search.e2e-spec.ts` — HTTP contract e2e.
+- `test/search-engine.e2e-spec.ts` — integration against live Meili.
+
+**Modify:**
+- `src/config/env.validation.ts` — add `MEILISEARCH_*` / `SEARCH_*` vars + prod guard.
+- `src/config/config.module.ts` — load `searchConfig`.
+- `src/config/env.validation.spec.ts` — cover new vars.
+- `src/features/file-processor/file.types.ts` — re-export `Principal`/`SYSTEM_PRINCIPAL` from common.
+- `src/features/file-processor/file.controller.ts` — import pipe/decorator from `src/common`.
+- `src/infrastructure/health/health.module.ts` — add `MeiliHealthIndicator`.
+- `src/infrastructure/health/health.controller.ts` — add meili check.
+- `src/app.module.ts` — import `SearchEngineModule` + `SearchServiceModule`.
+
+**Delete:**
+- `src/features/file-processor/current-user.decorator.ts`
+- `src/features/file-processor/dto/zod-validation.pipe.ts`
+
+---
+
+## Task 1: Dependency + `search` config namespace
+
+**Files:**
+- Modify: `package.json` (via `pnpm add`)
+- Create: `src/config/configurations/search.config.ts`
+- Modify: `src/config/env.validation.ts`, `src/config/config.module.ts`
+- Test: `src/config/env.validation.spec.ts`
+
+**Interfaces:**
+- Produces: `searchConfig` (`registerAs('search')`) and `type SearchConfig = { host: string; apiKey: string; indexPrefix: string; taskTimeoutMs: number; searchTimeoutMs: number; defaultPageSize: number; maxPageSize: number }`.
+
+- [ ] **Step 1: Install the client**
+
+Run: `pnpm add meilisearch`
+Expected: `meilisearch` added to `dependencies`. Then check the installed version:
+Run: `node -e "console.log(require('meilisearch/package.json').version)"`
+Note the version in the commit message; the JS client is backward-compatible with MeiliSearch v1.x (server 1.22.1).
+
+- [ ] **Step 2: Add env vars to the Zod schema**
+
+In `src/config/env.validation.ts`, inside the `z.object({ … })` (after the `FILE_*` block, before the closing `})`), add:
+
+```ts
+    // MeiliSearch / search engine
+    MEILISEARCH_HOST: z.string().min(1).default('localhost'),
+    MEILISEARCH_PORT: z.coerce.number().int().positive().default(7700),
+    MEILISEARCH_USE_SSL: booleanFromEnv.default(false),
+    MEILISEARCH_MASTER_KEY: z.string().default(''),
+    MEILISEARCH_INDEX_PREFIX: z.string().default(''),
+    MEILISEARCH_TASK_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+    MEILISEARCH_SEARCH_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
+    SEARCH_DEFAULT_PAGE_SIZE: z.coerce.number().int().positive().default(20),
+    SEARCH_MAX_PAGE_SIZE: z.coerce.number().int().positive().default(100),
+```
+
+In the same file's `.superRefine((env, ctx) => { … })`, add after the MinIO block:
+
+```ts
+    // Require a master key in production.
+    if (env.NODE_ENV === 'production' && env.MEILISEARCH_MASTER_KEY.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['MEILISEARCH_MASTER_KEY'],
+        message: 'MEILISEARCH_MASTER_KEY is required when NODE_ENV=production.',
+      });
+    }
+```
+
+- [ ] **Step 3: Create the namespaced config**
+
+Create `src/config/configurations/search.config.ts`:
+
+```ts
+import { registerAs } from '@nestjs/config';
+import { validateEnv } from '../env.validation';
+
+/**
+ * Namespaced search-engine config (MeiliSearch connection + search policy).
+ * Consumed by the search-engine infrastructure module, the Meili health
+ * indicator, and the search-service feature.
+ */
+export const searchConfig = registerAs('search', () => {
+  const env = validateEnv(process.env);
+  const scheme = env.MEILISEARCH_USE_SSL ? 'https' : 'http';
+  return {
+    host: `${scheme}://${env.MEILISEARCH_HOST}:${env.MEILISEARCH_PORT}`,
+    apiKey: env.MEILISEARCH_MASTER_KEY,
+    indexPrefix: env.MEILISEARCH_INDEX_PREFIX,
+    taskTimeoutMs: env.MEILISEARCH_TASK_TIMEOUT_MS,
+    searchTimeoutMs: env.MEILISEARCH_SEARCH_TIMEOUT_MS,
+    defaultPageSize: env.SEARCH_DEFAULT_PAGE_SIZE,
+    maxPageSize: env.SEARCH_MAX_PAGE_SIZE,
+  };
+});
+
+export type SearchConfig = ReturnType<typeof searchConfig>;
+```
+
+- [ ] **Step 4: Register the config**
+
+In `src/config/config.module.ts`, add the import `import { searchConfig } from './configurations/search.config';` and add `searchConfig` to the `load: [ … ]` array (after `storageConfig`).
+
+- [ ] **Step 5: Write failing test for the config vars**
+
+Append to `src/config/env.validation.spec.ts` inside the existing `describe`:
+
+```ts
+it('applies MeiliSearch defaults', () => {
+  const env = validateEnv({});
+  expect(env.MEILISEARCH_HOST).toBe('localhost');
+  expect(env.MEILISEARCH_PORT).toBe(7700);
+  expect(env.SEARCH_MAX_PAGE_SIZE).toBe(100);
+});
+
+it('requires a master key in production', () => {
+  expect(() =>
+    validateEnv({ NODE_ENV: 'production', MEILISEARCH_MASTER_KEY: '' }),
+  ).toThrow(/MEILISEARCH_MASTER_KEY/);
+});
+```
+
+- [ ] **Step 6: Run tests + build**
+
+Run: `pnpm test -- env.validation`
+Expected: PASS (existing + 2 new). Then `pnpm build` → succeeds.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add package.json pnpm-lock.yaml src/config
+git commit -m "feat(config): add MeiliSearch search-engine config namespace"
+```
+
+---
+
+## Task 2: Promote shared utilities to `src/common`
+
+**Files:**
+- Create: `src/common/principal.ts`, `src/common/pipes/zod-validation.pipe.ts`, `src/common/decorators/current-user.decorator.ts`
+- Modify: `src/features/file-processor/file.types.ts`, `src/features/file-processor/file.controller.ts`
+- Delete: `src/features/file-processor/current-user.decorator.ts`, `src/features/file-processor/dto/zod-validation.pipe.ts`
+
+**Interfaces:**
+- Produces: `interface Principal { id: string | null }`, `const SYSTEM_PRINCIPAL: Principal`, `class ZodValidationPipe<S extends ZodType>`, `const CurrentUser` param decorator (returns `Principal`).
+
+- [ ] **Step 1: Create the shared principal**
+
+Create `src/common/principal.ts`:
+
+```ts
+/** The acting principal. `id === null` denotes the system / internal caller. */
+export interface Principal {
+  id: string | null;
+}
+
+/** System principal for internal (agent / pipeline) callers. */
+export const SYSTEM_PRINCIPAL: Principal = { id: null };
+```
+
+- [ ] **Step 2: Move the validation pipe**
+
+Create `src/common/pipes/zod-validation.pipe.ts` with the exact current content of `src/features/file-processor/dto/zod-validation.pipe.ts`:
+
+```ts
+import {
+  BadRequestException,
+  Injectable,
+  type PipeTransform,
+} from '@nestjs/common';
+import { z, ZodError, type ZodType } from 'zod';
+
+/**
+ * Validates a payload against a Zod schema. Mirrors the app's env-validation
+ * style: on failure, responds 400 with the list of issues. Generic over the
+ * schema so the output type is inferred (handles coercion / defaults).
+ */
+@Injectable()
+export class ZodValidationPipe<S extends ZodType> implements PipeTransform<
+  unknown,
+  z.infer<S>
+> {
+  constructor(private readonly schema: S) {}
+
+  transform(value: unknown): z.infer<S> {
+    try {
+      return this.schema.parse(value) as z.infer<S>;
+    } catch (error) {
+      if (error instanceof ZodError) {
+        throw new BadRequestException({
+          message: 'Validation failed',
+          issues: error.issues.map((issue) => ({
+            path: issue.path.join('.') || '(root)',
+            message: issue.message,
+          })),
+        });
+      }
+      throw error;
+    }
+  }
+}
+```
+
+- [ ] **Step 3: Move the decorator (retargeted to `Principal`)**
+
+Create `src/common/decorators/current-user.decorator.ts`:
+
+```ts
+import { createParamDecorator, type ExecutionContext } from '@nestjs/common';
+import type { Request } from 'express';
+import type { Principal } from '../principal';
+
+/**
+ * Resolves the acting principal for a request.
+ *
+ * PLACEHOLDER for a real auth module: it currently trusts an `x-user-id`
+ * header, falling back to the system principal. Replace the extraction with
+ * verified identity (e.g. from an AuthGuard) when auth lands — controller and
+ * service signatures don't change.
+ */
+export const CurrentUser = createParamDecorator(
+  (_data: unknown, ctx: ExecutionContext): Principal => {
+    const req = ctx.switchToHttp().getRequest<Request>();
+    const header = req.header('x-user-id');
+    return { id: header && header.length > 0 ? header : null };
+  },
+);
+```
+
+- [ ] **Step 4: Delete the old files**
+
+```bash
+git rm src/features/file-processor/current-user.decorator.ts src/features/file-processor/dto/zod-validation.pipe.ts
+```
+
+- [ ] **Step 5: Re-export from `file.types.ts`**
+
+In `src/features/file-processor/file.types.ts`, replace these lines:
+
+```ts
+/** The acting principal. `id === null` denotes the system / internal caller. */
+export interface FilePrincipal {
+  id: string | null;
+}
+
+/** System principal for internal (agent / pipeline) callers. */
+export const SYSTEM_PRINCIPAL: FilePrincipal = { id: null };
+```
+
+with:
+
+```ts
+// Principal now lives in src/common; kept re-exported under the domain name.
+export type { Principal as FilePrincipal } from '../../common/principal';
+export { SYSTEM_PRINCIPAL } from '../../common/principal';
+```
+
+- [ ] **Step 6: Update the file controller imports**
+
+In `src/features/file-processor/file.controller.ts`, change `import { CurrentUser } from './current-user.decorator';` to `import { CurrentUser } from '../../common/decorators/current-user.decorator';`, and change `import { ZodValidationPipe } from './dto/zod-validation.pipe';` to `import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';`. Leave the `FilePrincipal` import from `./file.types` unchanged.
+
+- [ ] **Step 7: Verify nothing else imported the moved files**
+
+Run: `grep -rn "current-user.decorator\|dto/zod-validation" src`
+Expected: only `src/common/...` and the updated `file.controller.ts` decorator line; NO references to the deleted paths.
+
+- [ ] **Step 8: Build + run existing file-processor tests**
+
+Run: `pnpm build && pnpm test -- file`
+Expected: PASS (file.service.spec, file.util.spec unaffected).
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/common src/features/file-processor
+git commit -m "refactor(common): promote Principal, ZodValidationPipe, CurrentUser to src/common"
+```
+
+---
+
+## Task 3: Search-engine infrastructure scaffolding
+
+**Files:**
+- Create: `src/infrastructure/search-engine/meili.constants.ts`, `search-engine.interface.ts`, `meili.provider.ts`, `search-engine.service.ts` (stub), `search-engine.module.ts`
+- Modify: `src/app.module.ts`
+
+**Interfaces:**
+- Produces: DI tokens `MEILI_CLIENT`, `SEARCH_ENGINE`; `SearchEngine` interface + `IndexDefinition`, `EngineQuery`, `EngineResult<T>`, `TaskRef`, `SearchEngineError`; `meiliClientProvider`; `SearchEngineModule` (`@Global`).
+- Consumes: `SearchConfig` (Task 1).
+
+- [ ] **Step 1: DI tokens**
+
+Create `src/infrastructure/search-engine/meili.constants.ts`:
+
+```ts
+import type { MeiliSearch } from 'meilisearch';
+
+/** DI token for the raw MeiliSearch client (internal + health check). */
+export const MEILI_CLIENT = Symbol('MEILI_CLIENT');
+
+/** DI token for the index-agnostic search abstraction (swappable backend). */
+export const SEARCH_ENGINE = Symbol('SEARCH_ENGINE');
+
+/** Convenience alias for the MeiliSearch client type. */
+export type MeiliClient = MeiliSearch;
+```
+
+- [ ] **Step 2: The abstraction + types**
+
+Create `src/infrastructure/search-engine/search-engine.interface.ts`:
+
+```ts
+/** Declarative index definition applied by `ensureIndex`. */
+export interface IndexDefinition {
+  name: string;
+  primaryKey: string;
+  searchableAttributes: string[];
+  filterableAttributes: string[];
+  sortableAttributes: string[];
+  rankingRules?: string[];
+  maxTotalHits?: number; // pagination.maxTotalHits (default 1000)
+}
+
+/** A low-level query the engine understands. Filters are composed by callers. */
+export interface EngineQuery {
+  q: string;
+  filter?: string | string[];
+  sort?: string[];
+  facets?: string[];
+  page?: number;
+  hitsPerPage?: number;
+  attributesToHighlight?: string[];
+  attributesToRetrieve?: string[];
+}
+
+/** Normalised search result independent of the backend response shape. */
+export interface EngineResult<T> {
+  hits: T[];
+  totalHits: number;
+  page: number;
+  hitsPerPage: number;
+  totalPages: number;
+  facetDistribution?: Record<string, Record<string, number>>;
+  processingTimeMs: number;
+}
+
+/** Reference to an async engine task (Meili applies mutations asynchronously). */
+export interface TaskRef {
+  taskUid: number;
+}
+
+/** Raised when the engine errors or an async task fails. */
+export class SearchEngineError extends Error {
+  constructor(
+    message: string,
+    readonly code?: string,
+  ) {
+    super(message);
+    this.name = 'SearchEngineError';
+  }
+}
+
+/** Index-agnostic search capability. Knows nothing about any domain. */
+export interface SearchEngine {
+  ensureIndex(def: IndexDefinition): Promise<void>;
+  addOrReplace(index: string, docs: Array<Record<string, unknown>>): Promise<TaskRef>;
+  update(index: string, docs: Array<Record<string, unknown>>): Promise<TaskRef>;
+  deleteDocuments(index: string, ids: string[]): Promise<TaskRef>;
+  deleteByFilter(index: string, filter: string | string[]): Promise<TaskRef>;
+  clearIndex(index: string): Promise<TaskRef>;
+  search<T = Record<string, unknown>>(index: string, query: EngineQuery): Promise<EngineResult<T>>;
+  waitForTask(taskUid: number): Promise<void>;
+  health(): Promise<boolean>;
+}
+```
+
+- [ ] **Step 3: Client provider**
+
+Create `src/infrastructure/search-engine/meili.provider.ts`:
+
+```ts
+import type { Provider } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { MeiliSearch } from 'meilisearch';
+import type { SearchConfig } from '../../config/configurations/search.config';
+import { MEILI_CLIENT } from './meili.constants';
+
+/**
+ * Builds the MeiliSearch client from validated config. Like the MinIO client,
+ * it is a stateless HTTP client — no shutdown lifecycle needed.
+ */
+export const meiliClientProvider: Provider = {
+  provide: MEILI_CLIENT,
+  inject: [ConfigService],
+  useFactory: (config: ConfigService): MeiliSearch => {
+    const cfg = config.getOrThrow<SearchConfig>('search');
+    return new MeiliSearch({
+      host: cfg.host,
+      apiKey: cfg.apiKey,
+      timeout: cfg.searchTimeoutMs,
+    });
+  },
+};
+```
+
+- [ ] **Step 4: Stub service (so the module compiles now; fleshed out in Task 4)**
+
+Create `src/infrastructure/search-engine/search-engine.service.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import type { SearchEngine } from './search-engine.interface';
+
+@Injectable()
+export class SearchEngineService implements Partial<SearchEngine> {}
+```
+
+- [ ] **Step 5: Module**
+
+Create `src/infrastructure/search-engine/search-engine.module.ts`:
+
+```ts
+import { Global, Module } from '@nestjs/common';
+import { MEILI_CLIENT, SEARCH_ENGINE } from './meili.constants';
+import { meiliClientProvider } from './meili.provider';
+import { SearchEngineService } from './search-engine.service';
+
+/**
+ * MeiliSearch-backed search engine. Exposes the `SEARCH_ENGINE` abstraction
+ * (used by the search-service feature) and the raw `MEILI_CLIENT` (used by the
+ * health indicator). Global so any feature can depend on `SEARCH_ENGINE`.
+ */
+@Global()
+@Module({
+  providers: [
+    meiliClientProvider,
+    { provide: SEARCH_ENGINE, useClass: SearchEngineService },
+  ],
+  exports: [SEARCH_ENGINE, MEILI_CLIENT],
+})
+export class SearchEngineModule {}
+```
+
+- [ ] **Step 6: Wire into AppModule**
+
+In `src/app.module.ts`, add `import { SearchEngineModule } from './infrastructure/search-engine/search-engine.module';` and add `SearchEngineModule` to the infrastructure block of `imports`, immediately after `FileManageModule`.
+
+- [ ] **Step 7: Build**
+
+Run: `pnpm build`
+Expected: succeeds (stub satisfies `Partial<SearchEngine>`).
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/infrastructure/search-engine src/app.module.ts
+git commit -m "feat(search-engine): scaffold SEARCH_ENGINE provider + module"
+```
+
+---
+
+## Task 4: Implement `SearchEngineService`
+
+**Files:**
+- Modify: `src/infrastructure/search-engine/search-engine.service.ts` (replace the stub)
+- Test: `src/infrastructure/search-engine/search-engine.service.spec.ts`
+
+**Interfaces:**
+- Consumes: `MEILI_CLIENT`, `SearchConfig`, `SearchEngine` + `SearchEngineError`.
+- Produces: `SearchEngineService implements SearchEngine`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `src/infrastructure/search-engine/search-engine.service.spec.ts`:
+
+```ts
+import type { ConfigService } from '@nestjs/config';
+import { SearchEngineService } from './search-engine.service';
+import { SearchEngineError } from './search-engine.interface';
+
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
+
+function makeClient() {
+  const index = {
+    updateSettings: jest.fn(async () => ({ taskUid: 2 })),
+    addDocuments: jest.fn(async () => ({ taskUid: 3 })),
+    updateDocuments: jest.fn(async () => ({ taskUid: 4 })),
+    deleteDocuments: jest.fn(async () => ({ taskUid: 5 })),
+    deleteAllDocuments: jest.fn(async () => ({ taskUid: 6 })),
+    search: jest.fn(async () => ({
+      hits: [{ id: 'a' }],
+      totalHits: 1,
+      totalPages: 1,
+      hitsPerPage: 20,
+      page: 1,
+      processingTimeMs: 3,
+    })),
+  };
+  return {
+    index: jest.fn(() => index),
+    createIndex: jest.fn(async () => ({ taskUid: 1 })),
+    isHealthy: jest.fn(async () => true),
+    tasks: {
+      waitForTask: jest.fn(async () => ({ status: 'succeeded', error: undefined })),
+    },
+    __index: index,
+  };
+}
+
+const config = {
+  getOrThrow: () => ({ indexPrefix: 'test_', taskTimeoutMs: 1000 }),
+} as unknown as ConfigService;
+
+describe('SearchEngineService', () => {
+  let client: ReturnType<typeof makeClient>;
+  let service: SearchEngineService;
+
+  beforeEach(() => {
+    client = makeClient();
+    service = new SearchEngineService(client as any, config);
+  });
+
+  it('ensureIndex applies the prefix, creates, and updates settings', async () => {
+    await service.ensureIndex({
+      name: 'docs',
+      primaryKey: 'id',
+      searchableAttributes: ['title'],
+      filterableAttributes: ['ownerId'],
+      sortableAttributes: ['createdAt'],
+    });
+    expect(client.createIndex).toHaveBeenCalledWith('test_docs', { primaryKey: 'id' });
+    expect(client.index).toHaveBeenCalledWith('test_docs');
+    expect(client.__index.updateSettings).toHaveBeenCalled();
+  });
+
+  it('ensureIndex tolerates an already-existing index', async () => {
+    client.createIndex.mockRejectedValueOnce({ code: 'index_already_exists' });
+    await expect(
+      service.ensureIndex({
+        name: 'docs', primaryKey: 'id',
+        searchableAttributes: [], filterableAttributes: [], sortableAttributes: [],
+      }),
+    ).resolves.toBeUndefined();
+    expect(client.__index.updateSettings).toHaveBeenCalled();
+  });
+
+  it('search maps the response into EngineResult', async () => {
+    const res = await service.search('docs', { q: 'hi', page: 1, hitsPerPage: 20 });
+    expect(res.hits).toEqual([{ id: 'a' }]);
+    expect(res.totalHits).toBe(1);
+    expect(res.totalPages).toBe(1);
+  });
+
+  it('waitForTask throws SearchEngineError when a task fails', async () => {
+    client.tasks.waitForTask.mockResolvedValueOnce({
+      status: 'failed',
+      error: { message: 'boom', code: 'bad' },
+    });
+    await expect(service.waitForTask(9)).rejects.toBeInstanceOf(SearchEngineError);
+  });
+
+  it('health returns false when the client throws', async () => {
+    client.isHealthy.mockRejectedValueOnce(new Error('down'));
+    expect(await service.health()).toBe(false);
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `pnpm test -- search-engine.service`
+Expected: FAIL (stub has no methods).
+
+- [ ] **Step 3: Implement the service**
+
+Replace the entire contents of `src/infrastructure/search-engine/search-engine.service.ts`:
+
+```ts
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { MeiliSearch } from 'meilisearch';
+import type { SearchConfig } from '../../config/configurations/search.config';
+import { MEILI_CLIENT } from './meili.constants';
+import {
+  SearchEngineError,
+  type EngineQuery,
+  type EngineResult,
+  type IndexDefinition,
+  type SearchEngine,
+  type TaskRef,
+} from './search-engine.interface';
+
+/**
+ * MeiliSearch-backed implementation of {@link SearchEngine}. All MeiliSearch SDK
+ * specifics are confined to this file — everything above it is index-agnostic.
+ * Mutations return the async task ref so callers can await consistency.
+ */
+@Injectable()
+export class SearchEngineService implements SearchEngine {
+  private readonly logger = new Logger(SearchEngineService.name);
+  private readonly prefix: string;
+  private readonly taskTimeoutMs: number;
+
+  constructor(
+    @Inject(MEILI_CLIENT) private readonly client: MeiliSearch,
+    config: ConfigService,
+  ) {
+    const cfg = config.getOrThrow<SearchConfig>('search');
+    this.prefix = cfg.indexPrefix;
+    this.taskTimeoutMs = cfg.taskTimeoutMs;
+  }
+
+  private uid(index: string): string {
+    return `${this.prefix}${index}`;
+  }
+
+  async ensureIndex(def: IndexDefinition): Promise<void> {
+    const uid = this.uid(def.name);
+    try {
+      const task = await this.client.createIndex(uid, { primaryKey: def.primaryKey });
+      await this.waitForTask(task.taskUid);
+    } catch (error) {
+      if (!this.isAlreadyExists(error)) throw this.wrap(error);
+    }
+    const settings = await this.client.index(uid).updateSettings({
+      searchableAttributes: def.searchableAttributes,
+      filterableAttributes: def.filterableAttributes,
+      sortableAttributes: def.sortableAttributes,
+      ...(def.rankingRules ? { rankingRules: def.rankingRules } : {}),
+      pagination: { maxTotalHits: def.maxTotalHits ?? 1000 },
+    });
+    await this.waitForTask(settings.taskUid);
+  }
+
+  async addOrReplace(index: string, docs: Array<Record<string, unknown>>): Promise<TaskRef> {
+    const task = await this.client.index(this.uid(index)).addDocuments(docs);
+    return { taskUid: task.taskUid };
+  }
+
+  async update(index: string, docs: Array<Record<string, unknown>>): Promise<TaskRef> {
+    const task = await this.client.index(this.uid(index)).updateDocuments(docs);
+    return { taskUid: task.taskUid };
+  }
+
+  async deleteDocuments(index: string, ids: string[]): Promise<TaskRef> {
+    const task = await this.client.index(this.uid(index)).deleteDocuments(ids);
+    return { taskUid: task.taskUid };
+  }
+
+  async deleteByFilter(index: string, filter: string | string[]): Promise<TaskRef> {
+    const task = await this.client.index(this.uid(index)).deleteDocuments({ filter });
+    return { taskUid: task.taskUid };
+  }
+
+  async clearIndex(index: string): Promise<TaskRef> {
+    const task = await this.client.index(this.uid(index)).deleteAllDocuments();
+    return { taskUid: task.taskUid };
+  }
+
+  async search<T = Record<string, unknown>>(
+    index: string,
+    query: EngineQuery,
+  ): Promise<EngineResult<T>> {
+    const res = (await this.client.index(this.uid(index)).search(query.q, {
+      filter: query.filter,
+      sort: query.sort,
+      facets: query.facets,
+      page: query.page,
+      hitsPerPage: query.hitsPerPage,
+      attributesToHighlight: query.attributesToHighlight,
+      attributesToRetrieve: query.attributesToRetrieve,
+    })) as {
+      hits: T[];
+      totalHits?: number;
+      estimatedTotalHits?: number;
+      totalPages?: number;
+      hitsPerPage?: number;
+      page?: number;
+      facetDistribution?: Record<string, Record<string, number>>;
+      processingTimeMs?: number;
+    };
+    return {
+      hits: res.hits,
+      totalHits: res.totalHits ?? res.estimatedTotalHits ?? res.hits.length,
+      page: res.page ?? query.page ?? 1,
+      hitsPerPage: res.hitsPerPage ?? query.hitsPerPage ?? res.hits.length,
+      totalPages: res.totalPages ?? 1,
+      facetDistribution: res.facetDistribution,
+      processingTimeMs: res.processingTimeMs ?? 0,
+    };
+  }
+
+  async waitForTask(taskUid: number): Promise<void> {
+    // meilisearch@0.45.0: client.tasks.waitForTask(uid, { timeOutMs, intervalMs }).
+    // The returned Task carries `.status` and `.error` (verified against the
+    // installed 0.45.0 type definitions).
+    const task = await this.client.tasks.waitForTask(taskUid, {
+      timeOutMs: this.taskTimeoutMs,
+    });
+    if (task.status !== 'succeeded') {
+      throw new SearchEngineError(
+        `Meili task ${taskUid} ${task.status}: ${task.error?.message ?? 'unknown error'}`,
+        task.error?.code,
+      );
+    }
+  }
+
+  async health(): Promise<boolean> {
+    try {
+      return await this.client.isHealthy();
+    } catch {
+      return false;
+    }
+  }
+
+  private isAlreadyExists(error: unknown): boolean {
+    return (error as { code?: string })?.code === 'index_already_exists';
+  }
+
+  private wrap(error: unknown): SearchEngineError {
+    const e = error as { message?: string; code?: string };
+    return new SearchEngineError(e?.message ?? 'search engine error', e?.code);
+  }
+}
+```
+
+- [ ] **Step 4: Run tests + build**
+
+Run: `pnpm test -- search-engine.service`
+Expected: PASS (5 tests). Then `pnpm build` → succeeds.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/infrastructure/search-engine/search-engine.service.ts src/infrastructure/search-engine/search-engine.service.spec.ts
+git commit -m "feat(search-engine): implement MeiliSearch-backed SearchEngineService"
+```
+
+---
+
+## Task 5: Meili health indicator
+
+**Files:**
+- Create: `src/infrastructure/health/meili.health.ts`, `src/infrastructure/health/meili.health.spec.ts`
+- Modify: `src/infrastructure/health/health.module.ts`, `src/infrastructure/health/health.controller.ts`
+
+**Interfaces:**
+- Consumes: `MEILI_CLIENT`, `HealthIndicatorService`.
+- Produces: `MeiliHealthIndicator` with `isHealthy(key: string): Promise<HealthIndicatorResult>`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `src/infrastructure/health/meili.health.spec.ts`:
+
+```ts
+import { MeiliHealthIndicator } from './meili.health';
+
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
+
+describe('MeiliHealthIndicator', () => {
+  const up = jest.fn(() => ({ meili: { status: 'up' } }));
+  const down = jest.fn((d) => ({ meili: { status: 'down', ...d } }));
+  const svc = { check: jest.fn(() => ({ up, down })) } as any;
+
+  it('reports up when the client is healthy', async () => {
+    const client = { isHealthy: jest.fn(async () => true) } as any;
+    await new MeiliHealthIndicator(svc, client).isHealthy('meili');
+    expect(up).toHaveBeenCalled();
+  });
+
+  it('reports down when the client throws', async () => {
+    const client = { isHealthy: jest.fn(async () => { throw new Error('x'); }) } as any;
+    await new MeiliHealthIndicator(svc, client).isHealthy('meili');
+    expect(down).toHaveBeenCalled();
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `pnpm test -- meili.health`
+Expected: FAIL ("Cannot find module './meili.health'").
+
+- [ ] **Step 3: Implement the indicator**
+
+Create `src/infrastructure/health/meili.health.ts`:
+
+```ts
+import { Inject, Injectable } from '@nestjs/common';
+import {
+  HealthIndicatorService,
+  type HealthIndicatorResult,
+} from '@nestjs/terminus';
+import { MeiliSearch } from 'meilisearch';
+import { MEILI_CLIENT } from '../search-engine/meili.constants';
+
+/**
+ * Terminus health indicator that pings MeiliSearch. Mirrors the MinIO indicator.
+ */
+@Injectable()
+export class MeiliHealthIndicator {
+  constructor(
+    private readonly healthIndicatorService: HealthIndicatorService,
+    @Inject(MEILI_CLIENT) private readonly client: MeiliSearch,
+  ) {}
+
+  async isHealthy(key: string): Promise<HealthIndicatorResult> {
+    const indicator = this.healthIndicatorService.check(key);
+    try {
+      const healthy = await this.client.isHealthy();
+      return healthy
+        ? indicator.up()
+        : indicator.down({ message: 'meilisearch not healthy' });
+    } catch (error) {
+      return indicator.down({ message: (error as Error).message });
+    }
+  }
+}
+```
+
+- [ ] **Step 4: Register in the health module**
+
+In `src/infrastructure/health/health.module.ts`, add `import { MeiliHealthIndicator } from './meili.health';` and add `MeiliHealthIndicator` to the `providers` array.
+
+- [ ] **Step 5: Add the check to the controller**
+
+In `src/infrastructure/health/health.controller.ts`: add `import { MeiliHealthIndicator } from './meili.health';`, inject `private readonly meili: MeiliHealthIndicator,` in the constructor, and add to the `check([ … ])` array: `() => this.meili.isHealthy('meilisearch'),`.
+
+- [ ] **Step 6: Run tests + build**
+
+Run: `pnpm test -- meili.health && pnpm build`
+Expected: PASS + build succeeds.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/infrastructure/health
+git commit -m "feat(health): add MeiliSearch health indicator"
+```
+
+---
+
+## Task 6: search-service types + index registry
+
+**Files:**
+- Create: `src/features/search-service/search.constants.ts`, `search.types.ts`, `index-registry.ts`
+- Test: `src/features/search-service/index-registry.spec.ts`
+
+**Interfaces:**
+- Produces: constants `SEARCH_INDEXING_QUEUE`, `SEARCH_INDEX_DOCS_JOB`, `SEARCH_DELETE_DOCS_JOB`, `SEARCH_REINDEX_JOB`, token `SEARCH_INDEX_DEFINITIONS`; types `IndexName`, `SearchFilterValue`, `SearchRequest`, `SearchResults<T>`; `RegisteredIndex` (extends `IndexDefinition` with `ownerScope?`, `allowedFilterFields`, `allowedSortFields`, `source?`); `const APP_SEARCH_INDEXES: RegisteredIndex[]`; `class IndexRegistry` with `has`, `get`, `all`.
+
+- [ ] **Step 1: Constants**
+
+Create `src/features/search-service/search.constants.ts`:
+
+```ts
+/** BullMQ queue that applies index mutations off the request path. */
+export const SEARCH_INDEXING_QUEUE = 'search-indexing';
+
+/** Job: add-or-replace documents in an index. */
+export const SEARCH_INDEX_DOCS_JOB = 'index-docs';
+
+/** Job: delete documents by id from an index. */
+export const SEARCH_DELETE_DOCS_JOB = 'delete-docs';
+
+/** Job: rebuild an index from its registered source. */
+export const SEARCH_REINDEX_JOB = 'reindex';
+
+/** DI token carrying the app's registered index definitions. */
+export const SEARCH_INDEX_DEFINITIONS = Symbol('SEARCH_INDEX_DEFINITIONS');
+```
+
+- [ ] **Step 2: Public types**
+
+Create `src/features/search-service/search.types.ts`:
+
+```ts
+/** Registered index name. Validated against the registry at runtime. */
+export type IndexName = string;
+
+/** A structured filter value from an external caller (never raw Meili syntax). */
+export type SearchFilterValue = string | number | boolean | Array<string | number>;
+
+/** External/internal search request (post-validation). */
+export interface SearchRequest {
+  q: string;
+  page: number;
+  limit?: number;
+  filters?: Record<string, SearchFilterValue>;
+  sort?: string[]; // "field:asc" | "field:desc"
+  facets?: string[];
+  highlight?: string[];
+}
+
+/** Normalised, owner-scoped search response. */
+export interface SearchResults<T> {
+  hits: T[];
+  page: number;
+  limit: number;
+  totalHits: number;
+  totalPages: number;
+  facetDistribution?: Record<string, Record<string, number>>;
+  processingTimeMs: number;
+}
+```
+
+- [ ] **Step 3: Registry**
+
+Create `src/features/search-service/index-registry.ts`:
+
+```ts
+import { Inject, Injectable } from '@nestjs/common';
+import type { IndexDefinition } from '../../infrastructure/search-engine/search-engine.interface';
+import { SEARCH_INDEX_DEFINITIONS } from './search.constants';
+
+/** How an index is tenant-scoped, if at all. */
+export interface OwnerScope {
+  attribute: string;
+  allowPublic?: boolean; // also match rows whose owner attribute IS NULL
+}
+
+/**
+ * A fully-described index: Meili settings + feature-level access rules and an
+ * (optional) rebuild source used by reconciliation.
+ */
+export interface RegisteredIndex extends IndexDefinition {
+  ownerScope?: OwnerScope;
+  allowedFilterFields: string[];
+  allowedSortFields: string[];
+  source?: () => Promise<Array<Record<string, unknown>>>;
+}
+
+/**
+ * The app's registered indexes. Consumers (e.g. the files feature, later)
+ * append their definition here. Empty for now — the engine + service are
+ * generic and gain indexes without any change to this module.
+ */
+export const APP_SEARCH_INDEXES: RegisteredIndex[] = [];
+
+/** In-memory lookup over the registered index definitions. */
+@Injectable()
+export class IndexRegistry {
+  private readonly byName = new Map<string, RegisteredIndex>();
+
+  constructor(@Inject(SEARCH_INDEX_DEFINITIONS) defs: RegisteredIndex[]) {
+    for (const def of defs) {
+      if (this.byName.has(def.name)) {
+        throw new Error(`Duplicate search index definition: ${def.name}`);
+      }
+      this.byName.set(def.name, def);
+    }
+  }
+
+  has(name: string): boolean {
+    return this.byName.has(name);
+  }
+
+  get(name: string): RegisteredIndex | undefined {
+    return this.byName.get(name);
+  }
+
+  all(): RegisteredIndex[] {
+    return [...this.byName.values()];
+  }
+}
+```
+
+- [ ] **Step 4: Write the failing test**
+
+Create `src/features/search-service/index-registry.spec.ts`:
+
+```ts
+import { IndexRegistry, type RegisteredIndex } from './index-registry';
+
+function def(name: string): RegisteredIndex {
+  return {
+    name, primaryKey: 'id',
+    searchableAttributes: [], filterableAttributes: [], sortableAttributes: [],
+    allowedFilterFields: [], allowedSortFields: [],
+  };
+}
+
+describe('IndexRegistry', () => {
+  it('indexes definitions by name', () => {
+    const reg = new IndexRegistry([def('a'), def('b')]);
+    expect(reg.has('a')).toBe(true);
+    expect(reg.get('b')?.primaryKey).toBe('id');
+    expect(reg.all()).toHaveLength(2);
+  });
+
+  it('rejects duplicate names', () => {
+    expect(() => new IndexRegistry([def('a'), def('a')])).toThrow(/Duplicate/);
+  });
+
+  it('returns undefined for unknown names', () => {
+    expect(new IndexRegistry([]).get('nope')).toBeUndefined();
+  });
+});
+```
+
+- [ ] **Step 5: Run tests + build**
+
+Run: `pnpm test -- index-registry && pnpm build`
+Expected: PASS (3 tests) + build succeeds.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/features/search-service/search.constants.ts src/features/search-service/search.types.ts src/features/search-service/index-registry.ts src/features/search-service/index-registry.spec.ts
+git commit -m "feat(search-service): add index registry, constants, and types"
+```
+
+---
+
+## Task 7: `SearchService` — search, owner-scoping, indexing enqueue
+
+**Files:**
+- Create: `src/features/search-service/search.service.ts`, `search.service.spec.ts`
+
+**Interfaces:**
+- Consumes: `SEARCH_ENGINE`, `IndexRegistry`, `SEARCH_INDEXING_QUEUE` (BullMQ `Queue`), `SearchConfig`, `Principal`, job-name constants.
+- Produces: `SearchService` with `onApplicationBootstrap()`, `search<T>(index, request, principal): Promise<SearchResults<T>>`, `enqueueIndex(index, docs)`, `enqueueDelete(index, ids)`, `reindex(index)`. Constructor arity: `(engine, registry, queue, config)`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `src/features/search-service/search.service.spec.ts`:
+
+```ts
+import { BadRequestException, NotFoundException, ServiceUnavailableException } from '@nestjs/common';
+import type { ConfigService } from '@nestjs/config';
+import { SearchEngineError } from '../../infrastructure/search-engine/search-engine.interface';
+import { IndexRegistry, type RegisteredIndex } from './index-registry';
+import { SearchService } from './search.service';
+
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
+
+const filesDef: RegisteredIndex = {
+  name: 'files', primaryKey: 'id',
+  searchableAttributes: ['filename'],
+  filterableAttributes: ['ownerId', 'status'],
+  sortableAttributes: ['createdAt'],
+  allowedFilterFields: ['status'],
+  allowedSortFields: ['createdAt'],
+  ownerScope: { attribute: 'ownerId', allowPublic: true },
+};
+
+const config = {
+  getOrThrow: () => ({ defaultPageSize: 20, maxPageSize: 100 }),
+} as unknown as ConfigService;
+
+function makeService(engineOverrides: Record<string, any> = {}) {
+  const engine = {
+    search: jest.fn(async () => ({
+      hits: [{ id: '1' }], totalHits: 1, page: 1, hitsPerPage: 20,
+      totalPages: 1, processingTimeMs: 2,
+    })),
+    ensureIndex: jest.fn(async () => undefined),
+    ...engineOverrides,
+  };
+  const queue = { add: jest.fn(async () => undefined) };
+  const registry = new IndexRegistry([filesDef]);
+  const service = new SearchService(engine as any, registry, queue as any, config);
+  return { service, engine, queue };
+}
+
+describe('SearchService.search', () => {
+  it('injects an owner filter for a user principal (allowPublic)', async () => {
+    const { service, engine } = makeService();
+    await service.search('files', { q: 'x', page: 1 }, { id: 'user-1' });
+    expect(engine.search.mock.calls[0][1].filter).toEqual([
+      '(ownerId = "user-1" OR ownerId IS NULL)',
+    ]);
+  });
+
+  it('does NOT scope for the system principal', async () => {
+    const { service, engine } = makeService();
+    await service.search('files', { q: 'x', page: 1 }, { id: null });
+    expect(engine.search.mock.calls[0][1].filter).toBeUndefined();
+  });
+
+  it('ANDs allowlisted user filters after the owner clause', async () => {
+    const { service, engine } = makeService();
+    await service.search('files', { q: '', page: 1, filters: { status: 'AVAILABLE' } }, { id: 'u' });
+    expect(engine.search.mock.calls[0][1].filter).toEqual([
+      '(ownerId = "u" OR ownerId IS NULL)',
+      'status = "AVAILABLE"',
+    ]);
+  });
+
+  it('rejects a filter on the owner attribute', async () => {
+    const { service } = makeService();
+    await expect(
+      service.search('files', { q: '', page: 1, filters: { ownerId: 'other' } }, { id: 'u' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('rejects a non-allowlisted filter field', async () => {
+    const { service } = makeService();
+    await expect(
+      service.search('files', { q: '', page: 1, filters: { secret: 'x' } }, { id: null }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+  });
+
+  it('caps limit at maxPageSize', async () => {
+    const { service, engine } = makeService();
+    await service.search('files', { q: '', page: 1, limit: 9999 }, { id: null });
+    expect(engine.search.mock.calls[0][1].hitsPerPage).toBe(100);
+  });
+
+  it('404s on an unknown index', async () => {
+    const { service } = makeService();
+    await expect(
+      service.search('nope', { q: '', page: 1 }, { id: null }),
+    ).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('maps engine failure to 503', async () => {
+    const { service } = makeService({
+      search: jest.fn(async () => { throw new SearchEngineError('down'); }),
+    });
+    await expect(
+      service.search('files', { q: '', page: 1 }, { id: null }),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+  });
+});
+
+describe('SearchService indexing', () => {
+  it('enqueueIndex adds an index-docs job', async () => {
+    const { service, queue } = makeService();
+    await service.enqueueIndex('files', [{ id: '1' }]);
+    expect(queue.add).toHaveBeenCalledWith(
+      'index-docs',
+      { index: 'files', docs: [{ id: '1' }] },
+      expect.objectContaining({ attempts: 3 }),
+    );
+  });
+
+  it('enqueueDelete/reindex validate the index', async () => {
+    const { service } = makeService();
+    await expect(service.enqueueDelete('nope', ['1'])).rejects.toBeInstanceOf(NotFoundException);
+    await expect(service.reindex('nope')).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('onApplicationBootstrap ensures each registered index', async () => {
+    const { service, engine } = makeService();
+    await service.onApplicationBootstrap();
+    expect(engine.ensureIndex).toHaveBeenCalledWith(filesDef);
+  });
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `pnpm test -- search.service`
+Expected: FAIL ("Cannot find module './search.service'").
+
+- [ ] **Step 3: Implement the service**
+
+Create `src/features/search-service/search.service.ts`:
+
+```ts
+import { InjectQueue } from '@nestjs/bullmq';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  ServiceUnavailableException,
+  type OnApplicationBootstrap,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Queue } from 'bullmq';
+import type { Principal } from '../../common/principal';
+import type { SearchConfig } from '../../config/configurations/search.config';
+import { SEARCH_ENGINE } from '../../infrastructure/search-engine/meili.constants';
+import {
+  SearchEngineError,
+  type SearchEngine,
+} from '../../infrastructure/search-engine/search-engine.interface';
+import { IndexRegistry, type RegisteredIndex } from './index-registry';
+import {
+  SEARCH_DELETE_DOCS_JOB,
+  SEARCH_INDEXING_QUEUE,
+  SEARCH_INDEX_DOCS_JOB,
+  SEARCH_REINDEX_JOB,
+} from './search.constants';
+import type {
+  IndexName,
+  SearchFilterValue,
+  SearchRequest,
+  SearchResults,
+} from './search.types';
+
+/**
+ * Search-service. Internal callers (agents / pipeline, via SYSTEM_PRINCIPAL)
+ * and the controller both use `search`; ownership is enforced here so a user
+ * can never widen their scope. Indexing is enqueued (async, idempotent).
+ */
+@Injectable()
+export class SearchService implements OnApplicationBootstrap {
+  private readonly logger = new Logger(SearchService.name);
+  private readonly defaultPageSize: number;
+  private readonly maxPageSize: number;
+
+  constructor(
+    @Inject(SEARCH_ENGINE) private readonly engine: SearchEngine,
+    private readonly registry: IndexRegistry,
+    @InjectQueue(SEARCH_INDEXING_QUEUE) private readonly queue: Queue,
+    config: ConfigService,
+  ) {
+    const cfg = config.getOrThrow<SearchConfig>('search');
+    this.defaultPageSize = cfg.defaultPageSize;
+    this.maxPageSize = cfg.maxPageSize;
+  }
+
+  /** Best-effort settings convergence at boot; never blocks startup on Meili. */
+  async onApplicationBootstrap(): Promise<void> {
+    for (const def of this.registry.all()) {
+      try {
+        await this.engine.ensureIndex(def);
+      } catch (error) {
+        this.logger.warn(
+          `Failed to ensure index "${def.name}": ${(error as Error).message}`,
+        );
+      }
+    }
+  }
+
+  async search<T = Record<string, unknown>>(
+    index: IndexName,
+    request: SearchRequest,
+    principal: Principal,
+  ): Promise<SearchResults<T>> {
+    const def = this.requireIndex(index);
+    const hitsPerPage = Math.min(
+      request.limit ?? this.defaultPageSize,
+      this.maxPageSize,
+    );
+    const filter = this.buildFilter(def, request.filters, principal);
+    const sort = this.buildSort(def, request.sort);
+
+    try {
+      const result = await this.engine.search<T>(index, {
+        q: request.q,
+        filter: filter.length ? filter : undefined,
+        sort: sort.length ? sort : undefined,
+        facets: this.pickFacets(def, request.facets),
+        page: request.page,
+        hitsPerPage,
+        attributesToHighlight: request.highlight,
+      });
+      return {
+        hits: result.hits,
+        page: result.page,
+        limit: result.hitsPerPage,
+        totalHits: result.totalHits,
+        totalPages: result.totalPages,
+        facetDistribution: result.facetDistribution,
+        processingTimeMs: result.processingTimeMs,
+      };
+    } catch (error) {
+      if (error instanceof SearchEngineError) {
+        this.logger.warn(`Search failed on "${index}": ${error.message}`);
+        throw new ServiceUnavailableException('Search is temporarily unavailable');
+      }
+      throw error;
+    }
+  }
+
+  async enqueueIndex(
+    index: IndexName,
+    docs: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    this.requireIndex(index);
+    await this.queue.add(SEARCH_INDEX_DOCS_JOB, { index, docs }, this.jobOpts());
+  }
+
+  async enqueueDelete(index: IndexName, ids: string[]): Promise<void> {
+    this.requireIndex(index);
+    await this.queue.add(SEARCH_DELETE_DOCS_JOB, { index, ids }, this.jobOpts());
+  }
+
+  async reindex(index: IndexName): Promise<void> {
+    this.requireIndex(index);
+    await this.queue.add(SEARCH_REINDEX_JOB, { index }, this.jobOpts());
+  }
+
+  private jobOpts() {
+    return {
+      attempts: 3,
+      backoff: { type: 'exponential', delay: 1000 },
+      removeOnComplete: true,
+      removeOnFail: 100,
+    } as const;
+  }
+
+  private requireIndex(index: string): RegisteredIndex {
+    const def = this.registry.get(index);
+    if (!def) throw new NotFoundException(`Unknown search index "${index}"`);
+    return def;
+  }
+
+  private buildFilter(
+    def: RegisteredIndex,
+    filters: SearchRequest['filters'],
+    principal: Principal,
+  ): string[] {
+    const clauses: string[] = [];
+    if (def.ownerScope && principal.id !== null) {
+      const attr = def.ownerScope.attribute;
+      const own = `${attr} = ${quote(principal.id)}`;
+      clauses.push(def.ownerScope.allowPublic ? `(${own} OR ${attr} IS NULL)` : own);
+    }
+    for (const [field, value] of Object.entries(filters ?? {})) {
+      if (def.ownerScope && field === def.ownerScope.attribute) {
+        throw new BadRequestException(`Filtering on "${field}" is not allowed`);
+      }
+      if (!def.allowedFilterFields.includes(field)) {
+        throw new BadRequestException(`Unknown filter field "${field}"`);
+      }
+      clauses.push(toFilterClause(field, value));
+    }
+    return clauses;
+  }
+
+  private buildSort(def: RegisteredIndex, sort?: string[]): string[] {
+    if (!sort) return [];
+    return sort.map((entry) => {
+      const [field, dir] = entry.split(':');
+      if (!def.allowedSortFields.includes(field) || (dir !== 'asc' && dir !== 'desc')) {
+        throw new BadRequestException(`Invalid sort "${entry}"`);
+      }
+      return `${field}:${dir}`;
+    });
+  }
+
+  private pickFacets(def: RegisteredIndex, facets?: string[]): string[] | undefined {
+    if (!facets) return undefined;
+    const invalid = facets.filter((f) => !def.filterableAttributes.includes(f));
+    if (invalid.length) {
+      throw new BadRequestException(`Unknown facet(s): ${invalid.join(', ')}`);
+    }
+    return facets;
+  }
+}
+
+/** Quote + escape a string value for a Meili filter expression. */
+function quote(value: string): string {
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/** Build one Meili filter clause from a validated field/value pair. */
+function toFilterClause(field: string, value: SearchFilterValue): string {
+  if (Array.isArray(value)) {
+    const list = value
+      .map((v) => (typeof v === 'number' ? String(v) : quote(String(v))))
+      .join(', ');
+    return `${field} IN [${list}]`;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return `${field} = ${value}`;
+  }
+  return `${field} = ${quote(value)}`;
+}
+```
+
+- [ ] **Step 4: Run tests + build**
+
+Run: `pnpm test -- search.service`
+Expected: PASS (11 tests). Then `pnpm build` → succeeds.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/search-service/search.service.ts src/features/search-service/search.service.spec.ts
+git commit -m "feat(search-service): add SearchService with owner-scoping and async indexing"
+```
+
+---
+
+## Task 8: DTO + controller + module + HTTP e2e
+
+**Files:**
+- Create: `src/features/search-service/dto/search-query.dto.ts`, `search.controller.ts`, `search-service.module.ts`, `test/search.e2e-spec.ts`
+- Modify: `src/app.module.ts`
+
+**Interfaces:**
+- Consumes: `SearchService`, `CurrentUser` + `Principal` (common), `ZodValidationPipe` (common), `IndexRegistry`, `APP_SEARCH_INDEXES`, `SEARCH_INDEX_DEFINITIONS`, `SEARCH_INDEXING_QUEUE`.
+- Produces: `searchQuerySchema` + `type SearchQueryDto`; `SearchController` (`POST /search/:index`); `SearchServiceModule` (exports `SearchService`).
+
+- [ ] **Step 1: DTO**
+
+Create `src/features/search-service/dto/search-query.dto.ts`:
+
+```ts
+import { z } from 'zod';
+
+/** External search request. `filters`/`sort` are structured, never raw Meili. */
+export const searchQuerySchema = z.object({
+  q: z.string().default(''),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().optional(),
+  filters: z
+    .record(
+      z.string(),
+      z.union([
+        z.string(),
+        z.number(),
+        z.boolean(),
+        z.array(z.union([z.string(), z.number()])),
+      ]),
+    )
+    .optional(),
+  sort: z.array(z.string()).optional(),
+  facets: z.array(z.string()).optional(),
+  highlight: z.array(z.string()).optional(),
+});
+
+export type SearchQueryDto = z.infer<typeof searchQuerySchema>;
+```
+
+- [ ] **Step 2: Controller**
+
+Create `src/features/search-service/search.controller.ts`:
+
+```ts
+import { Body, Controller, Param, Post } from '@nestjs/common';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import type { Principal } from '../../common/principal';
+import { searchQuerySchema, type SearchQueryDto } from './dto/search-query.dto';
+import { SearchService } from './search.service';
+
+/**
+ * External search API (users). `POST /search/:index` with a JSON query body.
+ * The index is validated against the registry (404 if unknown) and results are
+ * owner-scoped in SearchService via the resolved principal.
+ */
+@Controller('search')
+export class SearchController {
+  constructor(private readonly search: SearchService) {}
+
+  @Post(':index')
+  run(
+    @Param('index') index: string,
+    @Body(new ZodValidationPipe(searchQuerySchema)) body: SearchQueryDto,
+    @CurrentUser() user: Principal,
+  ) {
+    return this.search.search(index, body, user);
+  }
+}
+```
+
+- [ ] **Step 3: Module**
+
+Create `src/features/search-service/search-service.module.ts`:
+
+```ts
+import { BullModule } from '@nestjs/bullmq';
+import { Module } from '@nestjs/common';
+import { APP_SEARCH_INDEXES, IndexRegistry } from './index-registry';
+import { SEARCH_INDEXING_QUEUE, SEARCH_INDEX_DEFINITIONS } from './search.constants';
+import { SearchController } from './search.controller';
+import { SearchService } from './search.service';
+
+/**
+ * Search-service feature. Exposes the external REST API (SearchController) and
+ * the internal SearchService (exported for agents / pipeline modules). Registers
+ * the `search-indexing` BullMQ queue.
+ *
+ * Depends on the global SearchEngineModule (SEARCH_ENGINE) and QueueModule.
+ */
+@Module({
+  imports: [BullModule.registerQueue({ name: SEARCH_INDEXING_QUEUE })],
+  controllers: [SearchController],
+  providers: [
+    { provide: SEARCH_INDEX_DEFINITIONS, useValue: APP_SEARCH_INDEXES },
+    IndexRegistry,
+    SearchService,
+  ],
+  exports: [SearchService],
+})
+export class SearchServiceModule {}
+```
+
+- [ ] **Step 4: Wire into AppModule**
+
+In `src/app.module.ts`, add `import { SearchServiceModule } from './features/search-service/search-service.module';` and add `SearchServiceModule` to the feature block of `imports`, after `FileProcessorModule` (still BEFORE `MastraModule`).
+
+- [ ] **Step 5: Build to confirm DI resolves**
+
+Run: `pnpm build`
+Expected: succeeds.
+
+- [ ] **Step 6: Write the HTTP e2e**
+
+Create `test/search.e2e-spec.ts`:
+
+```ts
+import { INestApplication } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import request from 'supertest';
+import { AppModule } from '../src/app.module';
+
+/**
+ * Search HTTP contract e2e. Boots AppModule (requires Postgres, Redis, MinIO,
+ * and MeiliSearch reachable per `.env`). The app registry is empty for now, so
+ * this asserts the contract: validation + unknown-index handling.
+ * Run with `pnpm test:e2e -- search.e2e`.
+ */
+describe('Search API (e2e)', () => {
+  let app: INestApplication;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [AppModule],
+    }).compile();
+    app = moduleRef.createNestApplication();
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  it('404s on an unknown index', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/search/does-not-exist')
+      .send({ q: 'hello' });
+    expect(res.status).toBe(404);
+  });
+
+  it('400s on an invalid body', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/search/does-not-exist')
+      .send({ page: -1 });
+    expect(res.status).toBe(400);
+  });
+});
+```
+
+- [ ] **Step 7: Run the e2e**
+
+Run: `pnpm test:e2e -- search.e2e`
+Expected: PASS (2 tests). (Requires local services running.)
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/features/search-service/dto src/features/search-service/search.controller.ts src/features/search-service/search-service.module.ts src/app.module.ts test/search.e2e-spec.ts
+git commit -m "feat(search-service): add POST /search/:index API and module wiring"
+```
+
+---
+
+## Task 9: Async indexing worker
+
+**Files:**
+- Create: `src/features/search-service/processors/search-indexing.processor.ts`, `processors/search-indexing.processor.spec.ts`
+- Modify: `src/features/search-service/search-service.module.ts`
+
+**Interfaces:**
+- Consumes: `SEARCH_ENGINE`, `IndexRegistry`, job-name constants, `SEARCH_INDEXING_QUEUE`.
+- Produces: `SearchIndexingProcessor extends WorkerHost` with `process(job)`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `src/features/search-service/processors/search-indexing.processor.spec.ts`:
+
+```ts
+import type { Job } from 'bullmq';
+import { IndexRegistry, type RegisteredIndex } from '../index-registry';
+import { SearchIndexingProcessor } from './search-indexing.processor';
+
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
+
+const docsDef: RegisteredIndex = {
+  name: 'docs', primaryKey: 'id',
+  searchableAttributes: [], filterableAttributes: [], sortableAttributes: [],
+  allowedFilterFields: [], allowedSortFields: [],
+  source: async () => [{ id: '1' }, { id: '2' }],
+};
+
+function makeProcessor() {
+  const engine = {
+    addOrReplace: jest.fn(async () => ({ taskUid: 1 })),
+    deleteDocuments: jest.fn(async () => ({ taskUid: 2 })),
+    clearIndex: jest.fn(async () => ({ taskUid: 3 })),
+    waitForTask: jest.fn(async () => undefined),
+  };
+  const registry = new IndexRegistry([docsDef]);
+  return { processor: new SearchIndexingProcessor(engine as any, registry), engine };
+}
+
+describe('SearchIndexingProcessor', () => {
+  it('applies index-docs and awaits the task', async () => {
+    const { processor, engine } = makeProcessor();
+    await processor.process({ name: 'index-docs', data: { index: 'docs', docs: [{ id: '1' }] } } as Job);
+    expect(engine.addOrReplace).toHaveBeenCalledWith('docs', [{ id: '1' }]);
+    expect(engine.waitForTask).toHaveBeenCalledWith(1);
+  });
+
+  it('applies delete-docs', async () => {
+    const { processor, engine } = makeProcessor();
+    await processor.process({ name: 'delete-docs', data: { index: 'docs', ids: ['1'] } } as Job);
+    expect(engine.deleteDocuments).toHaveBeenCalledWith('docs', ['1']);
+    expect(engine.waitForTask).toHaveBeenCalledWith(2);
+  });
+
+  it('reindex clears then re-adds from the source', async () => {
+    const { processor, engine } = makeProcessor();
+    await processor.process({ name: 'reindex', data: { index: 'docs' } } as Job);
+    expect(engine.clearIndex).toHaveBeenCalledWith('docs');
+    expect(engine.addOrReplace).toHaveBeenCalledWith('docs', [{ id: '1' }, { id: '2' }]);
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `pnpm test -- search-indexing.processor`
+Expected: FAIL ("Cannot find module './search-indexing.processor'").
+
+- [ ] **Step 3: Implement the processor**
+
+Create `src/features/search-service/processors/search-indexing.processor.ts`:
+
+```ts
+import { Processor, WorkerHost } from '@nestjs/bullmq';
+import { Inject, Logger } from '@nestjs/common';
+import type { Job } from 'bullmq';
+import { SEARCH_ENGINE } from '../../../infrastructure/search-engine/meili.constants';
+import type { SearchEngine } from '../../../infrastructure/search-engine/search-engine.interface';
+import { IndexRegistry } from '../index-registry';
+import {
+  SEARCH_DELETE_DOCS_JOB,
+  SEARCH_INDEXING_QUEUE,
+  SEARCH_INDEX_DOCS_JOB,
+  SEARCH_REINDEX_JOB,
+} from '../search.constants';
+
+/**
+ * Consumes the `search-indexing` queue. Each job applies its mutation via
+ * SEARCH_ENGINE and awaits the Meili task so a job only succeeds once the index
+ * has actually converged. Idempotent: documents are keyed by primary key.
+ */
+@Processor(SEARCH_INDEXING_QUEUE)
+export class SearchIndexingProcessor extends WorkerHost {
+  private readonly logger = new Logger(SearchIndexingProcessor.name);
+
+  constructor(
+    @Inject(SEARCH_ENGINE) private readonly engine: SearchEngine,
+    private readonly registry: IndexRegistry,
+  ) {
+    super();
+  }
+
+  async process(job: Job): Promise<void> {
+    switch (job.name) {
+      case SEARCH_INDEX_DOCS_JOB: {
+        const { index, docs } = job.data as {
+          index: string;
+          docs: Array<Record<string, unknown>>;
+        };
+        const { taskUid } = await this.engine.addOrReplace(index, docs);
+        await this.engine.waitForTask(taskUid);
+        break;
+      }
+      case SEARCH_DELETE_DOCS_JOB: {
+        const { index, ids } = job.data as { index: string; ids: string[] };
+        const { taskUid } = await this.engine.deleteDocuments(index, ids);
+        await this.engine.waitForTask(taskUid);
+        break;
+      }
+      case SEARCH_REINDEX_JOB: {
+        const { index } = job.data as { index: string };
+        await this.reindex(index);
+        break;
+      }
+      default:
+        this.logger.warn(`Unknown job "${job.name}"`);
+    }
+  }
+
+  private async reindex(index: string): Promise<void> {
+    const def = this.registry.get(index);
+    if (!def?.source) {
+      this.logger.warn(`Reindex "${index}" skipped: no source registered`);
+      return;
+    }
+    const docs = await def.source();
+    const cleared = await this.engine.clearIndex(index);
+    await this.engine.waitForTask(cleared.taskUid);
+    if (docs.length) {
+      const added = await this.engine.addOrReplace(index, docs);
+      await this.engine.waitForTask(added.taskUid);
+    }
+    this.logger.log(`Reindexed "${index}" with ${docs.length} documents`);
+  }
+}
+```
+
+- [ ] **Step 4: Register in the module**
+
+In `src/features/search-service/search-service.module.ts`: add `import { SearchIndexingProcessor } from './processors/search-indexing.processor';` and add `SearchIndexingProcessor` to the `providers` array (after `SearchService`).
+
+- [ ] **Step 5: Run tests + build**
+
+Run: `pnpm test -- search-indexing.processor && pnpm build`
+Expected: PASS (3 tests) + build succeeds.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/features/search-service/processors src/features/search-service/search-service.module.ts
+git commit -m "feat(search-service): add async indexing worker"
+```
+
+---
+
+## Task 10: Reconciliation scheduler
+
+**Files:**
+- Create: `src/features/search-service/schedulers/search-reconciliation.scheduler.ts`, `schedulers/search-reconciliation.scheduler.spec.ts`
+- Modify: `src/features/search-service/search-service.module.ts`
+
+**Interfaces:**
+- Consumes: `SEARCH_INDEXING_QUEUE` (`Queue`), `IndexRegistry`, `SEARCH_REINDEX_JOB`.
+- Produces: `SearchReconciliationScheduler` with `scheduleReconciliation(everyMs?): Promise<void>`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `src/features/search-service/schedulers/search-reconciliation.scheduler.spec.ts`:
+
+```ts
+import { IndexRegistry, type RegisteredIndex } from '../index-registry';
+import { SearchReconciliationScheduler } from './search-reconciliation.scheduler';
+
+/* eslint-disable @typescript-eslint/no-unsafe-argument */
+
+const withSource: RegisteredIndex = {
+  name: 'docs', primaryKey: 'id',
+  searchableAttributes: [], filterableAttributes: [], sortableAttributes: [],
+  allowedFilterFields: [], allowedSortFields: [],
+  source: async () => [],
+};
+const noSource: RegisteredIndex = {
+  name: 'bare', primaryKey: 'id',
+  searchableAttributes: [], filterableAttributes: [], sortableAttributes: [],
+  allowedFilterFields: [], allowedSortFields: [],
+};
+
+describe('SearchReconciliationScheduler', () => {
+  it('enqueues a repeatable reindex only for indexes with a source', async () => {
+    const queue = { add: jest.fn(async () => undefined) };
+    const registry = new IndexRegistry([withSource, noSource]);
+    const scheduler = new SearchReconciliationScheduler(queue as any, registry);
+
+    await scheduler.scheduleReconciliation(1000);
+
+    expect(queue.add).toHaveBeenCalledTimes(1);
+    expect(queue.add).toHaveBeenCalledWith(
+      'reindex',
+      { index: 'docs' },
+      expect.objectContaining({ repeat: { every: 1000 }, jobId: 'reindex:docs' }),
+    );
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `pnpm test -- search-reconciliation.scheduler`
+Expected: FAIL ("Cannot find module …").
+
+- [ ] **Step 3: Implement the scheduler**
+
+Create `src/features/search-service/schedulers/search-reconciliation.scheduler.ts`:
+
+```ts
+import { InjectQueue } from '@nestjs/bullmq';
+import { Injectable } from '@nestjs/common';
+import { Queue } from 'bullmq';
+import { IndexRegistry } from '../index-registry';
+import { SEARCH_INDEXING_QUEUE, SEARCH_REINDEX_JOB } from '../search.constants';
+
+/**
+ * Registers a repeatable full-reindex sweep per index that declares a rebuild
+ * source — the drift-repair path (Postgres is the source of truth; Meili is a
+ * rebuildable read model). Not called at boot (mirrors FileReconciliationScheduler);
+ * invoke `scheduleReconciliation` from an ops/bootstrap hook once Redis is up.
+ */
+@Injectable()
+export class SearchReconciliationScheduler {
+  constructor(
+    @InjectQueue(SEARCH_INDEXING_QUEUE) private readonly queue: Queue,
+    private readonly registry: IndexRegistry,
+  ) {}
+
+  async scheduleReconciliation(everyMs = 86_400_000): Promise<void> {
+    for (const def of this.registry.all()) {
+      if (!def.source) continue;
+      await this.queue.add(
+        SEARCH_REINDEX_JOB,
+        { index: def.name },
+        {
+          repeat: { every: everyMs },
+          jobId: `reindex:${def.name}`,
+          removeOnComplete: true,
+          removeOnFail: true,
+        },
+      );
+    }
+  }
+}
+```
+
+- [ ] **Step 4: Register in the module**
+
+In `src/features/search-service/search-service.module.ts`: add `import { SearchReconciliationScheduler } from './schedulers/search-reconciliation.scheduler';` and add `SearchReconciliationScheduler` to `providers`.
+
+- [ ] **Step 5: Run tests + build**
+
+Run: `pnpm test -- search-reconciliation.scheduler && pnpm build`
+Expected: PASS (1 test) + build succeeds.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/features/search-service/schedulers src/features/search-service/search-service.module.ts
+git commit -m "feat(search-service): add reconciliation reindex scheduler"
+```
+
+---
+
+## Task 11: Live-Meili integration test + docs + final verification
+
+**Files:**
+- Create: `test/search-engine.e2e-spec.ts`
+- Modify: `.env.example` (add the new vars — Step 3)
+
+**Interfaces:**
+- Consumes: `ConfigModule`, `SearchEngineModule`, `SEARCH_ENGINE`, `SearchEngine`.
+
+- [ ] **Step 1: Write the integration test against the live engine**
+
+Create `test/search-engine.e2e-spec.ts`:
+
+```ts
+import { INestApplication } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import { ConfigModule } from '../src/config/config.module';
+import { SEARCH_ENGINE } from '../src/infrastructure/search-engine/meili.constants';
+import { SearchEngineModule } from '../src/infrastructure/search-engine/search-engine.module';
+import type { SearchEngine } from '../src/infrastructure/search-engine/search-engine.interface';
+
+/**
+ * Integration test against the live MeiliSearch (see MEILISEARCH_* in `.env`).
+ * Verifies ensureIndex → addOrReplace → waitForTask → search → filter → clear
+ * against a throwaway index. Run with `pnpm test:e2e -- search-engine.e2e`.
+ */
+jest.setTimeout(30_000);
+
+describe('SearchEngine (integration)', () => {
+  let app: INestApplication;
+  let engine: SearchEngine;
+  const index = 'e2e_docs';
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [ConfigModule, SearchEngineModule],
+    }).compile();
+    app = moduleRef.createNestApplication();
+    await app.init();
+    engine = app.get<SearchEngine>(SEARCH_ENGINE);
+
+    await engine.ensureIndex({
+      name: index,
+      primaryKey: 'id',
+      searchableAttributes: ['title'],
+      filterableAttributes: ['ownerId'],
+      sortableAttributes: ['rank'],
+    });
+  });
+
+  afterAll(async () => {
+    const cleared = await engine.clearIndex(index);
+    await engine.waitForTask(cleared.taskUid);
+    await app?.close();
+  });
+
+  it('indexes and searches documents', async () => {
+    const task = await engine.addOrReplace(index, [
+      { id: '1', title: 'hello world', ownerId: 'u1', rank: 1 },
+      { id: '2', title: 'goodbye world', ownerId: 'u2', rank: 2 },
+    ]);
+    await engine.waitForTask(task.taskUid);
+
+    const all = await engine.search(index, { q: 'world', page: 1, hitsPerPage: 20 });
+    expect(all.totalHits).toBe(2);
+
+    const scoped = await engine.search(index, {
+      q: 'world', page: 1, hitsPerPage: 20, filter: ['ownerId = "u1"'],
+    });
+    expect(scoped.totalHits).toBe(1);
+    expect((scoped.hits[0] as { id: string }).id).toBe('1');
+  });
+
+  it('reports healthy', async () => {
+    expect(await engine.health()).toBe(true);
+  });
+});
+```
+
+- [ ] **Step 2: Run the integration test (catches any SDK-signature drift)**
+
+Run: `pnpm test:e2e -- search-engine.e2e`
+Expected: PASS (2 tests). **If `waitForTask` errors**, reconcile `SearchEngineService.waitForTask` with the installed `meilisearch` version (e.g. `client.waitForTask(uid, { timeOutMs })` vs `client.tasks.waitForTask(uid, { timeout })`) — this is the one SDK-version-sensitive call. Fix in `search-engine.service.ts` only; re-run Task 4 unit tests + this test.
+
+- [ ] **Step 3: Document the new env vars**
+
+Add these lines to `.env.example` under a `# MeiliSearch / search engine` comment. The three connection vars already exist; add the tuning vars:
+
+```
+MEILISEARCH_USE_SSL=false
+MEILISEARCH_INDEX_PREFIX=
+MEILISEARCH_TASK_TIMEOUT_MS=10000
+MEILISEARCH_SEARCH_TIMEOUT_MS=5000
+SEARCH_DEFAULT_PAGE_SIZE=20
+SEARCH_MAX_PAGE_SIZE=100
+```
+
+> If editing `.env.example` is permission-blocked, tell the user these lines and let them add them. All have defaults, so the app runs without them.
+
+- [ ] **Step 4: Full verification sweep**
+
+Run: `pnpm lint && pnpm build && pnpm test`
+Expected: lint clean, build succeeds, ALL unit tests pass.
+Then: `pnpm test:e2e -- search.e2e` and `pnpm test:e2e -- search-engine.e2e`
+Expected: PASS (requires local Postgres, Redis, MinIO, MeiliSearch).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add test/search-engine.e2e-spec.ts .env.example
+git commit -m "test(search-engine): add live-Meili integration test and env docs"
+```
+
+---
+
+## Self-Review (completed by plan author)
+
+**Spec coverage** — every design section maps to a task:
+- §3 Config → Task 1. §4 Provider/interface/service → Tasks 3–4. §4.3 Health → Task 5.
+- §5.1 Registry → Task 6. §5.2 Internal API → Tasks 7 (+9). §5.3 Controller → Task 8. §5.4 Contract → Tasks 6 (types) + 8 (DTO).
+- §6 Indexing/reconciliation → Tasks 9–10. §7 Security/scoping → Task 7 (+ DTO Task 8). §8 Resilience → Task 7 (503) + Task 9 (retries). §9 Observability → loggers throughout. §10 Shared utils → Task 2. §11 Testing → unit tests each task + e2e Tasks 8 & 11. §12 Files-later → registry mechanism (Task 6), unused until files register. §13 Phasing → task order.
+
+**Placeholder scan** — no TBD/TODO/"add error handling"/"similar to Task N"; every code step has complete code. The single SDK-version caveat in `waitForTask` is concrete code plus an explicit verification step (Task 11 Step 2), not a placeholder.
+
+**Type consistency** — `SearchEngine`, `EngineQuery`/`EngineResult`, `RegisteredIndex`, `SearchRequest`/`SearchResults`, and the job-name/queue constants are used with identical names/signatures across producing and consuming tasks. `SearchService` constructor arity `(engine, registry, queue, config)` is stable from Task 7 onward. `ensureIndex`/`addOrReplace`/`waitForTask`/`clearIndex`/`deleteDocuments` names match between interface (Task 3), service (Task 4), processor (Task 9), and integration test (Task 11).

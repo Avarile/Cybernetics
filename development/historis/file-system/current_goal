@@ -1,0 +1,16 @@
+# Goal: design and implement the file manage module based on the MinIO
+
+1. implement a file manage module in src/infrastructure/file-manage, this module is based on the MinIO(So, it should have a script to init a MinIO specifically for this application)
+2. implement a file manage processor(which expose apis to interact with users / agents) in src/features/file-processor
+   1. This file-processor will expose a service that can be utilized by other modules(mostly be used for agents and other modules in data processing pipeline).
+   2. This file-processor will expose apis that can be accessed externally as well(this will mostly be used by users)
+3. let me know your professional suggestion.
+4. This a professional / mutual / production ready module, design it that way
+
+## Reference / Docs:
+
+- [NestJS Documentation](https://docs.nestjs.com/techniques/file-upload#file-validation)
+
+## Action:
+
+Design the file managing module and output in [development/current_session/current_design]

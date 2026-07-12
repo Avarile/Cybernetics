@@ -31,9 +31,7 @@ export class SessionCacheService {
   }
 
   /** Returns parsed session data, or `null` if absent/expired. */
-  async get<T = Record<string, unknown>>(
-    sessionId: string,
-  ): Promise<T | null> {
+  async get<T = Record<string, unknown>>(sessionId: string): Promise<T | null> {
     const raw = await this.redis.get(this.key(sessionId));
     return raw ? (JSON.parse(raw) as T) : null;
   }

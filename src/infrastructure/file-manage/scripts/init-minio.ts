@@ -1,4 +1,3 @@
-/* eslint-disable no-console */
 import { config as loadEnv } from 'dotenv';
 import { Client } from 'minio';
 import { validateEnv } from '../../../config/env.validation';
@@ -16,11 +15,11 @@ async function initMinio(): Promise<void> {
   loadEnv();
   const env = validateEnv(process.env);
   const client = new Client({
-    endPoint: env.MINIO_ENDPOINT,
+    endPoint: env.MINIO_HOST,
     port: env.MINIO_PORT,
     useSSL: env.MINIO_USE_SSL,
-    accessKey: env.MINIO_ACCESS_KEY,
-    secretKey: env.MINIO_SECRET_KEY,
+    accessKey: env.MINIO_ROOT_USER,
+    secretKey: env.MINIO_ROOT_PASSWORD,
     region: env.MINIO_REGION,
   });
 

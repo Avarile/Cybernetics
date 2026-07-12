@@ -24,16 +24,14 @@ async function runSeeders(): Promise<void> {
 
   try {
     if (seeders.length === 0) {
-      // eslint-disable-next-line no-console
       console.log('No seeders registered — nothing to seed.');
       return;
     }
     for (const seeder of seeders) {
-      // eslint-disable-next-line no-console
       console.log(`Seeding: ${seeder.name}`);
       await seeder.run(db);
     }
-    // eslint-disable-next-line no-console
+
     console.log('Seeding complete.');
   } finally {
     await pool.end();
@@ -41,7 +39,6 @@ async function runSeeders(): Promise<void> {
 }
 
 runSeeders().catch((error) => {
-  // eslint-disable-next-line no-console
   console.error('Seeding failed:', error);
   process.exit(1);
 });

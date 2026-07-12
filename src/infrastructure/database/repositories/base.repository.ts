@@ -1,8 +1,4 @@
-import {
-  eq,
-  type InferInsertModel,
-  type InferSelectModel,
-} from 'drizzle-orm';
+import { eq, type InferInsertModel, type InferSelectModel } from 'drizzle-orm';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 import type { DrizzleDB } from '../drizzle.constants';
 

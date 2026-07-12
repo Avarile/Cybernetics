@@ -1,16 +1,59 @@
 # Goal: design and implement the file manage module based on the MinIO
 
-1. implement a file manage module in src/infrastructure/file-manage, this module is based on the MinIO(So, it should have a script to init a MinIO specifically for this application)
-2. implement a file manage processor(which expose apis to interact with users / agents) in src/features/file-processor
-   1. This file-processor will expose a service that can be utilized by other modules(mostly be used for agents and other modules in data processing pipeline).
-   2. This file-processor will expose apis that can be accessed externally as well(this will mostly be used by users)
+1. implement a search engine provider module in src/infrastructure/search-engine based on the MeiliSearch. This Meilisearch instance is already running locally, the params are in .env
+2. implement a search engine service module (which expose apis and internal service to interact with users / agents/ other modules) in src/features/search-service
+   1. This search-service will expose a service that can be utilized by other modules(mostly be used for agents and other modules in data processing pipeline).
+   2. This search-service will expose apis that can be accessed externally as well(this will mostly be used by users)
 3. let me know your professional suggestion.
 4. This a professional / mutual / production ready module, design it that way
 
 ## Reference / Docs:
 
-- [NestJS Documentation](https://docs.nestjs.com/techniques/file-upload#file-validation)
+- [MeiliSearch Doc - Features](https://www.meilisearch.com/docs/getting_started/features)
+- [MeiliSearch Doc - Glossary](https://www.meilisearch.com/docs/getting_started/glossary)
+- [MeiliSearch Doc - Best Practice](https://www.meilisearch.com/docs/getting_started/good_practices)
+- [MeiliSearch Doc - SDK](https://www.meilisearch.com/docs/getting_started/sdks/javascript)
+- [MeiliSearch Doc - examples](https://www.meilisearch.com/docs/getting_started/sdks/javascript#full-example)
 
 ## Action:
 
 Design the file managing module and output in [development/current_session/current_design]
+
+
+
+What shipped
+
+A generic, production-grade MeiliSearch search capability on branch dev (16 commits, 9043393..2383b6c), mirroring your existing file-manage/OBJECT_STORAGE conventions:
+
+- src/infrastructure/search-engine/ — index-agnostic SEARCH_ENGINE abstraction over the MeiliSearch client (@Global), raw MEILI_CLIENT, search config namespace, Terminus health indicator.
+- src/features/search-service/ — index registry, SearchService (owner-scoped search + async indexing), POST /search/:index controller, BullMQ indexing worker (payload-validated), reconciliation scheduler.
+- src/common/ — Principal, ZodValidationPipe, CurrentUser promoted for reuse.
+- The files index is cleanly deferred (empty registry) — it plugs in later via one registry entry + mapper + lifecycle hook, no engine/service changes.
+
+Verification
+
+Every task was TDD'd, individually reviewed (spec + quality), and the security-critical owner-scoping got an adversarial Opus review. Final whole-branch review: READY TO MERGE. Last sweep, against live MeiliSearch: lint clean, build clean, unit 64/64, search.e2e 2/2, search-engine.e2e 2/2.
+
+Two execution decisions worth knowing (now in project memory)
+
+1. Pinned meilisearch@0.45.0 (you chose this) — the latest 0.59 is ESM-only and breaks under your CommonJS/Node-20 baseline. Don't pnpm update it past 0.45.x without an ESM migration.
+2. E2E specs boot focused module subsets, not AppModule — a pre-existing repo-wide issue (Mastra → an ESM dep Jest can't transform) also breaks your app.e2e-spec.ts.
+
+Action needed from you
+
+- Add 6 tuning vars to .env.example — I'm blocked from it by your settings' Read(./.env.*) deny rule. All have code defaults, so nothing breaks meanwhile:
+MEILISEARCH_USE_SSL=false
+MEILISEARCH_INDEX_PREFIX=
+MEILISEARCH_TASK_TIMEOUT_MS=10000
+MEILISEARCH_SEARCH_TIMEOUT_MS=5000
+SEARCH_DEFAULT_PAGE_SIZE=20
+SEARCH_MAX_PAGE_SIZE=100
+
+Non-blocking follow-ups (from the final review)
+
+- Align facet validation to allowedFilterFields (verified not exploitable today — Meili scopes facet counts to the owner-filtered set).
+- When real auth lands: ensure a missing x-user-id does not resolve to the system principal (current placeholder → unscoped; same posture as FileController, no exposure today with an empty registry).
+- MEILISEARCH_PORT schema default is 7700 but your deploy uses 30770 (your .env has it; only a defaults-only deploy would miss).
+- Add MeiliSearch to docker-compose (Postgres/Redis/MinIO are there; I started Meili manually this session — containers left running).
+
+Your uncommitted WIP (MinIO cleanups, the development/ planning docs incl. current_design + current_implementation_plan) is untouched and still staged for you to handle. The per-task ledger is at .superpowers/sdd/progress.md.

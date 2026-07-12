@@ -13,9 +13,7 @@ import { DEFAULT_QUEUE } from '../queue.constants';
  */
 @Injectable()
 export class ExampleScheduler {
-  constructor(
-    @InjectQueue(DEFAULT_QUEUE) private readonly queue: Queue,
-  ) {}
+  constructor(@InjectQueue(DEFAULT_QUEUE) private readonly queue: Queue) {}
 
   async scheduleHeartbeat(): Promise<void> {
     await this.queue.add(

@@ -1,487 +1,521 @@
-# Cybernetics — File Management Module Design
+# Design — Search Engine Module (MeiliSearch)
 
-> Status: **Approved design.** Implementation follows this document.
-> Scope: a MinIO-backed object-storage infrastructure module and a user/agent-facing
-> file-processor feature module.
-> Stack additions: **MinIO** (object storage) · **`minio`** JS SDK · presigned-URL transfer.
+> Status: **Design / awaiting review** · Session workflow: goal → **design** → plan → implement
+> Author: pairing session · Target stack: NestJS 11 · Drizzle · BullMQ · MeiliSearch v1.22.1
 
-## 1. Overview & Goals
+---
 
-Add production-grade file management to the existing NestJS 11 application in two layers that mirror
-the established `infrastructure` vs `features` split:
+## 1. Overview
 
-1. **`src/infrastructure/file-manage`** — a low-level, MinIO-specific, `@Global()` module. It knows
-   nothing about HTTP, database rows, ownership, or validation policy. Its only responsibility is
-   *talking to object storage*, behind a narrow, swappable `ObjectStorage` interface. It ships an
-   idempotent **init script** that provisions MinIO for this application (bucket, policy, lifecycle).
+Introduce a **generic, production-grade full-text search capability** built on a
+locally-running MeiliSearch instance, split across the two layers this codebase
+already uses:
 
-2. **`src/features/file-processor`** — the domain feature. It owns the `files` metadata table, the
-   upload/download **lifecycle state machine**, validation policy, the **external REST API** (for
-   users), and the **internal service** (for agents and data-pipeline modules). It depends on
-   `file-manage`, `database`, and `queue`.
+- **Infrastructure provider** — `src/infrastructure/search-engine` — an
+  index-agnostic `SEARCH_ENGINE` abstraction over the MeiliSearch client,
+  exactly mirroring how `src/infrastructure/file-manage` wraps MinIO behind
+  `OBJECT_STORAGE`.
+- **Feature service** — `src/features/search-service` — exposes (a) an
+  **internal service** consumed by agents, the data-processing pipeline, and
+  other modules, and (b) an **external HTTP API** for end users. It owns an
+  **index registry**, async indexing, and access-scoping.
 
-**Design principles** (inherited from the app design): one cohesive `@Module` per concern; strongly
-typed config via `@nestjs/config` + Zod `registerAs`; DI tokens as string constants; provider
-factories reading `ConfigService.getOrThrow<T>()`; `OnApplicationShutdown` for connection cleanup;
-Drizzle code-first schema with `baseColumns` + `BaseRepository`; Terminus health indicators;
-`docker-compose` for local infra.
+### 1.1 Goals
 
-**Key architectural decision — transfer is presigned-URL-only.** Object bytes never pass through the
-Nest process for external clients. This is the most scalable choice (the app process is not a data
-pipe) and it shapes the rest of the design: an upload becomes a three-step lifecycle, and validation
-moves from Multer interceptors to *declared-metadata policy checks* + *post-upload verification*.
+1. A reusable, multi-index search engine that any current or future module can
+   register an index with and push documents to.
+2. An internal, in-process search/index API for agents & pipeline modules.
+3. An external, owner-scoped HTTP search API for users.
+4. Consistency between the source of truth (Postgres) and the index via async,
+   idempotent indexing plus a reconciliation/reindex path.
+5. Production concerns first-class: config validation, health checks, security
+   (tenant isolation, filter-injection prevention), resilience, observability,
+   and tests.
 
-## 2. Tech Stack Additions
+### 1.2 Scope for THIS iteration
 
-| Concern | Choice | Packages |
+**Build now:**
+- The generic `SEARCH_ENGINE` provider + config + health indicator.
+- The `search-service` feature: index registry, internal service, external
+  `POST /search/:index` API, async indexing (BullMQ) + reconciliation, and
+  server-side owner-scoping — all generic.
+- Promotion of shared utilities (`ZodValidationPipe`, `CurrentUser`,
+  `Principal`) into `src/common`.
+
+**Deferred ("files later"):**
+- The concrete `files` index definition + document mapper.
+- The file-lifecycle → index hook (enqueueing index/delete jobs from the
+  file-processor). §12 specifies exactly how this plugs in; the file-processor
+  is **not** modified this session.
+
+### 1.3 Non-goals
+
+- Extracting and indexing file **body text** (PDF/DOCX content). The current
+  processing pipeline computes checksums and sniffs MIME only; text extraction
+  is a separate, larger effort.
+- Vector / semantic search (MeiliSearch supports it, but out of scope here).
+- Meilisearch tenant tokens for client-side isolation (the abstraction exposes
+  the capability, but access control is enforced server-side — see §7).
+
+---
+
+## 2. Architecture
+
+Layering follows the established convention: `infrastructure/*` holds
+`@Global()` technical capabilities behind DI-token abstractions; `features/*`
+holds controllers + services serving both external callers and in-process
+principals (`SYSTEM_PRINCIPAL`).
+
+```
+                external users                 agents / pipeline / modules
+                      │                                     │
+                      ▼                                     ▼
+          POST /search/:index                    SearchService (internal API)
+              (SearchController)          ┌───────────────┴───────────────┐
+                      │                   │                               │
+                      └──────────►  SearchService  ◄── enqueueIndex/Delete/reindex
+                                          │                               │
+                    owner-scope filter    │                    ┌──────────▼──────────┐
+                    injection (server)    │                    │  search-indexing    │
+                                          │                    │  BullMQ queue       │
+                                          ▼                    └──────────┬──────────┘
+                                   SEARCH_ENGINE  ◄─── worker applies ─────┘
+                                  (infrastructure)         + waitForTask
+                                          │
+                                          ▼
+                                    MeiliSearch (local)
+```
+
+### 2.1 Module layout
+
+```
+src/infrastructure/search-engine/
+  search-engine.module.ts            # @Global; provides MEILI_CLIENT + SEARCH_ENGINE
+  meili.constants.ts                 # DI tokens (symbols) + type aliases
+  meili.provider.ts                  # builds MeiliSearch client from validated config
+  search-engine.interface.ts         # SearchEngine abstraction + supporting types
+  search-engine.service.ts           # MeiliSearch-backed, index-agnostic impl
+
+src/config/configurations/
+  search.config.ts                   # registerAs('search', …)   (+ env.validation.ts, config.module.ts)
+
+src/infrastructure/health/
+  meili.health.ts                    # Terminus indicator (mirrors minio.health.ts; wired into health.module.ts)
+
+src/features/search-service/
+  search-service.module.ts
+  search.controller.ts               # external HTTP API (POST /search/:index)
+  search.service.ts                  # internal API + used by controller
+  index-registry.ts                  # index definitions (name, primaryKey, settings, ownerScope)
+  search.types.ts                    # request/response types, IndexName, access-scope types
+  search.constants.ts                # queue name, job names, DI tokens
+  processors/search-indexing.processor.ts       # BullMQ worker (idempotent apply)
+  schedulers/search-reconciliation.scheduler.ts # periodic drift repair / reindex trigger
+  dto/search-query.dto.ts            # Zod schema for the external search request
+
+src/common/                          # promoted shared utilities (see §10)
+  principal.ts                       # Principal + SYSTEM_PRINCIPAL
+  decorators/current-user.decorator.ts
+  pipes/zod-validation.pipe.ts
+```
+
+### 2.2 Dependency & registration
+
+- `SearchEngineModule` is `@Global()` (like `FileManageModule`) so any feature
+  can inject `SEARCH_ENGINE` without importing it.
+- `SearchServiceModule` registers the `search-indexing` BullMQ queue
+  (`BullModule.registerQueue`), the controller, service, processor, scheduler,
+  and the index registry provider.
+- `AppModule` import order: add `SearchEngineModule` in the infrastructure
+  block (after `FileManageModule`), and `SearchServiceModule` in the feature
+  block. **Mastra stays last** (its catch-all controller must not shadow routes).
+- `MeiliHealthIndicator` is added to `HealthModule` alongside the MinIO one.
+
+---
+
+## 3. Configuration
+
+New `search` config namespace, validated in the single Zod env schema
+(`env.validation.ts`) and exposed via `registerAs('search', …)`, consumed by the
+provider, health indicator, and feature.
+
+The three connection variables below already exist in `.env`
+(`MEILISEARCH_HOST`, `MEILISEARCH_PORT`, `MEILISEARCH_MASTER_KEY`); the rest are
+new and follow the same `MEILISEARCH_`/`SEARCH_` naming. The master key is a
+secret — it is read from env only and never logged, returned, or committed.
+
+| Env var | Type / default | Purpose |
 |---|---|---|
-| Object storage | **MinIO** (S3-compatible), local via Docker | — |
-| Storage client | **`minio`** JS SDK (ships its own types) | `minio` |
-| Content sniffing | Magic-byte verification in the async job (defense-in-depth) | `file-type` |
-| Transfer | **Presigned URLs only** (external); direct SDK streaming (in-process) | (via `minio`) |
-| Metadata store | **PostgreSQL** via existing Drizzle wiring | (existing) |
-| Async processing | Existing **BullMQ** queue (new `file-processing` queue) | (existing) |
+| `MEILISEARCH_HOST` | string, `localhost` | Meili host (**existing**) |
+| `MEILISEARCH_PORT` | int, `30770` | Meili port (**existing**) |
+| `MEILISEARCH_MASTER_KEY` | string (required in prod) | admin key used server-side (**existing**) |
+| `MEILISEARCH_USE_SSL` | bool, `false` | http vs https when composing the URL (new) |
+| `MEILISEARCH_INDEX_PREFIX` | string, `''` | optional namespace prefix for index names (env isolation) (new) |
+| `MEILISEARCH_TASK_TIMEOUT_MS` | int, `10000` | max wait for a Meili async task in the worker (new) |
+| `MEILISEARCH_SEARCH_TIMEOUT_MS` | int, `5000` | client request timeout for search (new) |
+| `SEARCH_DEFAULT_PAGE_SIZE` | int, `20` | default `limit` (new) |
+| `SEARCH_MAX_PAGE_SIZE` | int, `100` | hard cap on `limit` (new) |
 
-`minio` is the only required new runtime dependency. `file-type` is used by the async processor for
-declared-vs-actual MIME verification; it is optional and can be added when that check is enabled.
+`search.config.ts` composes the client URL (`http(s)://host:port`) and exposes a
+typed `SearchConfig`. A `superRefine` (matching the existing MinIO rule) rejects
+an empty `MEILISEARCH_MASTER_KEY` when `NODE_ENV=production`.
 
-The `minio` client is wrapped behind the `ObjectStorage` interface so that swapping to AWS S3,
-Cloudflare R2, or GCS later is a single provider change, not a rewrite.
+---
 
-## 3. Folder Structure (additions only)
+## 4. Infrastructure — `SEARCH_ENGINE` provider
 
-```
-Cybernetics/
-├── docker-compose.yml                     # + minio service (9000 API / 9001 console)
-├── package.json                           # + "storage:init" script; + "minio" dep
-├── .env.example                           # + MINIO_* and FILE_* variables
-├── src/
-│   ├── config/
-│   │   ├── config.module.ts               # + load storageConfig
-│   │   ├── env.validation.ts              # + MINIO_* / FILE_* Zod fields
-│   │   └── configurations/
-│   │       └── storage.config.ts          # registerAs('storage', ...) — MinIO + file policy
-│   ├── infrastructure/
-│   │   ├── file-manage/
-│   │   │   ├── file-manage.module.ts      # @Global: MINIO_CLIENT + OBJECT_STORAGE providers
-│   │   │   ├── minio.constants.ts         # MINIO_CLIENT / OBJECT_STORAGE tokens
-│   │   │   ├── minio.provider.ts          # factory: new Minio.Client(...) from config
-│   │   │   ├── object-storage.interface.ts# ObjectStorage abstraction (swappable seam)
-│   │   │   ├── object-storage.service.ts  # minio-backed implementation
-│   │   │   └── scripts/
-│   │   │       └── init-minio.ts          # idempotent: bucket + policy + lifecycle (pnpm storage:init)
-│   │   ├── database/
-│   │   │   └── schema/
-│   │   │       ├── file.schema.ts         # files table + fileStatus pgEnum
-│   │   │       └── index.ts               # + export * from './file.schema'
-│   │   └── health/
-│   │       ├── minio.health.ts            # MinioHealthIndicator (bucketExists ping)
-│   │       ├── health.controller.ts       # + minio indicator
-│   │       └── health.module.ts           # + MinioHealthIndicator provider
-│   └── features/
-│       └── file-processor/
-│           ├── file-processor.module.ts   # registerQueue('file-processing'); wires everything
-│           ├── file.controller.ts         # external REST (users)
-│           ├── file.service.ts            # internal API (agents/pipeline) + lifecycle orchestration
-│           ├── file.repository.ts         # extends BaseRepository<typeof files>
-│           ├── file.constants.ts          # queue name, status literals, policy defaults
-│           ├── dto/
-│           │   ├── initiate-upload.dto.ts # Zod: filename, mimeType, size, sha256?, metadata?
-│           │   ├── complete-upload.dto.ts
-│           │   ├── query-files.dto.ts     # pagination + filters
-│           │   └── zod-validation.pipe.ts # small ZodValidationPipe (project already uses Zod)
-│           ├── processors/
-│           │   └── file-processing.processor.ts  # WorkerHost: checksum backfill + magic-byte check + hooks
-│           └── schedulers/
-│               └── file-reconciliation.scheduler.ts  # repeatable: expire PENDING, purge orphans
-└── test/
-    └── file-processor.e2e-spec.ts         # e2e: initiate → (mock PUT) → complete → download-url → delete
-```
-
-## 4. Layered Architecture
-
-### 4.1 Infrastructure — `file-manage`
-
-A `@Global()` module exposing exactly one useful thing: the `OBJECT_STORAGE` provider (typed as the
-`ObjectStorage` interface). The `MINIO_CLIENT` token is internal (also exported for the health check).
-
-**`ObjectStorage` interface** — the swappable seam. Every method is object-store-generic (no MinIO
-type leaks into consumers):
+Two DI tokens, mirroring `MINIO_CLIENT` / `OBJECT_STORAGE`:
 
 ```ts
-interface PresignedTarget { url: string; fields?: Record<string, string>; expiresIn: number }
-interface StatResult { size: number; etag: string; contentType?: string; lastModified: Date }
+// meili.constants.ts
+export const MEILI_CLIENT = Symbol('MEILI_CLIENT');    // raw client (health + advanced)
+export const SEARCH_ENGINE = Symbol('SEARCH_ENGINE');  // index-agnostic abstraction
+```
 
-interface ObjectStorage {
-  // Presigned (external, out-of-process clients)
-  presignedPutUrl(key: string, opts: { expiresIn: number }): Promise<PresignedTarget>;
-  presignedPostPolicy(key: string, opts: {                     // hard edge enforcement
-    expiresIn: number; maxSize: number; contentType?: string;
-  }): Promise<PresignedTarget>;
-  presignedGetUrl(key: string, opts: {
-    expiresIn: number; downloadFilename?: string;
-  }): Promise<PresignedTarget>;
+`meili.provider.ts` builds the client from config (stateless HTTP client, so —
+like MinIO — no shutdown lifecycle needed):
 
-  // Direct SDK access (in-process callers: internal service, reconciliation, async job)
-  putObject(key: string, body: Readable | Buffer, opts?: {
-    size?: number; contentType?: string;
-  }): Promise<{ etag: string }>;
-  getObjectStream(key: string): Promise<Readable>;
-  statObject(key: string): Promise<StatResult>;
-  objectExists(key: string): Promise<boolean>;
-  removeObject(key: string): Promise<void>;
+```ts
+new MeiliSearch({ host, apiKey, timeout: searchTimeoutMs });
+```
 
-  // Provisioning (used by init script + health)
-  ensureBucket(): Promise<void>;
-  bucketName(): string;
+### 4.1 The `SearchEngine` abstraction (illustrative)
+
+Index-agnostic; knows nothing about files or any domain. All mutating ops return
+a task reference so callers (the worker) can await consistency off the hot path.
+
+```ts
+export interface IndexDefinition {
+  name: string;
+  primaryKey: string;
+  searchableAttributes: string[];
+  filterableAttributes: string[];
+  sortableAttributes: string[];
+  rankingRules?: string[];
+  settings?: Partial<MeiliIndexSettings>;   // faceting, typoTolerance, pagination.maxTotalHits, etc.
+}
+
+export interface EngineQuery {
+  q: string;
+  filter?: string | string[];   // built server-side ONLY (never raw user input — §7)
+  sort?: string[];
+  facets?: string[];
+  page?: number;                // 1-based; maps to Meili page/hitsPerPage
+  hitsPerPage?: number;
+  attributesToRetrieve?: string[];
+  attributesToHighlight?: string[];
+  attributesToCrop?: string[];
+}
+
+export interface EngineResult<T> {
+  hits: T[];
+  totalHits: number;
+  page: number;
+  hitsPerPage: number;
+  totalPages: number;
+  facetDistribution?: Record<string, Record<string, number>>;
+  processingTimeMs: number;
+}
+
+export interface TaskRef { taskUid: number; }
+
+export interface SearchEngine {
+  ensureIndex(def: IndexDefinition): Promise<void>;            // create if absent + updateSettings (idempotent)
+  addOrReplace<T>(index: string, docs: T[]): Promise<TaskRef>;
+  update<T>(index: string, docs: Array<Partial<T>>): Promise<TaskRef>;
+  deleteDocuments(index: string, ids: string[]): Promise<TaskRef>;
+  deleteByFilter(index: string, filter: string | string[]): Promise<TaskRef>;
+  clearIndex(index: string): Promise<TaskRef>;
+  search<T>(index: string, query: EngineQuery): Promise<EngineResult<T>>;
+  multiSearch<T>(queries: Array<{ index: string } & EngineQuery>): Promise<Array<EngineResult<T>>>;
+  waitForTask(taskUid: number): Promise<'succeeded' | 'failed' | 'canceled'>;
+  generateTenantToken(searchRules: unknown, opts?: { expiresAt?: Date }): string; // capability; unused now
+  health(): Promise<boolean>;
 }
 ```
 
-**`minio.provider.ts`** — a `useFactory` building `new Minio.Client({ endPoint, port, useSSL,
-accessKey, secretKey, region })` from `config.getOrThrow<StorageConfig>('storage')`. The MinIO client
-is a stateless HTTP client (no persistent socket pool to drain), so **no `OnApplicationShutdown`
-lifecycle is required** — a deliberate, documented difference from `DatabaseModule`/`redis.provider`.
+### 4.2 `SearchEngineService` responsibilities
 
-**`object-storage.service.ts`** — the `minio`-backed `ObjectStorage` implementation. Reads the bucket
-and presign defaults from config; translates the generic interface into `minio` SDK calls.
+- Translate the abstraction into `meilisearch` SDK calls against
+  `client.index(prefix + name)`.
+- Apply `MEILISEARCH_INDEX_PREFIX` centrally so callers use bare index names.
+- `ensureIndex`: `getIndex`-or-`createIndex`, then `updateSettings` — safe to run
+  on every boot; converges settings.
+- Map `page`/`hitsPerPage` to Meili's exhaustive pagination (returns
+  `totalHits`/`totalPages`), honoring the per-index `pagination.maxTotalHits`.
+- `waitForTask` polls `client.tasks.waitForTask(uid, { timeOutMs })`; on `failed`
+  it reads the task error and throws a typed `SearchEngineError`.
+- Never accept a raw Meili filter string from outside its callers — filters are
+  composed from typed inputs by the feature layer.
 
-### 4.2 Feature — `file-processor`
+### 4.3 Health indicator
 
-Owns policy, persistence, lifecycle, and both consumer surfaces. Imports are resolved from the global
-`file-manage`, `database`, and `queue` modules; the feature only `registerQueue({ name:
-'file-processing' })` and provides its own controller/service/repository/processor/scheduler.
+`MeiliHealthIndicator` mirrors `MinioHealthIndicator`: calls `client.health()`
+(or `isHealthy()`), returns Terminus `up()`/`down()`. Registered in
+`HealthModule` and surfaced by the existing health controller.
 
-## 5. Upload/Download Lifecycle (presigned-only)
+---
 
-Because bytes bypass Nest, an upload is a **state machine**, not a single request.
+## 5. Feature — `search-service`
 
-```
-┌── POST /files (initiate) ─────────────────────────────────────────────────────┐
-│  • validate declared { filename, mimeType, size, sha256? } against policy       │
-│    (Zod DTO: MIME allowlist, size ≤ FILE_MAX_SIZE)                              │
-│  • dedup: if sha256 given and an AVAILABLE row already references that content, │
-│    short-circuit — create a new metadata row pointing at the SAME objectKey,    │
-│    return { fileId, deduplicated: true } and NO upload URL                       │
-│  • else compute objectKey, insert files row status=PENDING                       │
-│  • return { fileId, upload: presignedPostPolicy(key, { maxSize, contentType }) } │
-└─────────────────────────────────────────────────────────────────────────────────┘
-                                    │
-                    client POSTs bytes DIRECTLY to MinIO
-                                    │
-┌── POST /files/:id/complete (finalize) ────────────────────────────────────────┐
-│  • statObject(key): verify object exists, size ≤ policy, capture etag/size      │
-│  • if declared sha256 present, record it (definitive verify deferred to job)     │
-│  • transition PENDING → AVAILABLE (reject if not currently PENDING / mismatch)   │
-│  • enqueue { fileId } on the 'file-processing' queue                             │
-│  • return the file metadata                                                      │
-└─────────────────────────────────────────────────────────────────────────────────┘
+### 5.1 Index registry
 
-Download:  GET /files/:id/download-url → presignedGetUrl(key, { ttl, downloadFilename })
-```
-
-**Status enum** (`fileStatus` pgEnum): `PENDING` → `AVAILABLE`, with an
-`AVAILABLE → QUARANTINED` branch when the async job detects a declared-vs-actual mismatch (§6).
-Deletion is **orthogonal** to status: it is handled by the shared `isDeleted` / `deletedAt` soft-delete
-columns from `baseColumns` (see §8/§9), not a `DELETED` status. A stale `PENDING` whose upload never
-completes is soft-deleted by the reconciliation job.
-
-**Size enforcement uses `presignedPostPolicy`** (POST) rather than a bare presigned PUT, because the
-POST policy supports a signed `content-length-range` condition — MinIO rejects an oversized upload at
-the edge. Size is *also* re-checked at complete via `statObject` (defense-in-depth; a rejected object
-is removed).
-
-## 6. Validation Strategy (re: the referenced NestJS file-upload doc)
-
-The referenced doc's techniques (`FileInterceptor` + `ParseFilePipe` + `FileTypeValidator` /
-`MaxFileSizeValidator`) assume multipart bodies **flow through the Nest process**. Under presigned-only
-transfer they do not — so those pipes never fire. The equivalent guarantees are enforced at three
-points instead, and this deviation is intentional and documented:
-
-1. **Initiate (declared-metadata policy, Zod):** MIME allowlist and `size ≤ FILE_MAX_SIZE`. Rejects
-   obviously-invalid requests before any URL is issued.
-2. **Edge (POST policy):** `content-length-range` on the presigned POST — MinIO enforces the size cap
-   during the actual upload.
-3. **Complete + async (verification):** `statObject` confirms real size/type; the `file-processing`
-   job streams the object once to (a) compute/verify **SHA-256** and (b) run **magic-byte
-   verification** (`file-type`) so a declared `image/png` that is actually something else is flagged.
-   On a mismatch the job transitions the file `AVAILABLE → QUARANTINED` (§8) and records the reason in
-   `metadata`, so agents/consumers never treat an unverified-mismatched file as usable.
-
-## 7. Consumer Surfaces
-
-### 7.1 External REST API (`file.controller.ts`) — for users
-
-| Method | Route | Body / Query | Returns |
-|---|---|---|---|
-| `POST` | `/files` | `{ filename, mimeType, size, sha256?, metadata? }` | `{ fileId, upload?, deduplicated }` |
-| `POST` | `/files/:id/complete` | — | file metadata |
-| `GET` | `/files/:id` | — | file metadata |
-| `GET` | `/files` | `?page&limit&status&mimeType` | paginated metadata (owner-scoped) |
-| `GET` | `/files/:id/download-url` | `?ttl` | `{ url, expiresIn }` |
-| `DELETE` | `/files/:id` | — | `204` (soft-delete) |
-
-DTOs are Zod schemas validated by a small `ZodValidationPipe`. Errors surface as `400` with the Zod
-issue list (consistent with the app's env-validation style).
-
-**Auth seam.** No auth module exists yet, so authorization is built as a *seam*, not skipped:
-- `files.ownerId` column is populated from a `@CurrentUser()` param decorator (currently reads a
-  trusted header / returns a configurable dev principal; swapped for real identity later).
-- Every read/mutate path in `FileService` performs an **ownership check** (`ownerId` must match).
-- Controller carries a `@UseGuards()` placeholder ready to bind a real `AuthGuard`.
-
-This keeps files owner-scoped from day one; wiring real authentication is a future auth-module task,
-not a redesign.
-
-### 7.2 Internal Service API (`file.service.ts`) — for agents & pipeline modules
-
-`presigned-only` governs **external, out-of-process clients**. Agents and pipeline modules run
-**in-process**, sharing the process with the MinIO client — forcing them through a presigned HTTP
-round-trip to MinIO would be a pointless self-call. The internal service therefore additionally
-exposes **direct server-side helpers** that go straight through `ObjectStorage` (no HTTP hop). This is
-the server-side equivalent of "the client talks straight to MinIO," not an API-bandwidth path.
+Central declaration of every index, its Meili settings, and its access rule.
+Consumers add a definition here (files later). At `OnApplicationBootstrap`, the
+service calls `SEARCH_ENGINE.ensureIndex(def)` for each registered index so
+settings are converged at startup.
 
 ```ts
-class FileService {
-  // ── Lifecycle (shared with the controller) ──
-  initiateUpload(input, owner): Promise<{ fileId; upload?; deduplicated }>;
-  completeUpload(fileId, owner): Promise<FileMetadata>;
-  getMetadata(fileId, owner): Promise<FileMetadata>;
-  list(query, owner): Promise<Paginated<FileMetadata>>;
-  softDelete(fileId, owner): Promise<void>;
-
-  // ── Presigned URLs (for handing a URL to an OUT-OF-PROCESS tool) ──
-  getUploadUrl(input, owner): Promise<PresignedTarget>;
-  getDownloadUrl(fileId, owner, opts?): Promise<PresignedTarget>;
-
-  // ── Direct server-side transfer (IN-PROCESS agents / pipeline) ──
-  putFromStream(body: Readable | Buffer, meta, owner): Promise<FileMetadata>; // uploads + AVAILABLE row
-  getContentStream(fileId, owner): Promise<Readable>;                          // streams bytes in-process
+export interface RegisteredIndex extends IndexDefinition {
+  ownerScope?: { attribute: string; allowPublic?: boolean }; // e.g. { attribute: 'ownerId', allowPublic: true }
+  allowedFilterFields: string[];    // whitelist projected onto filterableAttributes
+  allowedSortFields: string[];      // whitelist projected onto sortableAttributes
 }
 ```
 
-`putFromStream` streams straight to MinIO via `ObjectStorage.putObject`, computes SHA-256 inline
-(bytes are already in hand), applies dedup, and inserts an `AVAILABLE` row directly — collapsing the
-three-step external flow into one call for trusted in-process callers. `getContentStream` returns the
-object bytes as a `Readable` for pipeline consumers that need the content in-process.
+`IndexName` is a union/enum of registered names; the controller/service reject
+unknown indexes with `404`/`400` before touching Meili.
 
-## 8. Data Model — `files` table
+### 5.2 Internal `SearchService` API (agents / pipeline / modules)
 
 ```ts
-export const fileStatus = pgEnum('file_status', ['PENDING', 'AVAILABLE', 'QUARANTINED']);
+class SearchService {
+  // indexing (async, idempotent — enqueues BullMQ jobs, returns immediately)
+  enqueueIndex(index: IndexName, docs: object[]): Promise<void>;
+  enqueueDelete(index: IndexName, ids: string[]): Promise<void>;
+  reindex(index: IndexName): Promise<void>;   // enqueues a full rebuild job
 
-export const files = pgTable('files', {
-  ...baseColumns,          // id (uuid), createdAt, updatedAt, isDeleted, deletedAt
-  ownerId: uuid('owner_id'),                       // nullable: system/agent-owned files
-  bucket: varchar('bucket', { length: 63 }).notNull(),
-  objectKey: varchar('object_key', { length: 1024 }).notNull(),
-  originalFilename: varchar('original_filename', { length: 512 }).notNull(),
-  mimeType: varchar('mime_type', { length: 255 }).notNull(),
-  size: bigint('size', { mode: 'number' }).notNull(),
-  checksumSha256: varchar('checksum_sha256', { length: 64 }),   // null until known
-  status: fileStatus('status').notNull().default('PENDING'),
-  metadata: jsonb('metadata').$type<Record<string, unknown>>().notNull().default({}),
-}, (t) => [
-  index('files_owner_idx').on(t.ownerId),
-  index('files_checksum_idx').on(t.checksumSha256),
-  index('files_status_created_idx').on(t.status, t.createdAt),
-]);
+  // querying (synchronous)
+  search<T>(index: IndexName, request: SearchRequest, principal: Principal): Promise<SearchResults<T>>;
+}
 ```
 
-Soft-delete is provided by `baseColumns` (`isDeleted` boolean + nullable `deletedAt`), the repo-wide
-convention — **not** a `DELETED` status. `objectKey` is **content-addressed** when a checksum is known
-(`sha256/ab/cd/<hash>`), so identical content maps to one physical object; otherwise a UUID-based key
-is used and the checksum is backfilled by the async job. Migrations via the existing
-`pnpm db:generate` → `pnpm db:migrate` (forward-only).
+Internal callers use `SYSTEM_PRINCIPAL` and therefore search **unscoped** (see
+§7). This is the surface agents and other modules depend on.
 
-**`file.repository.ts`** extends `BaseRepository<typeof files>` with: `findAvailableByChecksum(sha256)`,
-`findByOwner(...)`, `findStalePending(olderThan)`, `findPurgeable()`, `markStatus(id, status, patch)`,
-`softDelete(id)`, `countLiveReferences(objectKey)`, and `hardDelete(id)`.
-
-## 9. Dedup + Soft-delete via Content-Addressing
-
-The two selected features share one mechanism:
-
-- **Dedup:** on initiate, if the client declares a `sha256` that already has an `AVAILABLE` row, a new
-  metadata row is created pointing at the *same* `objectKey` and **no upload URL is issued** (the
-  bytes already exist). Multiple rows legitimately reference one object.
-- **Soft-delete:** `DELETE` sets `isDeleted=true` + `deletedAt` and returns immediately. The object is
-  **not** removed inline — because other rows may reference it.
-- **Reconciliation (`file-reconciliation.scheduler.ts`, repeatable BullMQ job):**
-  1. Soft-delete stale `PENDING` rows older than `FILE_PENDING_TTL` (their uploads never completed).
-  2. For objects with **no live referencing row** (live = any `isDeleted=false` row), remove the MinIO
-     object, then hard-delete the soft-deleted rows. `countLiveReferences(objectKey)` gates the purge
-     so a shared object
-     is never deleted while still referenced.
-
-## 10. Health
-
-`MinioHealthIndicator` (`minio.health.ts`) follows the existing Terminus pattern
-(`DatabaseHealthIndicator` / `RedisHealthIndicator`): it calls `bucketExists()` on the app bucket and
-reports `up`/`down`. Wired into `HealthController.check()` as a fourth indicator alongside `database`,
-`redis`, and `memory_heap`.
-
-## 11. Configuration & Environment
-
-New namespaced config `storage.config.ts` (`registerAs('storage', …)`) + Zod fields in
-`env.validation.ts`, consumed by `minio.provider`, `object-storage.service`, and `file.service`
-policy.
-
-`.env.example` additions:
+### 5.3 External `SearchController`
 
 ```
-# MinIO / object storage
-MINIO_ENDPOINT=localhost
-MINIO_PORT=9000
-MINIO_USE_SSL=false
-MINIO_ACCESS_KEY=minioadmin
-MINIO_SECRET_KEY=minioadmin
-MINIO_REGION=us-east-1
-MINIO_BUCKET=cybernetics
-MINIO_PRESIGN_EXPIRY=300          # presigned URL TTL (seconds)
-
-# File policy
-FILE_MAX_SIZE=52428800            # 50 MiB max upload
-FILE_ALLOWED_MIME=                # csv allowlist; empty = allow-all (dev)
-FILE_PENDING_TTL=3600             # seconds before an unfinished upload is expired
+POST /search/:index          # body: SearchRequest (Zod-validated); index path param validated against registry
 ```
 
-Zod validation mirrors the existing style (`booleanFromEnv` for `MINIO_USE_SSL`, `z.coerce.number()`
-for ports/sizes, sensible dev defaults). **Production note:** `MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`
-must be overridden from the `minioadmin` defaults; the Zod schema forbids the default pair when
-`NODE_ENV=production` (fail-fast at boot).
+- Resolves the acting `Principal` via `@CurrentUser()` (placeholder today; real
+  auth guard binds later — same pattern as `FileController`).
+- Delegates to `SearchService.search(index, body, principal)`.
+- Non-system principals are **owner-scoped server-side** (§7); a user cannot
+  broaden the scope.
+- (Design allows a later `POST /search` multi-index/federated endpoint via
+  `multiSearch`; not built now.)
 
-## 12. Local Infra — Docker & Init Script
+### 5.4 Request / response contract
 
-**`docker-compose.yml`** gains a `minio` service (mirrors the postgres/redis entries):
+`SearchRequest` (Zod DTO):
 
-```yaml
-  minio:
-    image: minio/minio:latest
-    container_name: cybernetics-minio
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-      MINIO_API_CORS_ALLOW_ORIGIN: 'http://localhost:3000'   # browser presigned POST
-    ports:
-      - '9000:9000'    # S3 API
-      - '9001:9001'    # web console
-    volumes:
-      - minio-data:/data
-    healthcheck:
-      test: ['CMD', 'mc', 'ready', 'local']
-      interval: 5s
-      timeout: 5s
-      retries: 10
-# volumes: + minio-data
+```ts
+{
+  q: string;                                    // '' allowed → returns by ranking/sort
+  page?: number;             // 1-based, default 1
+  limit?: number;            // default SEARCH_DEFAULT_PAGE_SIZE, capped at SEARCH_MAX_PAGE_SIZE
+  filters?: Record<string, string | number | boolean | Array<string | number>>;  // field → value(s), allowlisted
+  sort?: string[];           // "field:asc" | "field:desc", allowlisted
+  facets?: string[];         // allowlisted
+  highlight?: string[];      // subset of searchable attributes
+}
 ```
 
-CORS is set at the **MinIO server** level (`MINIO_API_CORS_ALLOW_ORIGIN`) because the `minio` JS SDK
-does not expose bucket-CORS configuration; the init script owns bucket + policy + lifecycle only.
+`SearchResults<T>`:
 
-**`scripts/init-minio.ts`** (run via `pnpm storage:init`, a standalone `ts-node -r
-tsconfig-paths/register` runner like `seed.ts` — decoupled from runtime DI). It is **idempotent**:
-1. `ensureBucket()` — create `MINIO_BUCKET` if absent.
-2. Buckets are **private by default** in MinIO — no anonymous policy is set; all access is via
-   presigned URLs.
-3. Set the **lifecycle rule** that expires the `tmp/` prefix (via `Filter.Prefix`). The
-   abort-incomplete-multipart-upload rule is omitted — the `minio` JS SDK v8 cannot serialise it
-   (`InvalidArgument`), and presigned single PUT/POST uploads don't create multipart uploads. Configure
-   it with `mc ilm` if large multipart uploads are later introduced.
-4. Log a summary. Safe to re-run.
-
-## 13. Composition & Wiring
-
-`app.module.ts` import additions:
-- `FileManageModule` — with the other infrastructure modules (global; before features).
-- `FileProcessorModule` — in the feature-module section (**before** `MastraModule`, which must stay
-  last due to its catch-all controller).
-
-`HealthModule` gains the `MinioHealthIndicator` provider; `ConfigModule` loads `storageConfig`;
-`schema/index.ts` re-exports `file.schema`.
-
-`package.json` scripts: `"storage:init": "ts-node -r tsconfig-paths/register
-src/infrastructure/file-manage/scripts/init-minio.ts"`.
-
-## 14. Build & Run
-
-```bash
-pnpm install                       # pulls in "minio"
-docker compose up -d               # postgres + redis + minio
-pnpm db:generate && pnpm db:migrate# create the files table
-pnpm storage:init                  # provision the MinIO bucket/policy/lifecycle
-pnpm start:dev
-curl localhost:3000/health         # { status: ok, ... minio: up }
+```ts
+{
+  hits: T[];
+  page: number;
+  limit: number;
+  totalHits: number;
+  totalPages: number;
+  facetDistribution?: Record<string, Record<string, number>>;
+  processingTimeMs: number;
+}
 ```
 
-## 15. Dependency Manifest (additions)
+The service converts the structured `filters`/`sort` into a validated Meili
+filter/sort expression (see §7.2) — clients never send raw Meili syntax.
 
-**Runtime:** `minio`.
-**Runtime (feature-flagged):** `file-type` (async magic-byte verification).
-No new dev dependencies — `ts-node` / `tsconfig-paths` (init runner) and `supertest` (e2e) already
-exist.
+---
 
-## 16. Professional Suggestions (goal item #3)
+## 6. Indexing & consistency (BullMQ + reconciliation)
 
-- **Private bucket + short presign TTL (~5 min).** No public objects; every access is a fresh signed
-  URL. Download URLs carry `response-content-disposition` for correct filenames.
-- **`presignedPostPolicy` over bare PUT** for uploads — it's the only presigned mechanism that lets
-  MinIO enforce a size limit (`content-length-range`) at the edge.
-- **Content-addressed keys** — free dedup + integrity, and they make the reconciliation/purge logic
-  a simple reference count.
-- **Magic-byte verification in the async job** — declared MIME is untrusted; verify actual bytes and
-  quarantine mismatches before a file is treated as usable by agents.
-- **Ownership seam now, auth later** — `ownerId` + service-level checks mean the future auth module
-  is a drop-in, and no file is ever un-scoped.
-- **Keep `minio` behind `ObjectStorage`** — S3 / R2 / GCS becomes a one-provider swap.
-- **Bucket lifecycle rules** — auto-abort incomplete multipart uploads so failed presigned uploads
-  don't accumulate storage cost.
-- **Future extensions (out of v1 scope):** antivirus scan seam (deselected for v1), per-owner
-  quotas, image thumbnail/preview derivatives, object versioning, and concrete async processors
-  (text extraction / embeddings) for the agent pipeline — all fit the existing seams without redesign.
+Postgres remains the source of truth; MeiliSearch is a derived read model kept
+current asynchronously. This reuses the file-processor's queue/worker pattern
+verbatim.
 
-## 17. Implementation Notes & Decisions
+- **Queue:** `search-indexing`. **Jobs:** `index-docs`, `delete-docs`,
+  `reindex`. Job options mirror file-processor: `attempts: 3`, exponential
+  backoff, `removeOnComplete: true`, `removeOnFail: 100`.
+- **Worker (`SearchIndexingProcessor`):** applies the mutation through
+  `SEARCH_ENGINE` and calls `waitForTask` so a job only succeeds once Meili has
+  actually applied it. Failures throw → BullMQ retries → dead-letter after
+  attempts.
+- **Idempotency:** documents carry the index's primary key, so `index-docs` is
+  add-or-replace and safe on retry; `delete-docs` by id is naturally idempotent.
+- **Reconciliation (`SearchReconciliationScheduler`):** periodic (and on-demand
+  via `reindex`) drift repair. The generic mechanism (enqueue a `reindex` job,
+  rebuild from the registered source, clear orphans) is built now; the concrete
+  per-index source query is provided by each consumer when it registers
+  (files later — §12).
 
-- **Transfer is presigned-only for external clients; in-process callers use direct SDK streaming.**
-  This is the load-bearing decision (§5, §7.2). It is a deliberate interpretation: "presigned-only"
-  governs out-of-process clients; in-process agents legitimately use `ObjectStorage` directly.
-- **The referenced NestJS validation pipes do not apply** under presigned transfer; equivalent
-  guarantees are enforced at initiate / edge / complete+async instead (§6). Documented deviation.
-- **No shutdown lifecycle for the MinIO client** — it is a stateless HTTP client, unlike the pg pool
-  and ioredis client.
-- **Checksum semantics:** SHA-256 is client-declared at initiate (enables dedup) and definitively
-  computed/verified in the async job (the job streams the object regardless). Integrity is not
-  claimed to be enforced by MinIO on a bare presigned PUT — size is enforced via POST policy, content
-  is verified server-side post-upload.
-- **Migrations forward-only** (consistent with the app): the `files` table + `file_status` enum ship
-  as one generated migration.
-- **Soft-delete uses the shared `baseColumns` convention** (`isDeleted` + nullable `deletedAt`), not a
-  `DELETED` status. During implementation `baseColumns` was found to have gained a soft-delete
-  convention (with a misconfigured `deletedAt` — `notNull().defaultNow().$onUpdate()`, i.e. a second
-  `updatedAt`). Per decision, `baseColumns.deletedAt` was fixed to a proper nullable marker and the
-  `files` table adopted `isDeleted` for deletion; `status` covers only processing/availability.
-- **Lifecycle rule limitation:** the `minio` JS SDK v8 rejects an `AbortIncompleteMultipartUpload`
-  lifecycle rule (`InvalidArgument`). Only the `tmp/`-prefix expiration rule is applied (§12).
-- **Env var naming — reconcile with the existing `.env`.** This design uses
-  `MINIO_ENDPOINT` / `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` (+ `MINIO_PORT`, `MINIO_BUCKET`). The
-  repo's current `.env` instead has `MINIO_HOST` / `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` and
-  `MINIO_PORT=30900` (an external/k8s MinIO). Until reconciled, the app's MinIO vars fall back to
-  Zod defaults (`localhost:9000` / `minioadmin`). **Action:** either add the design's variable names
-  to `.env` (pointing at the intended MinIO) or, if the app should target the existing MinIO, keep
-  `MINIO_PORT=30900` and add `MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY` with that instance's credentials.
+Why async (per decision): keeps request latency and success decoupled from Meili
+availability; a Meili outage degrades search but never blocks writes.
 
-## 18. Verification (executed against live services)
+---
 
-Built and **verified end-to-end** against `docker compose` PostgreSQL + Redis + MinIO:
+## 7. Security & multi-tenancy
 
-- `pnpm typecheck` (tsc, 0 errors), `pnpm build` (nest/SWC, 0 issues), `pnpm test` (27 unit tests pass:
-  env validation + `file.util` + `FileService`).
-- `pnpm db:migrate` creates the `files` table; `pnpm storage:init` provisions the bucket + lifecycle.
-- App boots; `GET /health` → `{ status: ok, database: up, redis: up, minio: up, memory_heap: up }`.
-- Full HTTP lifecycle (21 assertions) passed: initiate → presigned POST to MinIO → complete →
-  metadata → download-url → byte-for-byte content match → list → dedup short-circuit → soft-delete →
-  404. Ownership isolation (other principal → 404) and oversize rejection (400) confirmed. DB shows the
-  original + dedup copy sharing one content-addressed object; the async worker verified/backfilled the
-  checksum with no false quarantine.
-```
+### 7.1 Server-side owner scoping (decision)
+
+For an index with an `ownerScope`, `SearchService.search` computes the effective
+filter based on the principal:
+
+- **System principal** (`id === null`): no owner filter injected — full-index
+  search (agents/pipeline).
+- **User principal** (`id === '<uuid>'`): the service **force-injects**
+  `ownerId = '<uuid>'` (OR, when `allowPublic`, `ownerId IS NULL`) and ANDs it
+  with the user's allowlisted filters. The user's own filters cannot reference
+  the owner attribute and cannot widen the scope.
+
+This mirrors `FileService.loadOwned` ownership semantics. Auth is a placeholder
+(`CurrentUser`), so isolation is enforced **in-service**, not via trusting a
+client token. Meili tenant tokens remain available on the abstraction for a
+future hardening pass.
+
+### 7.2 Filter-injection prevention
+
+- External callers submit **structured** `filters`/`sort`, never raw Meili
+  expressions.
+- Each field is checked against the index's `allowedFilterFields` /
+  `allowedSortFields`; unknown fields are rejected (`400`).
+- Values are serialized/escaped by the service when composing the Meili filter
+  string. This makes it impossible to smuggle `OR ownerId = ...` and escape the
+  tenant scope.
+
+### 7.3 Key handling
+
+- The Meili API key lives only in server config; never returned to clients.
+- Recommendation: run the app with a **scoped Meili API key** (search + document
+  add/delete on the app's indexes) rather than the master key. `ensureIndex`
+  needs settings permission; document ops need documents permission.
+
+---
+
+## 8. Error handling & resilience
+
+- **Engine unavailable:** search surfaces a typed `ServiceUnavailableException`
+  (503) rather than a 500; the health endpoint reports Meili down. Writes are
+  unaffected (async indexing).
+- **Indexing failures:** retried by BullMQ, then dead-lettered
+  (`removeOnFail: 100`) and logged; reconciliation/`reindex` recovers drift.
+- **Meili task failure:** `waitForTask` throws `SearchEngineError` carrying the
+  Meili task error code/message; logged with the index + job id.
+- **Task timeout:** bounded by `MEILISEARCH_TASK_TIMEOUT_MS`; a timeout fails the job
+  (retryable) rather than hanging the worker.
+- **Validation:** DTO validation (Zod pipe) rejects malformed requests at the
+  boundary with `400`.
+
+---
+
+## 9. Observability
+
+- Nest `Logger` per class (matching existing modules); Sentry captures
+  unhandled errors via the already-installed interceptor/instrumentation.
+- Log key events at appropriate levels: index bootstrap/settings convergence,
+  reindex start/finish with counts (like the reconciliation log line in
+  file-processor), indexing job failures, Meili-unavailable in health.
+
+---
+
+## 10. Shared utilities promotion (decision)
+
+Move three items out of `src/features/file-processor` into `src/common` and
+update file-processor's imports (small, mechanical refactor):
+
+- `Principal` + `SYSTEM_PRINCIPAL`  → `src/common/principal.ts`
+  (generalized from `FilePrincipal`; `file.types.ts` re-exports or aliases for
+  back-compat).
+- `CurrentUser` decorator → `src/common/decorators/current-user.decorator.ts`.
+- `ZodValidationPipe` → `src/common/pipes/zod-validation.pipe.ts`.
+
+Both features then share one implementation. This is the only change to
+file-processor this session and touches no file-processing logic.
+
+---
+
+## 11. Testing strategy
+
+- **Unit** — `SearchEngineService` with a mocked `meilisearch` client (filter/
+  sort/pagination mapping, prefix application, task-failure → error). Owner-scope
+  injection in `SearchService` (system vs user principal; allowPublic; rejection
+  of owner-field in user filters). Registry validation. Follows the existing
+  `*.spec.ts` + `@swc/jest` setup.
+- **Integration** — against the local Meili instance: `ensureIndex` settings
+  convergence, add → search → filter/facet/sort → delete, reindex rebuild.
+- **E2E** — `POST /search/:index` (supertest, per `test:e2e`): validation,
+  owner-scoping, unknown-index rejection, pagination caps.
+
+Follows the CLAUDE.md rule: run `npm run build && npm test` before commit.
+
+---
+
+## 12. Files integration blueprint (deferred — "files later")
+
+When files are wired in a later session, the only additions are:
+
+1. **Register the `files` index** in `index-registry.ts`:
+   `primaryKey: 'id'`,
+   `searchableAttributes: ['filename', 'mimeType']`,
+   `filterableAttributes: ['ownerId', 'status', 'mimeType', 'createdAt']`,
+   `sortableAttributes: ['createdAt', 'size']`,
+   `ownerScope: { attribute: 'ownerId', allowPublic: true }`.
+2. **Document mapper** `FileRow → FileSearchDoc` (id, ownerId, filename,
+   mimeType, size, status, createdAt, + flattened `metadata`).
+3. **Lifecycle hook** in the file-processor: on transition to `AVAILABLE` and on
+   metadata update, call `search.enqueueIndex('files', [doc])`; on soft-delete,
+   `search.enqueueDelete('files', [id])`. Reconciliation source = `files` table.
+
+No provider or search-service changes are required — that is the payoff of the
+generic design.
+
+---
+
+## 13. Implementation phases (for the plan step)
+
+1. Config: env vars + `search.config.ts` + `config.module.ts` wiring.
+2. Infra: constants, provider, interface, `SearchEngineService`, module; Meili
+   health indicator + `HealthModule` wiring; `AppModule` import.
+3. `src/common` promotion (principal, decorator, pipe) + file-processor imports.
+4. Feature: types, registry, DTO, `SearchService` (search + scoping), controller.
+5. Async: queue registration, `SearchIndexingProcessor`, reconciliation
+   scheduler.
+6. Tests (unit + integration + e2e) and docs; `build && test`.
+
+---
+
+## 14. Open items / decisions log
+
+- **Resolved:** env var names confirmed — `MEILISEARCH_HOST`,
+  `MEILISEARCH_PORT` (30770), `MEILISEARCH_MASTER_KEY` (§3).
+- **Resolved:** MeiliSearch server **v1.22.1**. Pin the `meilisearch` JS client
+  to the release its compatibility matrix lists for server v1.22 (verify the
+  exact version at install; the SDK README publishes the server↔client table).
+- **Decided:** generic multi-index provider; files index deferred.
+- **Decided:** async indexing via BullMQ + reconciliation.
+- **Decided:** server-side owner filtering (not tenant tokens) for now.
+- **Decided:** promote shared utils to `src/common`.
+- **Decided:** external API shape `POST /search/:index`.
+
+---
+
+## 15. References
+
+- MeiliSearch — Features: https://www.meilisearch.com/docs/getting_started/features
+- MeiliSearch — Glossary: https://www.meilisearch.com/docs/getting_started/glossary
+- MeiliSearch — Good practices: https://www.meilisearch.com/docs/getting_started/good_practices
+- MeiliSearch — JS SDK: https://www.meilisearch.com/docs/getting_started/sdks/javascript
