@@ -14,11 +14,11 @@ export const storageConfig = registerAs('storage', () => {
 
   return {
     // MinIO connection
-    endpoint: env.MINIO_ENDPOINT,
+    endpoint: env.MINIO_HOST,
     port: env.MINIO_PORT,
     useSSL: env.MINIO_USE_SSL,
-    accessKey: env.MINIO_ACCESS_KEY,
-    secretKey: env.MINIO_SECRET_KEY,
+    accessKey: env.MINIO_ROOT_USER,
+    secretKey: env.MINIO_ROOT_PASSWORD,
     region: env.MINIO_REGION,
     bucket: env.MINIO_BUCKET,
     presignExpirySeconds: env.MINIO_PRESIGN_EXPIRY,

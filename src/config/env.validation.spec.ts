@@ -29,4 +29,17 @@ describe('validateEnv', () => {
       /Invalid environment variables/,
     );
   });
+
+  it('applies MeiliSearch defaults', () => {
+    const env = validateEnv({});
+    expect(env.MEILISEARCH_HOST).toBe('localhost');
+    expect(env.MEILISEARCH_PORT).toBe(7700);
+    expect(env.SEARCH_MAX_PAGE_SIZE).toBe(100);
+  });
+
+  it('requires a master key in production', () => {
+    expect(() =>
+      validateEnv({ NODE_ENV: 'production', MEILISEARCH_MASTER_KEY: '' }),
+    ).toThrow(/MEILISEARCH_MASTER_KEY/);
+  });
 });

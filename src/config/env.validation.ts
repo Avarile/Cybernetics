@@ -44,11 +44,11 @@ export const envSchema = z
       .default('info'),
 
     // MinIO / object storage
-    MINIO_ENDPOINT: z.string().min(1).default('localhost'),
+    MINIO_HOST: z.string().min(1).default('localhost'),
     MINIO_PORT: z.coerce.number().int().positive().default(9000),
     MINIO_USE_SSL: booleanFromEnv.default(false),
-    MINIO_ACCESS_KEY: z.string().min(1).default('minioadmin'),
-    MINIO_SECRET_KEY: z.string().min(1).default('minioadmin'),
+    MINIO_ROOT_USER: z.string().min(1).default('minioadmin'),
+    MINIO_ROOT_PASSWORD: z.string().min(1).default('minioadmin'),
     MINIO_REGION: z.string().min(1).default('us-east-1'),
     MINIO_BUCKET: z.string().min(1).default('cybernetics'),
     MINIO_PRESIGN_EXPIRY: z.coerce.number().int().positive().default(300),
@@ -57,19 +57,50 @@ export const envSchema = z
     FILE_MAX_SIZE: z.coerce.number().int().positive().default(52_428_800),
     FILE_ALLOWED_MIME: z.string().default(''),
     FILE_PENDING_TTL: z.coerce.number().int().positive().default(3600),
+
+    // MeiliSearch / search engine
+    MEILISEARCH_HOST: z.string().min(1).default('localhost'),
+    MEILISEARCH_PORT: z.coerce.number().int().positive().default(7700),
+    MEILISEARCH_USE_SSL: booleanFromEnv.default(false),
+    MEILISEARCH_MASTER_KEY: z.string().default(''),
+    MEILISEARCH_INDEX_PREFIX: z.string().default(''),
+    MEILISEARCH_TASK_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(10_000),
+    MEILISEARCH_SEARCH_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(5_000),
+    SEARCH_DEFAULT_PAGE_SIZE: z.coerce.number().int().positive().default(20),
+    SEARCH_MAX_PAGE_SIZE: z.coerce.number().int().positive().default(100),
   })
   .superRefine((env, ctx) => {
     // Refuse the well-known default MinIO credentials in production.
     if (
       env.NODE_ENV === 'production' &&
-      env.MINIO_ACCESS_KEY === 'minioadmin' &&
-      env.MINIO_SECRET_KEY === 'minioadmin'
+      env.MINIO_ROOT_USER === 'minioadmin' &&
+      env.MINIO_ROOT_PASSWORD === 'minioadmin'
     ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ['MINIO_SECRET_KEY'],
+        path: ['MINIO_ROOT_PASSWORD'],
         message:
-          'Default MinIO credentials (minioadmin) are not allowed when NODE_ENV=production; set MINIO_ACCESS_KEY and MINIO_SECRET_KEY.',
+          'Default MinIO credentials (minioadmin) are not allowed when NODE_ENV=production; set MINIO_ROOT_USER and MINIO_ROOT_PASSWORD.',
+      });
+    }
+
+    // Require a master key in production.
+    if (
+      env.NODE_ENV === 'production' &&
+      env.MEILISEARCH_MASTER_KEY.length === 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['MEILISEARCH_MASTER_KEY'],
+        message: 'MEILISEARCH_MASTER_KEY is required when NODE_ENV=production.',
       });
     }
   });
