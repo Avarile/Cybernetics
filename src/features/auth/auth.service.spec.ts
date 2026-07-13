@@ -59,15 +59,15 @@ describe('AuthService', () => {
     });
     it('throws 401 when the user is unknown', async () => {
       users.findByEmail.mockResolvedValueOnce(null);
-      await expect(service.validateUser('x@y.z', 'pw')).rejects.toBeInstanceOf(
-        UnauthorizedException,
-      );
+      const result = service.validateUser('x@y.z', 'pw');
+      await expect(result).rejects.toBeInstanceOf(UnauthorizedException);
+      await expect(result).rejects.toThrow('Invalid credentials');
     });
     it('throws 401 when the password is wrong', async () => {
       passwords.verify.mockResolvedValueOnce(false);
-      await expect(
-        service.validateUser('a@b.co', 'bad'),
-      ).rejects.toBeInstanceOf(UnauthorizedException);
+      const result = service.validateUser('a@b.co', 'bad');
+      await expect(result).rejects.toBeInstanceOf(UnauthorizedException);
+      await expect(result).rejects.toThrow('Invalid credentials');
     });
   });
 
@@ -105,6 +105,7 @@ describe('AuthService', () => {
         expect.objectContaining({ familyId: 'fam-1' }),
       );
       expect(pair.accessToken).toBe('access.jwt');
+      expect(sessions.revokeFamily).not.toHaveBeenCalled();
     });
 
     it('detects reuse: revokes the whole family and throws 401', async () => {
