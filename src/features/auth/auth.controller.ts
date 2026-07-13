@@ -1,0 +1,113 @@
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Patch,
+  Post,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+import type { Request } from 'express';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Public } from '../../common/decorators/public.decorator';
+import { LocalAuthGuard } from '../../common/guards/local-auth.guard';
+import type { Principal } from '../../common/principal';
+import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import type { UserRow } from '../../infrastructure/database/schema/identity.schema';
+import { AuthService } from './auth.service';
+import {
+  changePasswordSchema,
+  type ChangePasswordDto,
+} from './dto/change-password.dto';
+import { loginSchema, type LoginDto } from './dto/login.dto';
+import { logoutSchema, type LogoutDto } from './dto/logout.dto';
+import { refreshSchema, type RefreshDto } from './dto/refresh.dto';
+import {
+  serviceTokenSchema,
+  type ServiceTokenDto,
+} from './dto/service-token.dto';
+import { ServiceCredentialService } from './service-credential.service';
+
+function reqContext(req: Request) {
+  return { userAgent: req.headers['user-agent'], ip: req.ip };
+}
+
+@Controller('auth')
+export class AuthController {
+  constructor(
+    private readonly auth: AuthService,
+    private readonly credentials: ServiceCredentialService,
+  ) {}
+
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @UseGuards(LocalAuthGuard)
+  @Post('login')
+  @HttpCode(200)
+  login(
+    @Body(new ZodValidationPipe(loginSchema)) _body: LoginDto,
+    @Req() req: Request & { user: UserRow },
+  ) {
+    // LocalAuthGuard validated credentials and set req.user = UserRow.
+    return this.auth.login(req.user, reqContext(req));
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('refresh')
+  @HttpCode(200)
+  refresh(
+    @Body(new ZodValidationPipe(refreshSchema)) body: RefreshDto,
+    @Req() req: Request,
+  ) {
+    return this.auth.refresh(body.refreshToken, reqContext(req));
+  }
+
+  @Public()
+  @Post('logout')
+  @HttpCode(204)
+  async logout(@Body(new ZodValidationPipe(logoutSchema)) body: LogoutDto) {
+    await this.auth.logout(body.refreshToken);
+  }
+
+  @Post('logout-all')
+  @HttpCode(204)
+  async logoutAll(@CurrentUser() user: Principal) {
+    await this.auth.logoutAll(user.id as string);
+  }
+
+  @Get('me')
+  me(@CurrentUser() user: Principal) {
+    return user;
+  }
+
+  @Get('sessions')
+  sessions(@CurrentUser() user: Principal) {
+    return this.auth.listSessions(user.id as string);
+  }
+
+  @Patch('password')
+  @HttpCode(204)
+  async changePassword(
+    @CurrentUser() user: Principal,
+    @Body(new ZodValidationPipe(changePasswordSchema)) body: ChangePasswordDto,
+  ) {
+    await this.auth.changePassword(
+      user.id as string,
+      body.currentPassword,
+      body.newPassword,
+    );
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('service-token')
+  @HttpCode(200)
+  serviceToken(
+    @Body(new ZodValidationPipe(serviceTokenSchema)) body: ServiceTokenDto,
+  ) {
+    return this.credentials.exchangeForToken(body.apiKey);
+  }
+}
