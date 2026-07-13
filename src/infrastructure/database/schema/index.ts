@@ -9,3 +9,4 @@
  *   export * from './user.schema';
  */
 export * from './file.schema';
+export * from './identity.schema';
