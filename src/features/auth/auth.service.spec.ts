@@ -1,0 +1,147 @@
+import { UnauthorizedException } from '@nestjs/common';
+import { AuthService } from './auth.service';
+
+function makeUser(overrides: Record<string, any> = {}) {
+  return {
+    id: 'u1',
+    email: 'a@b.co',
+    passwordHash: 'HASH',
+    role: 'user',
+    ...overrides,
+  };
+}
+
+describe('AuthService', () => {
+  let users: any;
+  let sessions: any;
+  let tokens: any;
+  let passwords: any;
+  let service: AuthService;
+
+  beforeEach(() => {
+    users = {
+      findByEmail: jest.fn(async () => makeUser()),
+      findActiveById: jest.fn(async () => makeUser()),
+      stampLogin: jest.fn(async () => undefined),
+      update: jest.fn(async () => makeUser()),
+    };
+    sessions = {
+      create: jest.fn(async () => ({ id: 's1' })),
+      findByTokenHash: jest.fn(),
+      revokeById: jest.fn(async () => undefined),
+      revokeFamily: jest.fn(async () => undefined),
+      revokeAllForUser: jest.fn(async () => undefined),
+      listActiveForUser: jest.fn(async () => []),
+    };
+    tokens = {
+      newFamilyId: jest.fn(() => 'fam-1'),
+      signAccessToken: jest.fn(() => 'access.jwt'),
+      generateRefreshToken: jest.fn(() => ({
+        token: 'refresh-raw',
+        tokenHash: 'HHH',
+      })),
+      hashToken: jest.fn((t: string) => `hash(${t})`),
+      refreshExpiry: jest.fn(() => new Date(Date.now() + 1000)),
+      accessTtl: jest.fn(() => 900),
+    };
+    passwords = {
+      verify: jest.fn(async () => true),
+      hash: jest.fn(async () => 'NEWHASH'),
+    };
+    service = new AuthService(users, sessions, tokens, passwords);
+  });
+
+  describe('validateUser', () => {
+    it('returns the user on valid credentials', async () => {
+      await expect(service.validateUser('a@b.co', 'pw')).resolves.toEqual(
+        makeUser(),
+      );
+    });
+    it('throws 401 when the user is unknown', async () => {
+      users.findByEmail.mockResolvedValueOnce(null);
+      await expect(service.validateUser('x@y.z', 'pw')).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+    it('throws 401 when the password is wrong', async () => {
+      passwords.verify.mockResolvedValueOnce(false);
+      await expect(
+        service.validateUser('a@b.co', 'bad'),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+    });
+  });
+
+  describe('login', () => {
+    it('issues a pair, persists a session, and stamps login', async () => {
+      const pair = await service.login(makeUser(), { ip: '1.2.3.4' });
+      expect(pair).toEqual({
+        accessToken: 'access.jwt',
+        refreshToken: 'refresh-raw',
+        expiresIn: 900,
+      });
+      expect(sessions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          userId: 'u1',
+          tokenHash: 'HHH',
+          familyId: 'fam-1',
+        }),
+      );
+      expect(users.stampLogin).toHaveBeenCalledWith('u1');
+    });
+  });
+
+  describe('refresh', () => {
+    it('rotates a valid refresh token (revoke old, issue new in same family)', async () => {
+      sessions.findByTokenHash.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'u1',
+        familyId: 'fam-1',
+        revokedAt: null,
+        expiresAt: new Date(Date.now() + 10000),
+      });
+      const pair = await service.refresh('refresh-raw', {});
+      expect(sessions.revokeById).toHaveBeenCalledWith('s1');
+      expect(sessions.create).toHaveBeenCalledWith(
+        expect.objectContaining({ familyId: 'fam-1' }),
+      );
+      expect(pair.accessToken).toBe('access.jwt');
+    });
+
+    it('detects reuse: revokes the whole family and throws 401', async () => {
+      sessions.findByTokenHash.mockResolvedValueOnce({
+        id: 's1',
+        userId: 'u1',
+        familyId: 'fam-1',
+        revokedAt: new Date(),
+        expiresAt: new Date(Date.now() + 10000),
+      });
+      await expect(service.refresh('refresh-raw', {})).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(sessions.revokeFamily).toHaveBeenCalledWith('fam-1');
+    });
+
+    it('throws 401 for an unknown refresh token', async () => {
+      sessions.findByTokenHash.mockResolvedValueOnce(null);
+      await expect(service.refresh('nope', {})).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+  });
+
+  describe('changePassword', () => {
+    it('updates the hash and revokes all sessions', async () => {
+      await service.changePassword('u1', 'current', 'new-strong-password');
+      expect(users.update).toHaveBeenCalledWith('u1', {
+        passwordHash: 'NEWHASH',
+      });
+      expect(sessions.revokeAllForUser).toHaveBeenCalledWith('u1');
+    });
+    it('throws 401 when the current password is wrong', async () => {
+      passwords.verify.mockResolvedValueOnce(false);
+      await expect(
+        service.changePassword('u1', 'wrong', 'new-strong-password'),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+    });
+  });
+});
