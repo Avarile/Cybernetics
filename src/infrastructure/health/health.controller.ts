@@ -4,6 +4,7 @@ import {
   HealthCheckService,
   MemoryHealthIndicator,
 } from '@nestjs/terminus';
+import { Public } from '../../common/decorators/public.decorator';
 import { DatabaseHealthIndicator } from './database.health';
 import { MeiliHealthIndicator } from './meili.health';
 import { MinioHealthIndicator } from './minio.health';
@@ -13,6 +14,7 @@ import { RedisHealthIndicator } from './redis.health';
  * `GET /health` — liveness/readiness probe aggregating database, Redis, MinIO,
  * MeiliSearch, and heap-memory checks.
  */
+@Public()
 @Controller('health')
 export class HealthController {
   constructor(
