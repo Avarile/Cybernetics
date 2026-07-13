@@ -15,6 +15,13 @@
       "when": 1783907003623,
       "tag": "0001_cuddly_jimmy_woo",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1783914900054,
+      "tag": "0002_perpetual_blade",
+      "breakpoints": true
     }
   ]
 }

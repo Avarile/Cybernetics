@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import {
   index,
   pgEnum,
@@ -36,7 +37,9 @@ export const users = pgTable(
     lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
   },
   (t) => [
-    uniqueIndex('users_email_unique_idx').on(t.email),
+    uniqueIndex('users_email_unique_idx')
+      .on(t.email)
+      .where(sql`${t.isDeleted} = false`),
     index('users_role_idx').on(t.role),
   ],
 );
