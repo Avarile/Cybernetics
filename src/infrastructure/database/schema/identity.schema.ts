@@ -17,7 +17,12 @@ import { baseColumns } from './common';
  *  admin — elevated human account (email + password)
  *  agent — machine caller, authenticated via a service credential
  */
-export const userRole = pgEnum('user_role', ['guest', 'user', 'admin', 'agent']);
+export const userRole = pgEnum('user_role', [
+  'guest',
+  'user',
+  'admin',
+  'agent',
+]);
 
 /** Human accounts. Only `user`/`admin` in practice; enum keeps all four. */
 export const users = pgTable(
