@@ -1,0 +1,2880 @@
+# Authentication, Authorization & Basic Security — Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Add a Passport-based email/password authentication layer, JWT sessions with DB-persisted rotating refresh tokens, doc-style RBAC (`guest`/`user`/`admin`/`agent`), and a basic security baseline (Helmet, CORS, rate limiting) — fulfilling the `CurrentUser`/`Principal` seam the codebase already left open.
+
+**Architecture:** Auth slots into the existing `Principal` abstraction. `passport-local` authenticates login; `passport-jwt` validates a short-lived HS256 access token on every request via a global `JwtAuthGuard` (opt out with `@Public()`). Refresh tokens are opaque random strings, SHA-256-hashed into a `sessions` table, rotated on use with family-based reuse detection. `agent` is a machine principal: an admin mints a service credential (API key), the agent exchanges it for a short-lived `agent` JWT. Users are admin-provisioned only (a seeded initial admin bootstraps the system). Authorization is the NestJS-doc `@Roles()` + `RolesGuard` pattern.
+
+**Tech Stack:** NestJS 11, `@nestjs/passport` + `passport-local` + `passport-jwt`, `@nestjs/jwt`, `argon2`, `@nestjs/throttler`, `helmet`, Drizzle ORM + PostgreSQL, Zod, Jest + `@swc/jest` + supertest.
+
+## Global Constraints
+
+- Node >= 20; package manager is `pnpm@10.16.1` — use `pnpm`, not `npm`.
+- Files stay under 500 lines; one clear responsibility per file.
+- Validate all external input at the boundary with Zod DTOs + the existing `ZodValidationPipe`.
+- NEVER commit secrets or `.env`. JWT secret, API keys, and seed passwords come from env only; never log or return them (the plaintext API key is returned exactly once, on creation).
+- Relative imports only (no path aliases exist in `tsconfig.json`).
+- Follow existing conventions exactly: Drizzle `baseColumns` + `pgEnum` + `pgTable`; namespaced `registerAs` config reading the central `validateEnv`; DI via `DRIZZLE` token / `BaseRepository`; unit tests as plain instantiation with `jest.fn()` mocks (see `src/features/file-processor/file.service.spec.ts`).
+- Unit test config: `rootDir: src`, pattern `.*\.spec\.ts$` (`pnpm test`). E2E: `Test.createTestingModule` + supertest, pattern `.e2e-spec.ts$` under `test/`, **boot a focused module subset, NOT `AppModule`** (MastraModule pulls an ESM-only dep Jest can't transform), run with `pnpm test:e2e`.
+- Commit messages: Conventional Commits, imperative. **Do NOT add a `Co-Authored-By` trailer** (project rule #2078 — attribution not enabled).
+- After each task: `pnpm build` and `pnpm test` must pass before committing.
+- **`Principal.role` is OPTIONAL** (`role?: UserRole`). Existing file/search code passes bare `{ id }` literals to `Principal`-typed params in ~20 call sites; a required `role` would break them. Guards/strategies always populate it; `RolesGuard` normalizes an absent role to `'guest'`.
+- Enabling the global `JwtAuthGuard` makes all existing routes require a valid token unless `@Public()`. `GET /health` MUST be `@Public()` (Task 10). The existing search/queue e2e boot module subsets that exclude the global guard, so they stay green.
+
+---
+
+## File Structure
+
+**Create:**
+- `src/config/configurations/auth.config.ts` — `registerAs('auth')`.
+- `src/infrastructure/database/schema/identity.schema.ts` — `user_role` enum, `users`, `sessions`, `service_credentials` + inferred types.
+- `src/common/decorators/public.decorator.ts` — `@Public()` + `IS_PUBLIC_KEY`.
+- `src/common/decorators/roles.decorator.ts` — `@Roles()` + `ROLES_KEY`.
+- `src/common/guards/jwt-auth.guard.ts` — global authN guard (honors `@Public`).
+- `src/common/guards/roles.guard.ts` — global authZ guard.
+- `src/common/guards/local-auth.guard.ts` — login-only guard.
+- `src/features/auth/auth.types.ts` — JWT claims / token DTOs.
+- `src/features/auth/password.service.ts` — argon2id hashing.
+- `src/features/auth/token.service.ts` — JWT signing + refresh-token crypto.
+- `src/features/auth/session.repository.ts` — `sessions` table access.
+- `src/features/auth/auth.service.ts` — login/refresh/logout/change-password.
+- `src/features/auth/service-credential.repository.ts` — `service_credentials` access.
+- `src/features/auth/service-credential.service.ts` — issue/verify/revoke/exchange.
+- `src/features/auth/strategies/local.strategy.ts`, `strategies/jwt.strategy.ts`.
+- `src/features/auth/auth.controller.ts` — `/auth/*`.
+- `src/features/auth/service-credentials.controller.ts` — admin `/service-credentials`.
+- `src/features/auth/auth.module.ts`.
+- `src/features/auth/dto/*.ts` — login, refresh, logout, change-password, service-token, create-service-credential.
+- `src/features/users/user.repository.ts`, `users.service.ts`, `users.controller.ts`, `users.module.ts`.
+- `src/features/users/dto/create-user.dto.ts`, `dto/update-user.dto.ts`, `dto/list-users.dto.ts`.
+- `src/infrastructure/database/seeders/initial-admin.seeder.ts`.
+- Spec files alongside each service/guard, plus `test/auth.e2e-spec.ts`.
+
+**Modify:**
+- `src/config/env.validation.ts` — auth/security env vars + production `superRefine` guards.
+- `src/config/env.validation.spec.ts` — cover the new vars/guards.
+- `src/config/config.module.ts` — load `authConfig`.
+- `src/infrastructure/database/schema/index.ts` — export identity schema.
+- `src/common/principal.ts` — add `UserRole`, optional `role`, `GUEST_PRINCIPAL`.
+- `src/common/decorators/current-user.decorator.ts` — read `request.user`.
+- `src/infrastructure/health/health.controller.ts` — `@Public()`.
+- `src/infrastructure/database/seeders/index.ts` — register the admin seeder.
+- `src/app.module.ts` — import `AuthModule`/`UsersModule`, `ThrottlerModule`, global guards.
+- `src/main.ts` — Helmet + CORS.
+- `.env.example` — document new vars.
+
+---
+
+## Task 1: Dependencies, environment & auth config
+
+**Files:**
+- Modify: `package.json` (via pnpm)
+- Modify: `src/config/env.validation.ts`
+- Modify: `src/config/env.validation.spec.ts`
+- Create: `src/config/configurations/auth.config.ts`
+- Modify: `src/config/config.module.ts`
+- Modify: `.env.example`
+
+**Interfaces:**
+- Produces: `authConfig` (namespace `'auth'`) → `AuthConfig { jwtAccessSecret, accessTtl, refreshTtl, agentTokenTtl, issuer, corsOrigins: string[], throttleTtl, throttleLimit, seedAdminEmail, seedAdminPassword }`; new env vars on `Env`.
+
+- [ ] **Step 1: Install dependencies**
+
+```bash
+pnpm add @nestjs/passport passport passport-local passport-jwt @nestjs/jwt @nestjs/throttler helmet argon2
+pnpm add -D @types/passport-local @types/passport-jwt
+```
+
+- [ ] **Step 2: Add the failing env test**
+
+Append to `src/config/env.validation.spec.ts` (as a new sibling `describe`):
+
+```ts
+describe('auth env', () => {
+  it('applies auth/security defaults', () => {
+    const env = validateEnv({});
+    expect(env.JWT_ACCESS_TTL).toBe(900);
+    expect(env.JWT_REFRESH_TTL).toBe(604800);
+    expect(env.JWT_ISSUER).toBe('cybernetics');
+    expect(env.THROTTLE_LIMIT).toBe(100);
+  });
+
+  it('rejects the placeholder JWT secret in production', () => {
+    expect(() =>
+      validateEnv({
+        NODE_ENV: 'production',
+        JWT_ACCESS_SECRET: 'dev-insecure-secret-change-me-please',
+      }),
+    ).toThrow(/JWT_ACCESS_SECRET/);
+  });
+
+  it('requires a seed admin password in production', () => {
+    expect(() =>
+      validateEnv({ NODE_ENV: 'production', SEED_ADMIN_PASSWORD: '' }),
+    ).toThrow(/SEED_ADMIN_PASSWORD/);
+  });
+});
+```
+
+Note: in production mode the MinIO/Meili guards also fire, but the combined error message still contains the substring these tests match on (same technique as the existing `requires a master key in production` test).
+
+- [ ] **Step 3: Run it, verify it fails**
+
+Run: `pnpm test -- env.validation`
+Expected: FAIL (`JWT_ACCESS_TTL` undefined / no matching error).
+
+- [ ] **Step 4: Add the env vars**
+
+In `src/config/env.validation.ts`, add inside the `z.object({...})` (e.g. after the search block, before `.superRefine`):
+
+```ts
+    // Auth / JWT
+    JWT_ACCESS_SECRET: z
+      .string()
+      .min(1)
+      .default('dev-insecure-secret-change-me-please'),
+    JWT_ACCESS_TTL: z.coerce.number().int().positive().default(900),
+    JWT_REFRESH_TTL: z.coerce.number().int().positive().default(604_800),
+    AGENT_TOKEN_TTL: z.coerce.number().int().positive().default(900),
+    JWT_ISSUER: z.string().min(1).default('cybernetics'),
+
+    // Security
+    THROTTLE_TTL: z.coerce.number().int().positive().default(60),
+    THROTTLE_LIMIT: z.coerce.number().int().positive().default(100),
+    CORS_ORIGINS: z.string().default(''),
+
+    // Auth seeding
+    SEED_ADMIN_EMAIL: z.string().email().default('admin@cybernetics.local'),
+    SEED_ADMIN_PASSWORD: z.string().default(''),
+```
+
+Add inside `.superRefine((env, ctx) => { ... })`:
+
+```ts
+    if (
+      env.NODE_ENV === 'production' &&
+      (env.JWT_ACCESS_SECRET === 'dev-insecure-secret-change-me-please' ||
+        env.JWT_ACCESS_SECRET.length < 32)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['JWT_ACCESS_SECRET'],
+        message:
+          'JWT_ACCESS_SECRET must be a strong non-default value (>= 32 chars) when NODE_ENV=production.',
+      });
+    }
+
+    if (env.NODE_ENV === 'production' && env.SEED_ADMIN_PASSWORD.length < 12) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SEED_ADMIN_PASSWORD'],
+        message:
+          'SEED_ADMIN_PASSWORD must be set (>= 12 chars) when NODE_ENV=production.',
+      });
+    }
+```
+
+- [ ] **Step 5: Create the auth config factory**
+
+Create `src/config/configurations/auth.config.ts`:
+
+```ts
+import { registerAs } from '@nestjs/config';
+import { validateEnv } from '../env.validation';
+
+/**
+ * Namespaced auth/security config. Consumed by the auth feature (token signing,
+ * strategy verification), the throttler, main.ts (CORS), and the admin seeder.
+ */
+export const authConfig = registerAs('auth', () => {
+  const env = validateEnv(process.env);
+  return {
+    jwtAccessSecret: env.JWT_ACCESS_SECRET,
+    accessTtl: env.JWT_ACCESS_TTL,
+    refreshTtl: env.JWT_REFRESH_TTL,
+    agentTokenTtl: env.AGENT_TOKEN_TTL,
+    issuer: env.JWT_ISSUER,
+    corsOrigins: env.CORS_ORIGINS.split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    throttleTtl: env.THROTTLE_TTL,
+    throttleLimit: env.THROTTLE_LIMIT,
+    seedAdminEmail: env.SEED_ADMIN_EMAIL,
+    seedAdminPassword: env.SEED_ADMIN_PASSWORD,
+  };
+});
+
+export type AuthConfig = ReturnType<typeof authConfig>;
+```
+
+- [ ] **Step 6: Register the config**
+
+In `src/config/config.module.ts`, import `authConfig` and add it to the `load: [...]` array.
+
+- [ ] **Step 7: Document env vars**
+
+Append to `.env.example`:
+
+```
+# Auth / JWT
+JWT_ACCESS_SECRET=dev-insecure-secret-change-me-please
+JWT_ACCESS_TTL=900
+JWT_REFRESH_TTL=604800
+AGENT_TOKEN_TTL=900
+JWT_ISSUER=cybernetics
+
+# Security
+THROTTLE_TTL=60
+THROTTLE_LIMIT=100
+CORS_ORIGINS=
+
+# Initial admin (seeded)
+SEED_ADMIN_EMAIL=admin@cybernetics.local
+SEED_ADMIN_PASSWORD=
+```
+
+- [ ] **Step 8: Run tests + build**
+
+Run: `pnpm test -- env.validation && pnpm build`
+Expected: PASS.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add package.json pnpm-lock.yaml src/config .env.example
+git commit -m "feat(auth): add auth/security env vars, config, and dependencies"
+```
+
+---
+
+## Task 2: Identity schema & migration
+
+**Files:**
+- Create: `src/infrastructure/database/schema/identity.schema.ts`
+- Modify: `src/infrastructure/database/schema/index.ts`
+- Create: `src/infrastructure/database/schema/identity.schema.spec.ts`
+- Create (generated): migration under `src/infrastructure/database/migrations/`
+
+**Interfaces:**
+- Produces: `userRole` enum; tables `users`, `sessions`, `serviceCredentials`; types `UserRow`/`NewUserRow`, `SessionRow`/`NewSessionRow`, `ServiceCredentialRow`/`NewServiceCredentialRow`.
+
+- [ ] **Step 1: Write the failing schema test**
+
+Create `src/infrastructure/database/schema/identity.schema.spec.ts`:
+
+```ts
+import {
+  serviceCredentials,
+  sessions,
+  userRole,
+  users,
+} from './identity.schema';
+
+describe('identity schema', () => {
+  it('defines user_role with the four roles', () => {
+    expect(userRole.enumValues).toEqual(['guest', 'user', 'admin', 'agent']);
+  });
+
+  it('exposes the identity tables', () => {
+    expect(users).toBeDefined();
+    expect(sessions).toBeDefined();
+    expect(serviceCredentials).toBeDefined();
+  });
+});
+```
+
+- [ ] **Step 2: Run it, verify it fails**
+
+Run: `pnpm test -- identity.schema`
+Expected: FAIL (module not found).
+
+- [ ] **Step 3: Create the schema**
+
+Create `src/infrastructure/database/schema/identity.schema.ts`:
+
+```ts
+import {
+  index,
+  pgEnum,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+  varchar,
+} from 'drizzle-orm/pg-core';
+import { baseColumns } from './common';
+
+/**
+ * Shared role vocabulary for JWT claims and RolesGuard checks.
+ *  guest — anonymous request, never stored (no token present)
+ *  user  — standard human account (email + password)
+ *  admin — elevated human account (email + password)
+ *  agent — machine caller, authenticated via a service credential
+ */
+export const userRole = pgEnum('user_role', ['guest', 'user', 'admin', 'agent']);
+
+/** Human accounts. Only `user`/`admin` in practice; enum keeps all four. */
+export const users = pgTable(
+  'users',
+  {
+    ...baseColumns,
+    email: varchar('email', { length: 255 }).notNull(), // stored lowercased
+    passwordHash: text('password_hash').notNull(), // argon2id
+    role: userRole('role').notNull().default('user'),
+    displayName: varchar('display_name', { length: 255 }),
+    lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex('users_email_unique_idx').on(t.email),
+    index('users_role_idx').on(t.role),
+  ],
+);
+
+/**
+ * Refresh-token sessions. The refresh token is an opaque random string; only
+ * its sha256 hash is stored. `familyId` is the rotation lineage: rotating keeps
+ * the family; replaying a revoked token revokes the whole family (theft
+ * response). `revokedAt` is the deletion marker, so baseColumns is not used.
+ */
+export const sessions = pgTable(
+  'sessions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    createdAt: timestamp('created_at', { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tokenHash: varchar('token_hash', { length: 64 }).notNull(),
+    familyId: uuid('family_id').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    userAgent: varchar('user_agent', { length: 512 }),
+    ip: varchar('ip', { length: 45 }),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex('sessions_token_hash_idx').on(t.tokenHash),
+    index('sessions_user_idx').on(t.userId),
+    index('sessions_family_idx').on(t.familyId),
+    index('sessions_expires_idx').on(t.expiresAt),
+  ],
+);
+
+/** Agent API keys. Plaintext key is shown once; only the sha256 hash is kept. */
+export const serviceCredentials = pgTable(
+  'service_credentials',
+  {
+    ...baseColumns,
+    name: varchar('name', { length: 255 }).notNull(),
+    keyPrefix: varchar('key_prefix', { length: 32 }).notNull(),
+    keyHash: varchar('key_hash', { length: 64 }).notNull(),
+    role: userRole('role').notNull().default('agent'),
+    createdBy: uuid('created_by').references(() => users.id),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex('service_credentials_key_hash_idx').on(t.keyHash),
+    index('service_credentials_prefix_idx').on(t.keyPrefix),
+  ],
+);
+
+export type UserRow = typeof users.$inferSelect;
+export type NewUserRow = typeof users.$inferInsert;
+export type SessionRow = typeof sessions.$inferSelect;
+export type NewSessionRow = typeof sessions.$inferInsert;
+export type ServiceCredentialRow = typeof serviceCredentials.$inferSelect;
+export type NewServiceCredentialRow = typeof serviceCredentials.$inferInsert;
+```
+
+- [ ] **Step 4: Export from the barrel**
+
+In `src/infrastructure/database/schema/index.ts`, add:
+
+```ts
+export * from './identity.schema';
+```
+
+- [ ] **Step 5: Run test + build**
+
+Run: `pnpm test -- identity.schema && pnpm build`
+Expected: PASS.
+
+- [ ] **Step 6: Generate the migration**
+
+Run: `pnpm db:generate`
+Expected: a new SQL migration (and snapshot) under `src/infrastructure/database/migrations/` creating the `user_role` enum and three tables. Skim it to confirm the enum + tables + indexes look right.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/infrastructure/database/schema src/infrastructure/database/migrations
+git commit -m "feat(auth): add identity schema (users, sessions, service_credentials)"
+```
+
+---
+
+## Task 3: Auth primitives (Principal, decorators)
+
+**Files:**
+- Modify: `src/common/principal.ts`
+- Create: `src/common/decorators/public.decorator.ts`
+- Create: `src/common/decorators/roles.decorator.ts`
+- Modify: `src/common/decorators/current-user.decorator.ts`
+- Create: `src/common/principal.spec.ts`
+- Create: `src/common/decorators/metadata-decorators.spec.ts`
+
+**Interfaces:**
+- Produces: `UserRole`; `Principal { id: string | null; role?: UserRole }`; `SYSTEM_PRINCIPAL`, `GUEST_PRINCIPAL`; `@Public()` + `IS_PUBLIC_KEY`; `@Roles(...UserRole)` + `ROLES_KEY`; `CurrentUser` reading `request.user`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `src/common/principal.spec.ts`:
+
+```ts
+import { GUEST_PRINCIPAL, SYSTEM_PRINCIPAL } from './principal';
+
+describe('principals', () => {
+  it('system principal is the internal agent caller', () => {
+    expect(SYSTEM_PRINCIPAL).toEqual({ id: null, role: 'agent' });
+  });
+  it('guest principal is anonymous', () => {
+    expect(GUEST_PRINCIPAL).toEqual({ id: null, role: 'guest' });
+  });
+});
+```
+
+Create `src/common/decorators/metadata-decorators.spec.ts`:
+
+```ts
+import { Reflector } from '@nestjs/core';
+import { IS_PUBLIC_KEY, Public } from './public.decorator';
+import { ROLES_KEY, Roles } from './roles.decorator';
+
+describe('metadata decorators', () => {
+  const reflector = new Reflector();
+
+  it('@Public marks a handler public', () => {
+    class Ctrl {
+      @Public()
+      handler() {}
+    }
+    expect(reflector.get(IS_PUBLIC_KEY, Ctrl.prototype.handler)).toBe(true);
+  });
+
+  it('@Roles records the allowed roles', () => {
+    class Ctrl {
+      @Roles('admin', 'agent')
+      handler() {}
+    }
+    expect(reflector.get(ROLES_KEY, Ctrl.prototype.handler)).toEqual([
+      'admin',
+      'agent',
+    ]);
+  });
+});
+```
+
+- [ ] **Step 2: Run, verify failure**
+
+Run: `pnpm test -- principal metadata-decorators`
+Expected: FAIL (modules/exports missing).
+
+- [ ] **Step 3: Update `principal.ts`**
+
+Replace `src/common/principal.ts` with:
+
+```ts
+/** Shared role vocabulary (mirrors the `user_role` DB enum). */
+export type UserRole = 'guest' | 'user' | 'admin' | 'agent';
+
+/**
+ * The acting principal. `id === null` denotes the system / anonymous caller.
+ * `role` is optional so existing `{ id }` call sites keep compiling; the auth
+ * guard/strategies always populate it, and RolesGuard treats absent as 'guest'.
+ */
+export interface Principal {
+  id: string | null;
+  role?: UserRole;
+}
+
+/** System principal for internal (agent / pipeline) callers. */
+export const SYSTEM_PRINCIPAL: Principal = { id: null, role: 'agent' };
+
+/** Anonymous caller — no token present. */
+export const GUEST_PRINCIPAL: Principal = { id: null, role: 'guest' };
+```
+
+- [ ] **Step 4: Create the decorators**
+
+Create `src/common/decorators/public.decorator.ts`:
+
+```ts
+import { SetMetadata } from '@nestjs/common';
+
+/** Metadata key marking a route as not requiring authentication. */
+export const IS_PUBLIC_KEY = 'isPublic';
+
+/** Opt a route (or controller) out of the global JwtAuthGuard. */
+export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
+```
+
+Create `src/common/decorators/roles.decorator.ts`:
+
+```ts
+import { SetMetadata } from '@nestjs/common';
+import type { UserRole } from '../principal';
+
+/** Metadata key holding the roles allowed to access a route. */
+export const ROLES_KEY = 'roles';
+
+/** Restrict a route (or controller) to the given roles (RolesGuard). */
+export const Roles = (...roles: UserRole[]) => SetMetadata(ROLES_KEY, roles);
+```
+
+- [ ] **Step 5: Rewire `current-user.decorator.ts`**
+
+Replace `src/common/decorators/current-user.decorator.ts` with:
+
+```ts
+import { createParamDecorator, type ExecutionContext } from '@nestjs/common';
+import type { Request } from 'express';
+import { GUEST_PRINCIPAL, type Principal } from '../principal';
+
+/**
+ * Resolves the acting principal for a request. Reads `request.user`, which the
+ * JwtAuthGuard populates from a verified access token. Falls back to the guest
+ * principal on `@Public()` routes with no token. Controller/service signatures
+ * are unchanged from the previous placeholder.
+ */
+export const CurrentUser = createParamDecorator(
+  (_data: unknown, ctx: ExecutionContext): Principal => {
+    const req = ctx
+      .switchToHttp()
+      .getRequest<Request & { user?: Principal }>();
+    return req.user ?? GUEST_PRINCIPAL;
+  },
+);
+```
+
+- [ ] **Step 6: Run tests + build**
+
+Run: `pnpm test -- principal metadata-decorators && pnpm build`
+Expected: PASS. (Build confirms existing file/search code still compiles with optional `role`.)
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/common
+git commit -m "feat(auth): extend Principal with roles and add @Public/@Roles decorators"
+```
+
+---
+
+## Task 4: Password service (argon2id)
+
+**Files:**
+- Create: `src/features/auth/password.service.ts`
+- Create: `src/features/auth/password.service.spec.ts`
+
+**Interfaces:**
+- Produces: `PasswordService.hash(plain): Promise<string>`, `PasswordService.verify(hash, plain): Promise<boolean>`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `src/features/auth/password.service.spec.ts`:
+
+```ts
+import { PasswordService } from './password.service';
+
+describe('PasswordService', () => {
+  const svc = new PasswordService();
+
+  it('hashes then verifies a password', async () => {
+    const hash = await svc.hash('s3cret-password-123');
+    expect(hash).not.toBe('s3cret-password-123');
+    expect(hash.startsWith('$argon2id$')).toBe(true);
+    expect(await svc.verify(hash, 's3cret-password-123')).toBe(true);
+    expect(await svc.verify(hash, 'wrong-password')).toBe(false);
+  });
+
+  it('returns false on a malformed hash instead of throwing', async () => {
+    expect(await svc.verify('not-a-real-hash', 'x')).toBe(false);
+  });
+});
+```
+
+- [ ] **Step 2: Run, verify failure**
+
+Run: `pnpm test -- password.service`
+Expected: FAIL (module not found).
+
+- [ ] **Step 3: Implement**
+
+Create `src/features/auth/password.service.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import * as argon2 from 'argon2';
+
+/** Password hashing/verification using argon2id (OWASP-recommended). */
+@Injectable()
+export class PasswordService {
+  hash(plain: string): Promise<string> {
+    return argon2.hash(plain, { type: argon2.argon2id });
+  }
+
+  async verify(hash: string, plain: string): Promise<boolean> {
+    try {
+      return await argon2.verify(hash, plain);
+    } catch {
+      return false;
+    }
+  }
+}
+```
+
+- [ ] **Step 4: Run test + build**
+
+Run: `pnpm test -- password.service && pnpm build`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/features/auth/password.service.ts src/features/auth/password.service.spec.ts
+git commit -m "feat(auth): add argon2id password service"
+```
+
+---
+
+## Task 5: Token service & auth types
+
+**Files:**
+- Create: `src/features/auth/auth.types.ts`
+- Create: `src/features/auth/token.service.ts`
+- Create: `src/features/auth/token.service.spec.ts`
+
+**Interfaces:**
+- Consumes: `AuthConfig` (Task 1), `JwtService` (`@nestjs/jwt`).
+- Produces: `AccessTokenClaims`, `TokenPair`, `GeneratedRefreshToken`; `TokenService.signAccessToken(claims, ttl?)`, `.hashToken(token)`, `.generateRefreshToken()`, `.newFamilyId()`, `.refreshExpiry()`, `.accessTtl()`, `.agentTtl()`.
+
+- [ ] **Step 1: Create the types**
+
+Create `src/features/auth/auth.types.ts`:
+
+```ts
+import type { UserRole } from '../../common/principal';
+
+/** Signed into every access token; read back by JwtStrategy.validate. */
+export interface AccessTokenClaims {
+  sub: string; // user id or service-credential id
+  role: UserRole;
+  email?: string;
+  kind: 'user' | 'service';
+}
+
+/** What the login/refresh endpoints return. */
+export interface TokenPair {
+  accessToken: string;
+  refreshToken: string;
+  expiresIn: number; // access-token lifetime, seconds
+}
+
+/** An opaque refresh token (returned to client) plus the hash we persist. */
+export interface GeneratedRefreshToken {
+  token: string;
+  tokenHash: string;
+}
+```
+
+- [ ] **Step 2: Write the failing test**
+
+Create `src/features/auth/token.service.spec.ts`:
+
+```ts
+import type { ConfigService } from '@nestjs/config';
+import type { JwtService } from '@nestjs/jwt';
+import { TokenService } from './token.service';
+
+describe('TokenService', () => {
+  let jwt: any;
+  let service: TokenService;
+
+  const config = {
+    getOrThrow: () => ({
+      jwtAccessSecret: 'test-secret',
+      issuer: 'cybernetics',
+      accessTtl: 900,
+      refreshTtl: 604800,
+      agentTokenTtl: 300,
+    }),
+  } as unknown as ConfigService;
+
+  beforeEach(() => {
+    jwt = { sign: jest.fn(() => 'signed.jwt.token') };
+    service = new TokenService(jwt as unknown as JwtService, config);
+  });
+
+  it('signs an access token with claims, secret, issuer and ttl', () => {
+    const token = service.signAccessToken({
+      sub: 'u1',
+      role: 'user',
+      email: 'a@b.co',
+      kind: 'user',
+    });
+    expect(token).toBe('signed.jwt.token');
+    expect(jwt.sign).toHaveBeenCalledWith(
+      expect.objectContaining({ sub: 'u1', role: 'user', kind: 'user' }),
+      expect.objectContaining({
+        secret: 'test-secret',
+        issuer: 'cybernetics',
+        expiresIn: 900,
+      }),
+    );
+  });
+
+  it('honors an explicit ttl override (agent tokens)', () => {
+    service.signAccessToken({ sub: 'c1', role: 'agent', kind: 'service' }, 300);
+    expect(jwt.sign).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.objectContaining({ expiresIn: 300 }),
+    );
+  });
+
+  it('generates unique refresh tokens with a sha256 hash', () => {
+    const a = service.generateRefreshToken();
+    const b = service.generateRefreshToken();
+    expect(a.token).not.toBe(b.token);
+    expect(a.tokenHash).toMatch(/^[a-f0-9]{64}$/);
+    expect(service.hashToken(a.token)).toBe(a.tokenHash);
+  });
+});
+```
+
+- [ ] **Step 3: Run, verify failure**
+
+Run: `pnpm test -- token.service`
+Expected: FAIL (module not found).
+
+- [ ] **Step 4: Implement**
+
+Create `src/features/auth/token.service.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { JwtService } from '@nestjs/jwt';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import type { AuthConfig } from '../../config/configurations/auth.config';
+import type { AccessTokenClaims, GeneratedRefreshToken } from './auth.types';
+
+/** Access-token signing (HS256) + opaque refresh-token crypto. */
+@Injectable()
+export class TokenService {
+  constructor(
+    private readonly jwt: JwtService,
+    private readonly config: ConfigService,
+  ) {}
+
+  private get cfg(): AuthConfig {
+    return this.config.getOrThrow<AuthConfig>('auth');
+  }
+
+  signAccessToken(claims: AccessTokenClaims, ttlSeconds?: number): string {
+    const cfg = this.cfg;
+    return this.jwt.sign(claims, {
+      secret: cfg.jwtAccessSecret,
+      issuer: cfg.issuer,
+      expiresIn: ttlSeconds ?? cfg.accessTtl,
+    });
+  }
+
+  accessTtl(): number {
+    return this.cfg.accessTtl;
+  }
+
+  agentTtl(): number {
+    return this.cfg.agentTokenTtl;
+  }
+
+  hashToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  generateRefreshToken(): GeneratedRefreshToken {
+    const token = randomBytes(32).toString('base64url');
+    return { token, tokenHash: this.hashToken(token) };
+  }
+
+  newFamilyId(): string {
+    return randomUUID();
+  }
+
+  refreshExpiry(): Date {
+    return new Date(Date.now() + this.cfg.refreshTtl * 1000);
+  }
+}
+```
+
+- [ ] **Step 5: Run test + build**
+
+Run: `pnpm test -- token.service && pnpm build`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/features/auth/auth.types.ts src/features/auth/token.service.ts src/features/auth/token.service.spec.ts
+git commit -m "feat(auth): add token service (JWT signing + refresh-token crypto)"
+```
+
+---
+
+## Task 6: Users feature (repository, service, controller, module)
+
+**Files:**
+- Create: `src/features/users/user.repository.ts`
+- Create: `src/features/users/dto/create-user.dto.ts`, `dto/update-user.dto.ts`, `dto/list-users.dto.ts`
+- Create: `src/features/users/users.service.ts`
+- Create: `src/features/users/users.service.spec.ts`
+- Create: `src/features/users/users.controller.ts`
+- Create: `src/features/users/users.module.ts`
+
+**Interfaces:**
+- Consumes: `users`/`UserRow`/`NewUserRow` (Task 2), `PasswordService` (Task 4), `DRIZZLE`/`BaseRepository`.
+- Produces: `UserRepository` (`findByEmail`, `findActiveById`, `update`, `softDelete`, `list`, `stampLogin`, `countByRole`); `UsersService` (`create`, `findById`, `list`, `update`, `remove`) → `PublicUser`; `UsersModule` exporting `UserRepository`, `UsersService`, `PasswordService`.
+
+- [ ] **Step 1: Create the repository**
+
+Create `src/features/users/user.repository.ts` (repositories are integration-tested via e2e, matching `FileRepository` which has no unit spec):
+
+```ts
+import { Inject, Injectable } from '@nestjs/common';
+import { and, count, desc, eq } from 'drizzle-orm';
+import {
+  DRIZZLE,
+  type DrizzleDB,
+} from '../../infrastructure/database/drizzle.constants';
+import { BaseRepository } from '../../infrastructure/database/repositories/base.repository';
+import {
+  users,
+  type NewUserRow,
+  type UserRow,
+} from '../../infrastructure/database/schema/identity.schema';
+
+/** Repository for the `users` table — soft-delete aware. */
+@Injectable()
+export class UserRepository extends BaseRepository<typeof users> {
+  constructor(@Inject(DRIZZLE) db: DrizzleDB) {
+    super(db, users);
+  }
+
+  async findByEmail(email: string): Promise<UserRow | null> {
+    const rows = await this.db
+      .select()
+      .from(users)
+      .where(and(eq(users.email, email), eq(users.isDeleted, false)))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async findActiveById(id: string): Promise<UserRow | null> {
+    const rows = await this.db
+      .select()
+      .from(users)
+      .where(and(eq(users.id, id), eq(users.isDeleted, false)))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async update(id: string, patch: Partial<NewUserRow>): Promise<UserRow | null> {
+    const rows = await this.db
+      .update(users)
+      .set(patch)
+      .where(eq(users.id, id))
+      .returning();
+    return rows[0] ?? null;
+  }
+
+  async softDelete(id: string): Promise<void> {
+    await this.db
+      .update(users)
+      .set({ isDeleted: true, deletedAt: new Date() })
+      .where(eq(users.id, id));
+  }
+
+  async list(
+    page: number,
+    limit: number,
+  ): Promise<{ rows: UserRow[]; total: number }> {
+    const where = eq(users.isDeleted, false);
+    const rows = await this.db
+      .select()
+      .from(users)
+      .where(where)
+      .orderBy(desc(users.createdAt))
+      .limit(limit)
+      .offset((page - 1) * limit);
+    const totals = await this.db
+      .select({ value: count() })
+      .from(users)
+      .where(where);
+    return { rows, total: Number(totals[0]?.value ?? 0) };
+  }
+
+  async stampLogin(id: string): Promise<void> {
+    await this.db
+      .update(users)
+      .set({ lastLoginAt: new Date() })
+      .where(eq(users.id, id));
+  }
+
+  async countByRole(role: UserRow['role']): Promise<number> {
+    const totals = await this.db
+      .select({ value: count() })
+      .from(users)
+      .where(and(eq(users.role, role), eq(users.isDeleted, false)));
+    return Number(totals[0]?.value ?? 0);
+  }
+}
+```
+
+- [ ] **Step 2: Create the DTOs**
+
+Create `src/features/users/dto/create-user.dto.ts`:
+
+```ts
+import { z } from 'zod';
+
+export const createUserSchema = z.object({
+  email: z.string().email().max(255),
+  password: z.string().min(12).max(200),
+  role: z.enum(['user', 'admin']).default('user'),
+  displayName: z.string().min(1).max(255).optional(),
+});
+
+export type CreateUserDto = z.infer<typeof createUserSchema>;
+```
+
+Create `src/features/users/dto/update-user.dto.ts`:
+
+```ts
+import { z } from 'zod';
+
+export const updateUserSchema = z
+  .object({
+    role: z.enum(['user', 'admin']).optional(),
+    password: z.string().min(12).max(200).optional(),
+    displayName: z.string().min(1).max(255).nullable().optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, {
+    message: 'At least one field must be provided',
+  });
+
+export type UpdateUserDto = z.infer<typeof updateUserSchema>;
+```
+
+Create `src/features/users/dto/list-users.dto.ts`:
+
+```ts
+import { z } from 'zod';
+
+export const listUsersSchema = z.object({
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+});
+
+export type ListUsersDto = z.infer<typeof listUsersSchema>;
+```
+
+- [ ] **Step 3: Write the failing service test**
+
+Create `src/features/users/users.service.spec.ts`:
+
+```ts
+import { ConflictException, NotFoundException } from '@nestjs/common';
+import { UsersService } from './users.service';
+
+function makeRow(overrides: Record<string, any> = {}) {
+  return {
+    id: 'u1',
+    email: 'a@b.co',
+    passwordHash: 'HASH',
+    role: 'user',
+    displayName: null,
+    createdAt: new Date('2020-01-01'),
+    updatedAt: new Date('2020-01-01'),
+    lastLoginAt: null,
+    isDeleted: false,
+    deletedAt: null,
+    ...overrides,
+  };
+}
+
+describe('UsersService', () => {
+  let repo: any;
+  let passwords: any;
+  let service: UsersService;
+
+  beforeEach(() => {
+    repo = {
+      findByEmail: jest.fn(async () => null),
+      findActiveById: jest.fn(async () => makeRow()),
+      create: jest.fn(async (v: any) => makeRow(v)),
+      update: jest.fn(async (id: string, patch: any) => makeRow({ id, ...patch })),
+      softDelete: jest.fn(async () => undefined),
+      list: jest.fn(async () => ({ rows: [makeRow()], total: 1 })),
+    };
+    passwords = { hash: jest.fn(async () => 'HASH') };
+    service = new UsersService(repo, passwords);
+  });
+
+  it('creates a user: lowercases email, hashes password, strips the hash', async () => {
+    const user = await service.create({
+      email: 'MixedCase@B.co',
+      password: 'a-very-strong-pass',
+      role: 'user',
+    });
+    expect(passwords.hash).toHaveBeenCalledWith('a-very-strong-pass');
+    expect(repo.create).toHaveBeenCalledWith(
+      expect.objectContaining({ email: 'mixedcase@b.co', passwordHash: 'HASH' }),
+    );
+    expect((user as any).passwordHash).toBeUndefined();
+    expect(user.email).toBe('mixedcase@b.co');
+  });
+
+  it('rejects a duplicate email', async () => {
+    repo.findByEmail.mockResolvedValueOnce(makeRow());
+    await expect(
+      service.create({ email: 'a@b.co', password: 'a-very-strong-pass', role: 'user' }),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('404s when updating a missing user', async () => {
+    repo.findActiveById.mockResolvedValueOnce(null);
+    await expect(service.update('nope', { role: 'admin' })).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  it('soft-deletes an existing user', async () => {
+    await service.remove('u1');
+    expect(repo.softDelete).toHaveBeenCalledWith('u1');
+  });
+});
+```
+
+- [ ] **Step 4: Run, verify failure**
+
+Run: `pnpm test -- users.service`
+Expected: FAIL (module not found).
+
+- [ ] **Step 5: Implement the service**
+
+Create `src/features/users/users.service.ts`:
+
+```ts
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { PasswordService } from '../auth/password.service';
+import type { UserRow } from '../../infrastructure/database/schema/identity.schema';
+import type { CreateUserDto } from './dto/create-user.dto';
+import type { UpdateUserDto } from './dto/update-user.dto';
+import { UserRepository } from './user.repository';
+
+/** User as exposed by the API — never includes the password hash. */
+export interface PublicUser {
+  id: string;
+  email: string;
+  role: UserRow['role'];
+  displayName: string | null;
+  createdAt: Date;
+  lastLoginAt: Date | null;
+}
+
+@Injectable()
+export class UsersService {
+  constructor(
+    private readonly repo: UserRepository,
+    private readonly passwords: PasswordService,
+  ) {}
+
+  private toPublic(row: UserRow): PublicUser {
+    return {
+      id: row.id,
+      email: row.email,
+      role: row.role,
+      displayName: row.displayName ?? null,
+      createdAt: row.createdAt,
+      lastLoginAt: row.lastLoginAt ?? null,
+    };
+  }
+
+  async create(dto: CreateUserDto): Promise<PublicUser> {
+    const email = dto.email.toLowerCase();
+    if (await this.repo.findByEmail(email)) {
+      throw new ConflictException('Email already registered');
+    }
+    const passwordHash = await this.passwords.hash(dto.password);
+    const row = await this.repo.create({
+      email,
+      passwordHash,
+      role: dto.role ?? 'user',
+      displayName: dto.displayName,
+    });
+    return this.toPublic(row);
+  }
+
+  async findById(id: string): Promise<PublicUser> {
+    const row = await this.repo.findActiveById(id);
+    if (!row) throw new NotFoundException('User not found');
+    return this.toPublic(row);
+  }
+
+  async list(page: number, limit: number) {
+    const { rows, total } = await this.repo.list(page, limit);
+    return { data: rows.map((r) => this.toPublic(r)), total, page, limit };
+  }
+
+  async update(id: string, dto: UpdateUserDto): Promise<PublicUser> {
+    await this.findById(id); // 404 if missing
+    const patch: Record<string, unknown> = {};
+    if (dto.role) patch.role = dto.role;
+    if (dto.displayName !== undefined) patch.displayName = dto.displayName;
+    if (dto.password) patch.passwordHash = await this.passwords.hash(dto.password);
+    const row = await this.repo.update(id, patch);
+    if (!row) throw new NotFoundException('User not found');
+    return this.toPublic(row);
+  }
+
+  async remove(id: string): Promise<void> {
+    await this.findById(id);
+    await this.repo.softDelete(id);
+  }
+}
+```
+
+- [ ] **Step 6: Run test + build**
+
+Run: `pnpm test -- users.service && pnpm build`
+Expected: PASS.
+
+- [ ] **Step 7: Create the controller**
+
+Create `src/features/users/users.controller.ts` (`@Roles('admin')` — enforcement activates once the global guards land in Task 12):
+
+```ts
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import { createUserSchema, type CreateUserDto } from './dto/create-user.dto';
+import { listUsersSchema, type ListUsersDto } from './dto/list-users.dto';
+import { updateUserSchema, type UpdateUserDto } from './dto/update-user.dto';
+import { UsersService } from './users.service';
+
+/** Admin-only user provisioning (no public signup). */
+@Roles('admin')
+@Controller('users')
+export class UsersController {
+  constructor(private readonly users: UsersService) {}
+
+  @Post()
+  create(@Body(new ZodValidationPipe(createUserSchema)) dto: CreateUserDto) {
+    return this.users.create(dto);
+  }
+
+  @Get()
+  list(@Query(new ZodValidationPipe(listUsersSchema)) query: ListUsersDto) {
+    return this.users.list(query.page, query.limit);
+  }
+
+  @Get(':id')
+  get(@Param('id', ParseUUIDPipe) id: string) {
+    return this.users.findById(id);
+  }
+
+  @Patch(':id')
+  update(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body(new ZodValidationPipe(updateUserSchema)) dto: UpdateUserDto,
+  ) {
+    return this.users.update(id, dto);
+  }
+
+  @Delete(':id')
+  @HttpCode(204)
+  async remove(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
+    await this.users.remove(id);
+  }
+}
+```
+
+- [ ] **Step 8: Create the module**
+
+Create `src/features/users/users.module.ts`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { PasswordService } from '../auth/password.service';
+import { UserRepository } from './user.repository';
+import { UsersController } from './users.controller';
+import { UsersService } from './users.service';
+
+/**
+ * Users feature. Owns admin user provisioning and exports the repository,
+ * service, and PasswordService so AuthModule can reuse them (Auth → Users;
+ * Users has no dependency on Auth, so no circular import).
+ */
+@Module({
+  controllers: [UsersController],
+  providers: [UserRepository, UsersService, PasswordService],
+  exports: [UserRepository, UsersService, PasswordService],
+})
+export class UsersModule {}
+```
+
+- [ ] **Step 9: Build + commit**
+
+Run: `pnpm build && pnpm test`
+Expected: PASS.
+
+```bash
+git add src/features/users
+git commit -m "feat(users): add admin-provisioned users feature (repo, service, controller)"
+```
+
+---
+
+## Task 7: Auth core (session repository & auth service)
+
+**Files:**
+- Create: `src/features/auth/session.repository.ts`
+- Create: `src/features/auth/auth.service.ts`
+- Create: `src/features/auth/auth.service.spec.ts`
+
+**Interfaces:**
+- Consumes: `sessions`/`SessionRow`/`NewSessionRow` (Task 2), `UserRepository` (Task 6), `TokenService` (Task 5), `PasswordService` (Task 4).
+- Produces: `SessionRepository`; `AuthService` (`validateUser`, `login`, `refresh`, `logout`, `logoutAll`, `changePassword`, `listSessions`); `RequestContext { userAgent?; ip? }`; `SessionSummary`.
+
+- [ ] **Step 1: Create the session repository**
+
+Create `src/features/auth/session.repository.ts`:
+
+```ts
+import { Inject, Injectable } from '@nestjs/common';
+import { and, eq, gt, isNull } from 'drizzle-orm';
+import {
+  DRIZZLE,
+  type DrizzleDB,
+} from '../../infrastructure/database/drizzle.constants';
+import {
+  sessions,
+  type NewSessionRow,
+  type SessionRow,
+} from '../../infrastructure/database/schema/identity.schema';
+
+/** Access to the `sessions` (refresh-token) table. */
+@Injectable()
+export class SessionRepository {
+  constructor(@Inject(DRIZZLE) private readonly db: DrizzleDB) {}
+
+  async create(row: NewSessionRow): Promise<SessionRow> {
+    const rows = await this.db.insert(sessions).values(row).returning();
+    return rows[0];
+  }
+
+  async findByTokenHash(tokenHash: string): Promise<SessionRow | null> {
+    const rows = await this.db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.tokenHash, tokenHash))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async revokeById(id: string): Promise<void> {
+    await this.db
+      .update(sessions)
+      .set({ revokedAt: new Date() })
+      .where(eq(sessions.id, id));
+  }
+
+  async revokeFamily(familyId: string): Promise<void> {
+    await this.db
+      .update(sessions)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(sessions.familyId, familyId), isNull(sessions.revokedAt)));
+  }
+
+  async revokeAllForUser(userId: string): Promise<void> {
+    await this.db
+      .update(sessions)
+      .set({ revokedAt: new Date() })
+      .where(and(eq(sessions.userId, userId), isNull(sessions.revokedAt)));
+  }
+
+  async listActiveForUser(userId: string): Promise<SessionRow[]> {
+    return this.db
+      .select()
+      .from(sessions)
+      .where(
+        and(
+          eq(sessions.userId, userId),
+          isNull(sessions.revokedAt),
+          gt(sessions.expiresAt, new Date()),
+        ),
+      );
+  }
+}
+```
+
+- [ ] **Step 2: Write the failing auth-service test**
+
+Create `src/features/auth/auth.service.spec.ts`:
+
+```ts
+import { UnauthorizedException } from '@nestjs/common';
+import { AuthService } from './auth.service';
+
+function makeUser(overrides: Record<string, any> = {}) {
+  return { id: 'u1', email: 'a@b.co', passwordHash: 'HASH', role: 'user', ...overrides };
+}
+
+describe('AuthService', () => {
+  let users: any;
+  let sessions: any;
+  let tokens: any;
+  let passwords: any;
+  let service: AuthService;
+
+  beforeEach(() => {
+    users = {
+      findByEmail: jest.fn(async () => makeUser()),
+      findActiveById: jest.fn(async () => makeUser()),
+      stampLogin: jest.fn(async () => undefined),
+      update: jest.fn(async () => makeUser()),
+    };
+    sessions = {
+      create: jest.fn(async () => ({ id: 's1' })),
+      findByTokenHash: jest.fn(),
+      revokeById: jest.fn(async () => undefined),
+      revokeFamily: jest.fn(async () => undefined),
+      revokeAllForUser: jest.fn(async () => undefined),
+      listActiveForUser: jest.fn(async () => []),
+    };
+    tokens = {
+      newFamilyId: jest.fn(() => 'fam-1'),
+      signAccessToken: jest.fn(() => 'access.jwt'),
+      generateRefreshToken: jest.fn(() => ({ token: 'refresh-raw', tokenHash: 'HHH' })),
+      hashToken: jest.fn((t: string) => `hash(${t})`),
+      refreshExpiry: jest.fn(() => new Date(Date.now() + 1000)),
+      accessTtl: jest.fn(() => 900),
+    };
+    passwords = { verify: jest.fn(async () => true), hash: jest.fn(async () => 'NEWHASH') };
+    service = new AuthService(users, sessions, tokens, passwords);
+  });
+
+  describe('validateUser', () => {
+    it('returns the user on valid credentials', async () => {
+      await expect(service.validateUser('a@b.co', 'pw')).resolves.toEqual(makeUser());
+    });
+    it('throws 401 when the user is unknown', async () => {
+      users.findByEmail.mockResolvedValueOnce(null);
+      await expect(service.validateUser('x@y.z', 'pw')).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+    it('throws 401 when the password is wrong', async () => {
+      passwords.verify.mockResolvedValueOnce(false);
+      await expect(service.validateUser('a@b.co', 'bad')).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+  });
+
+  describe('login', () => {
+    it('issues a pair, persists a session, and stamps login', async () => {
+      const pair = await service.login(makeUser(), { ip: '1.2.3.4' });
+      expect(pair).toEqual({ accessToken: 'access.jwt', refreshToken: 'refresh-raw', expiresIn: 900 });
+      expect(sessions.create).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: 'u1', tokenHash: 'HHH', familyId: 'fam-1' }),
+      );
+      expect(users.stampLogin).toHaveBeenCalledWith('u1');
+    });
+  });
+
+  describe('refresh', () => {
+    it('rotates a valid refresh token (revoke old, issue new in same family)', async () => {
+      sessions.findByTokenHash.mockResolvedValueOnce({
+        id: 's1', userId: 'u1', familyId: 'fam-1', revokedAt: null,
+        expiresAt: new Date(Date.now() + 10000),
+      });
+      const pair = await service.refresh('refresh-raw', {});
+      expect(sessions.revokeById).toHaveBeenCalledWith('s1');
+      expect(sessions.create).toHaveBeenCalledWith(
+        expect.objectContaining({ familyId: 'fam-1' }),
+      );
+      expect(pair.accessToken).toBe('access.jwt');
+    });
+
+    it('detects reuse: revokes the whole family and throws 401', async () => {
+      sessions.findByTokenHash.mockResolvedValueOnce({
+        id: 's1', userId: 'u1', familyId: 'fam-1',
+        revokedAt: new Date(), expiresAt: new Date(Date.now() + 10000),
+      });
+      await expect(service.refresh('refresh-raw', {})).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+      expect(sessions.revokeFamily).toHaveBeenCalledWith('fam-1');
+    });
+
+    it('throws 401 for an unknown refresh token', async () => {
+      sessions.findByTokenHash.mockResolvedValueOnce(null);
+      await expect(service.refresh('nope', {})).rejects.toBeInstanceOf(
+        UnauthorizedException,
+      );
+    });
+  });
+
+  describe('changePassword', () => {
+    it('updates the hash and revokes all sessions', async () => {
+      await service.changePassword('u1', 'current', 'new-strong-password');
+      expect(users.update).toHaveBeenCalledWith('u1', { passwordHash: 'NEWHASH' });
+      expect(sessions.revokeAllForUser).toHaveBeenCalledWith('u1');
+    });
+    it('throws 401 when the current password is wrong', async () => {
+      passwords.verify.mockResolvedValueOnce(false);
+      await expect(
+        service.changePassword('u1', 'wrong', 'new-strong-password'),
+      ).rejects.toBeInstanceOf(UnauthorizedException);
+    });
+  });
+});
+```
+
+- [ ] **Step 3: Run, verify failure**
+
+Run: `pnpm test -- auth.service`
+Expected: FAIL (module not found).
+
+- [ ] **Step 4: Implement the auth service**
+
+Create `src/features/auth/auth.service.ts`:
+
+```ts
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+import type { UserRow } from '../../infrastructure/database/schema/identity.schema';
+import { UserRepository } from '../users/user.repository';
+import type { TokenPair } from './auth.types';
+import { PasswordService } from './password.service';
+import { SessionRepository } from './session.repository';
+import { TokenService } from './token.service';
+
+export interface RequestContext {
+  userAgent?: string;
+  ip?: string;
+}
+
+/** A sanitized view of an active session (never exposes the token hash). */
+export interface SessionSummary {
+  id: string;
+  createdAt: Date;
+  lastUsedAt: Date | null;
+  expiresAt: Date;
+  userAgent: string | null;
+  ip: string | null;
+}
+
+@Injectable()
+export class AuthService {
+  constructor(
+    private readonly users: UserRepository,
+    private readonly sessions: SessionRepository,
+    private readonly tokens: TokenService,
+    private readonly passwords: PasswordService,
+  ) {}
+
+  /** Used by LocalStrategy. Uniform 401 — never reveals which factor failed. */
+  async validateUser(email: string, password: string): Promise<UserRow> {
+    const user = await this.users.findByEmail(email.toLowerCase());
+    const ok = user
+      ? await this.passwords.verify(user.passwordHash, password)
+      : false;
+    if (!user || !ok) throw new UnauthorizedException('Invalid credentials');
+    return user;
+  }
+
+  async login(user: UserRow, ctx: RequestContext): Promise<TokenPair> {
+    const familyId = this.tokens.newFamilyId();
+    const pair = await this.issuePair(user, familyId, ctx);
+    await this.users.stampLogin(user.id);
+    return pair;
+  }
+
+  async refresh(refreshToken: string, ctx: RequestContext): Promise<TokenPair> {
+    const tokenHash = this.tokens.hashToken(refreshToken);
+    const session = await this.sessions.findByTokenHash(tokenHash);
+    if (!session) throw new UnauthorizedException('Invalid refresh token');
+
+    if (session.revokedAt) {
+      // Replay of a rotated/revoked token → assume theft; revoke the family.
+      await this.sessions.revokeFamily(session.familyId);
+      throw new UnauthorizedException('Refresh token reuse detected');
+    }
+    if (session.expiresAt.getTime() <= Date.now()) {
+      throw new UnauthorizedException('Refresh token expired');
+    }
+
+    const user = await this.users.findActiveById(session.userId);
+    if (!user) throw new UnauthorizedException('Invalid refresh token');
+
+    await this.sessions.revokeById(session.id);
+    return this.issuePair(user, session.familyId, ctx);
+  }
+
+  async logout(refreshToken: string): Promise<void> {
+    const session = await this.sessions.findByTokenHash(
+      this.tokens.hashToken(refreshToken),
+    );
+    if (session && !session.revokedAt) {
+      await this.sessions.revokeById(session.id);
+    }
+  }
+
+  async logoutAll(userId: string): Promise<void> {
+    await this.sessions.revokeAllForUser(userId);
+  }
+
+  async changePassword(
+    userId: string,
+    current: string,
+    next: string,
+  ): Promise<void> {
+    const user = await this.users.findActiveById(userId);
+    if (!user || !(await this.passwords.verify(user.passwordHash, current))) {
+      throw new UnauthorizedException('Current password is incorrect');
+    }
+    await this.users.update(userId, { passwordHash: await this.passwords.hash(next) });
+    await this.sessions.revokeAllForUser(userId); // force re-login everywhere
+  }
+
+  async listSessions(userId: string): Promise<SessionSummary[]> {
+    const rows = await this.sessions.listActiveForUser(userId);
+    return rows.map((r) => ({
+      id: r.id,
+      createdAt: r.createdAt,
+      lastUsedAt: r.lastUsedAt ?? null,
+      expiresAt: r.expiresAt,
+      userAgent: r.userAgent ?? null,
+      ip: r.ip ?? null,
+    }));
+  }
+
+  private async issuePair(
+    user: UserRow,
+    familyId: string,
+    ctx: RequestContext,
+  ): Promise<TokenPair> {
+    const accessToken = this.tokens.signAccessToken({
+      sub: user.id,
+      role: user.role,
+      email: user.email,
+      kind: 'user',
+    });
+    const refresh = this.tokens.generateRefreshToken();
+    await this.sessions.create({
+      userId: user.id,
+      tokenHash: refresh.tokenHash,
+      familyId,
+      expiresAt: this.tokens.refreshExpiry(),
+      userAgent: ctx.userAgent,
+      ip: ctx.ip,
+    });
+    return {
+      accessToken,
+      refreshToken: refresh.token,
+      expiresIn: this.tokens.accessTtl(),
+    };
+  }
+}
+```
+
+- [ ] **Step 5: Run test + build**
+
+Run: `pnpm test -- auth.service && pnpm build`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/features/auth/session.repository.ts src/features/auth/auth.service.ts src/features/auth/auth.service.spec.ts
+git commit -m "feat(auth): add session repository and auth service (login/refresh/rotation)"
+```
+
+---
+
+## Task 8: Service credentials (agent API keys)
+
+**Files:**
+- Create: `src/features/auth/service-credential.repository.ts`
+- Create: `src/features/auth/service-credential.service.ts`
+- Create: `src/features/auth/service-credential.service.spec.ts`
+
+**Interfaces:**
+- Consumes: `serviceCredentials`/rows (Task 2), `TokenService` (Task 5).
+- Produces: `ServiceCredentialRepository`; `ServiceCredentialService` (`issue(name, createdBy)` → `{ id, name, keyPrefix, apiKey }`, `exchangeForToken(apiKey)` → `{ accessToken, expiresIn }`, `list()`, `revoke(id)`).
+
+- [ ] **Step 1: Create the repository**
+
+Create `src/features/auth/service-credential.repository.ts`:
+
+```ts
+import { Inject, Injectable } from '@nestjs/common';
+import { desc, eq } from 'drizzle-orm';
+import {
+  DRIZZLE,
+  type DrizzleDB,
+} from '../../infrastructure/database/drizzle.constants';
+import {
+  serviceCredentials,
+  type NewServiceCredentialRow,
+  type ServiceCredentialRow,
+} from '../../infrastructure/database/schema/identity.schema';
+
+@Injectable()
+export class ServiceCredentialRepository {
+  constructor(@Inject(DRIZZLE) private readonly db: DrizzleDB) {}
+
+  async create(row: NewServiceCredentialRow): Promise<ServiceCredentialRow> {
+    const rows = await this.db.insert(serviceCredentials).values(row).returning();
+    return rows[0];
+  }
+
+  async findByKeyHash(keyHash: string): Promise<ServiceCredentialRow | null> {
+    const rows = await this.db
+      .select()
+      .from(serviceCredentials)
+      .where(eq(serviceCredentials.keyHash, keyHash))
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
+  async list(): Promise<ServiceCredentialRow[]> {
+    return this.db
+      .select()
+      .from(serviceCredentials)
+      .orderBy(desc(serviceCredentials.createdAt));
+  }
+
+  async revoke(id: string): Promise<void> {
+    await this.db
+      .update(serviceCredentials)
+      .set({ revokedAt: new Date() })
+      .where(eq(serviceCredentials.id, id));
+  }
+
+  async touch(id: string): Promise<void> {
+    await this.db
+      .update(serviceCredentials)
+      .set({ lastUsedAt: new Date() })
+      .where(eq(serviceCredentials.id, id));
+  }
+}
+```
+
+- [ ] **Step 2: Write the failing service test**
+
+Create `src/features/auth/service-credential.service.spec.ts`:
+
+```ts
+import { UnauthorizedException } from '@nestjs/common';
+import { ServiceCredentialService } from './service-credential.service';
+
+describe('ServiceCredentialService', () => {
+  let repo: any;
+  let tokens: any;
+  let service: ServiceCredentialService;
+
+  beforeEach(() => {
+    repo = {
+      create: jest.fn(async (v: any) => ({ id: 'c1', role: 'agent', ...v })),
+      findByKeyHash: jest.fn(),
+      revoke: jest.fn(async () => undefined),
+      touch: jest.fn(async () => undefined),
+      list: jest.fn(async () => []),
+    };
+    tokens = {
+      hashToken: jest.fn((t: string) => `hash(${t})`),
+      signAccessToken: jest.fn(() => 'agent.jwt'),
+      agentTtl: jest.fn(() => 300),
+    };
+    service = new ServiceCredentialService(repo, tokens);
+  });
+
+  it('issues a credential and returns the plaintext key exactly once', async () => {
+    const res = await service.issue('mastra-pipeline', 'admin-1');
+    expect(res.apiKey).toMatch(/^svc_[0-9a-f]{8}_/);
+    expect(res.keyPrefix).toMatch(/^svc_[0-9a-f]{8}$/);
+    expect(repo.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'mastra-pipeline',
+        createdBy: 'admin-1',
+        keyHash: `hash(${res.apiKey})`,
+      }),
+    );
+  });
+
+  it('exchanges a valid key for an agent access token', async () => {
+    repo.findByKeyHash.mockResolvedValueOnce({
+      id: 'c1', role: 'agent', revokedAt: null, expiresAt: null,
+    });
+    const res = await service.exchangeForToken('svc_abc_secret');
+    expect(res).toEqual({ accessToken: 'agent.jwt', expiresIn: 300 });
+    expect(tokens.signAccessToken).toHaveBeenCalledWith(
+      expect.objectContaining({ sub: 'c1', role: 'agent', kind: 'service' }),
+      300,
+    );
+    expect(repo.touch).toHaveBeenCalledWith('c1');
+  });
+
+  it('rejects an unknown key', async () => {
+    repo.findByKeyHash.mockResolvedValueOnce(null);
+    await expect(service.exchangeForToken('nope')).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+  });
+
+  it('rejects a revoked key', async () => {
+    repo.findByKeyHash.mockResolvedValueOnce({
+      id: 'c1', role: 'agent', revokedAt: new Date(), expiresAt: null,
+    });
+    await expect(service.exchangeForToken('svc_abc_secret')).rejects.toBeInstanceOf(
+      UnauthorizedException,
+    );
+  });
+});
+```
+
+- [ ] **Step 3: Run, verify failure**
+
+Run: `pnpm test -- service-credential.service`
+Expected: FAIL (module not found).
+
+- [ ] **Step 4: Implement the service**
+
+Create `src/features/auth/service-credential.service.ts`:
+
+```ts
+import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { randomBytes } from 'node:crypto';
+import type { ServiceCredentialRow } from '../../infrastructure/database/schema/identity.schema';
+import { ServiceCredentialRepository } from './service-credential.repository';
+import { TokenService } from './token.service';
+
+/** Returned once, on creation — the only time the plaintext key is available. */
+export interface IssuedCredential {
+  id: string;
+  name: string;
+  keyPrefix: string;
+  apiKey: string;
+}
+
+/** Public view of a credential (never includes the key/hash). */
+export interface PublicCredential {
+  id: string;
+  name: string;
+  keyPrefix: string;
+  role: ServiceCredentialRow['role'];
+  createdAt: Date;
+  lastUsedAt: Date | null;
+  revokedAt: Date | null;
+}
+
+@Injectable()
+export class ServiceCredentialService {
+  constructor(
+    private readonly repo: ServiceCredentialRepository,
+    private readonly tokens: TokenService,
+  ) {}
+
+  async issue(name: string, createdBy: string | null): Promise<IssuedCredential> {
+    const prefixBytes = randomBytes(4).toString('hex'); // 8 hex chars
+    const secret = randomBytes(24).toString('base64url');
+    const keyPrefix = `svc_${prefixBytes}`;
+    const apiKey = `${keyPrefix}_${secret}`;
+    const keyHash = this.tokens.hashToken(apiKey);
+    const row = await this.repo.create({
+      name,
+      keyPrefix,
+      keyHash,
+      role: 'agent',
+      createdBy: createdBy ?? undefined,
+    });
+    return { id: row.id, name: row.name, keyPrefix, apiKey };
+  }
+
+  async exchangeForToken(
+    apiKey: string,
+  ): Promise<{ accessToken: string; expiresIn: number }> {
+    const cred = await this.repo.findByKeyHash(this.tokens.hashToken(apiKey));
+    if (
+      !cred ||
+      cred.revokedAt ||
+      (cred.expiresAt && cred.expiresAt.getTime() <= Date.now())
+    ) {
+      throw new UnauthorizedException('Invalid service credential');
+    }
+    await this.repo.touch(cred.id);
+    const ttl = this.tokens.agentTtl();
+    const accessToken = this.tokens.signAccessToken(
+      { sub: cred.id, role: cred.role, kind: 'service' },
+      ttl,
+    );
+    return { accessToken, expiresIn: ttl };
+  }
+
+  async list(): Promise<PublicCredential[]> {
+    const rows = await this.repo.list();
+    return rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      keyPrefix: r.keyPrefix,
+      role: r.role,
+      createdAt: r.createdAt,
+      lastUsedAt: r.lastUsedAt ?? null,
+      revokedAt: r.revokedAt ?? null,
+    }));
+  }
+
+  async revoke(id: string): Promise<void> {
+    await this.repo.revoke(id);
+  }
+}
+```
+
+- [ ] **Step 5: Run test + build**
+
+Run: `pnpm test -- service-credential.service && pnpm build`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/features/auth/service-credential.repository.ts src/features/auth/service-credential.service.ts src/features/auth/service-credential.service.spec.ts
+git commit -m "feat(auth): add service credentials (agent API key issue/exchange/revoke)"
+```
+
+---
+
+## Task 9: Passport strategies
+
+**Files:**
+- Create: `src/features/auth/strategies/local.strategy.ts`
+- Create: `src/features/auth/strategies/jwt.strategy.ts`
+- Create: `src/features/auth/strategies/strategies.spec.ts`
+
+**Interfaces:**
+- Consumes: `AuthService.validateUser` (Task 7), `AuthConfig` (Task 1), `AccessTokenClaims` (Task 5).
+- Produces: `LocalStrategy` (puts `UserRow` on `request.user`), `JwtStrategy` (`validate(payload) → Principal { id, role }`).
+
+- [ ] **Step 1: Write the failing test**
+
+Create `src/features/auth/strategies/strategies.spec.ts`:
+
+```ts
+import type { ConfigService } from '@nestjs/config';
+import { JwtStrategy } from './jwt.strategy';
+import { LocalStrategy } from './local.strategy';
+
+describe('LocalStrategy', () => {
+  it('delegates to AuthService.validateUser', async () => {
+    const auth = { validateUser: jest.fn(async () => ({ id: 'u1' })) } as any;
+    const strategy = new LocalStrategy(auth);
+    await strategy.validate('a@b.co', 'pw');
+    expect(auth.validateUser).toHaveBeenCalledWith('a@b.co', 'pw');
+  });
+});
+
+describe('JwtStrategy', () => {
+  const config = {
+    getOrThrow: () => ({ jwtAccessSecret: 'secret', issuer: 'cybernetics' }),
+  } as unknown as ConfigService;
+
+  it('maps a verified payload to a Principal', () => {
+    const strategy = new JwtStrategy(config);
+    expect(
+      strategy.validate({ sub: 'u1', role: 'admin', kind: 'user' }),
+    ).toEqual({ id: 'u1', role: 'admin' });
+  });
+});
+```
+
+- [ ] **Step 2: Run, verify failure**
+
+Run: `pnpm test -- strategies`
+Expected: FAIL (module not found).
+
+- [ ] **Step 3: Implement LocalStrategy**
+
+Create `src/features/auth/strategies/local.strategy.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { PassportStrategy } from '@nestjs/passport';
+import { Strategy } from 'passport-local';
+import type { UserRow } from '../../../infrastructure/database/schema/identity.schema';
+import { AuthService } from '../auth.service';
+
+/** Authenticates POST /auth/login by email + password. */
+@Injectable()
+export class LocalStrategy extends PassportStrategy(Strategy) {
+  constructor(private readonly auth: AuthService) {
+    super({ usernameField: 'email' });
+  }
+
+  validate(email: string, password: string): Promise<UserRow> {
+    return this.auth.validateUser(email, password);
+  }
+}
+```
+
+- [ ] **Step 4: Implement JwtStrategy**
+
+Create `src/features/auth/strategies/jwt.strategy.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { PassportStrategy } from '@nestjs/passport';
+import { ExtractJwt, Strategy } from 'passport-jwt';
+import type { Principal } from '../../../common/principal';
+import type { AuthConfig } from '../../../config/configurations/auth.config';
+import type { AccessTokenClaims } from '../auth.types';
+
+/** Validates the Bearer access token on protected requests. */
+@Injectable()
+export class JwtStrategy extends PassportStrategy(Strategy) {
+  constructor(config: ConfigService) {
+    const cfg = config.getOrThrow<AuthConfig>('auth');
+    super({
+      jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
+      ignoreExpiration: false,
+      secretOrKey: cfg.jwtAccessSecret,
+      issuer: cfg.issuer,
+    });
+  }
+
+  validate(payload: AccessTokenClaims): Principal {
+    return { id: payload.sub, role: payload.role };
+  }
+}
+```
+
+- [ ] **Step 5: Run test + build**
+
+Run: `pnpm test -- strategies && pnpm build`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/features/auth/strategies
+git commit -m "feat(auth): add passport local and jwt strategies"
+```
+
+---
+
+## Task 10: Guards + public health
+
+**Files:**
+- Create: `src/common/guards/jwt-auth.guard.ts`
+- Create: `src/common/guards/roles.guard.ts`
+- Create: `src/common/guards/local-auth.guard.ts`
+- Create: `src/common/guards/roles.guard.spec.ts`
+- Create: `src/common/guards/jwt-auth.guard.spec.ts`
+- Modify: `src/infrastructure/health/health.controller.ts`
+
+**Interfaces:**
+- Consumes: `IS_PUBLIC_KEY`/`ROLES_KEY` (Task 3), `GUEST_PRINCIPAL`/`Principal`/`UserRole`.
+- Produces: `JwtAuthGuard`, `RolesGuard`, `LocalAuthGuard`.
+
+- [ ] **Step 1: Write the failing guard tests**
+
+Create `src/common/guards/roles.guard.spec.ts`:
+
+```ts
+import type { Reflector } from '@nestjs/core';
+import { RolesGuard } from './roles.guard';
+
+function ctx(user: unknown) {
+  return {
+    getHandler: () => ({}),
+    getClass: () => ({}),
+    switchToHttp: () => ({ getRequest: () => ({ user }) }),
+  } as any;
+}
+
+describe('RolesGuard', () => {
+  function guardWith(required: string[] | undefined) {
+    const reflector = { getAllAndOverride: jest.fn(() => required) } as unknown as Reflector;
+    return new RolesGuard(reflector);
+  }
+
+  it('allows when no roles are required', () => {
+    expect(guardWith(undefined).canActivate(ctx({ role: 'user' }))).toBe(true);
+  });
+  it('allows when the role matches', () => {
+    expect(guardWith(['admin']).canActivate(ctx({ id: 'a', role: 'admin' }))).toBe(true);
+  });
+  it('denies when the role does not match', () => {
+    expect(guardWith(['admin']).canActivate(ctx({ id: 'u', role: 'user' }))).toBe(false);
+  });
+  it('treats an absent user as guest', () => {
+    expect(guardWith(['admin']).canActivate(ctx(undefined))).toBe(false);
+  });
+});
+```
+
+Create `src/common/guards/jwt-auth.guard.spec.ts`:
+
+```ts
+import type { Reflector } from '@nestjs/core';
+import { JwtAuthGuard } from './jwt-auth.guard';
+
+describe('JwtAuthGuard', () => {
+  it('bypasses authentication for @Public routes', () => {
+    const reflector = { getAllAndOverride: jest.fn(() => true) } as unknown as Reflector;
+    const guard = new JwtAuthGuard(reflector);
+    const context = { getHandler: () => ({}), getClass: () => ({}) } as any;
+    expect(guard.canActivate(context)).toBe(true);
+  });
+});
+```
+
+- [ ] **Step 2: Run, verify failure**
+
+Run: `pnpm test -- roles.guard jwt-auth.guard`
+Expected: FAIL (modules not found).
+
+- [ ] **Step 3: Implement JwtAuthGuard**
+
+Create `src/common/guards/jwt-auth.guard.ts`:
+
+```ts
+import { type ExecutionContext, Injectable } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { AuthGuard } from '@nestjs/passport';
+import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+
+/**
+ * Global authentication guard. Verifies the Bearer access token via the 'jwt'
+ * passport strategy, except on routes marked `@Public()`, which pass straight
+ * through (CurrentUser then resolves to the guest principal).
+ */
+@Injectable()
+export class JwtAuthGuard extends AuthGuard('jwt') {
+  constructor(private readonly reflector: Reflector) {
+    super();
+  }
+
+  canActivate(context: ExecutionContext) {
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (isPublic) return true;
+    return super.canActivate(context);
+  }
+}
+```
+
+- [ ] **Step 4: Implement RolesGuard**
+
+Create `src/common/guards/roles.guard.ts`:
+
+```ts
+import { type CanActivate, type ExecutionContext, Injectable } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
+import { ROLES_KEY } from '../decorators/roles.decorator';
+import type { Principal, UserRole } from '../principal';
+
+/**
+ * Global authorization guard (runs after JwtAuthGuard). If a route/controller
+ * declares `@Roles(...)`, the request principal's role must be in the set.
+ * Routes without `@Roles` are open to any authenticated principal.
+ */
+@Injectable()
+export class RolesGuard implements CanActivate {
+  constructor(private readonly reflector: Reflector) {}
+
+  canActivate(context: ExecutionContext): boolean {
+    const required = this.reflector.getAllAndOverride<UserRole[]>(ROLES_KEY, [
+      context.getHandler(),
+      context.getClass(),
+    ]);
+    if (!required || required.length === 0) return true;
+    const req = context.switchToHttp().getRequest<{ user?: Principal }>();
+    const role: UserRole = req.user?.role ?? 'guest';
+    return required.includes(role);
+  }
+}
+```
+
+- [ ] **Step 5: Implement LocalAuthGuard**
+
+Create `src/common/guards/local-auth.guard.ts`:
+
+```ts
+import { Injectable } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
+
+/** Guards POST /auth/login with the passport 'local' strategy. */
+@Injectable()
+export class LocalAuthGuard extends AuthGuard('local') {}
+```
+
+- [ ] **Step 6: Make /health public**
+
+In `src/infrastructure/health/health.controller.ts`, import `Public` and annotate the controller class:
+
+```ts
+import { Public } from '../../common/decorators/public.decorator';
+// ...
+@Public()
+@Controller('health')
+export class HealthController {
+```
+
+- [ ] **Step 7: Run tests + build**
+
+Run: `pnpm test -- roles.guard jwt-auth.guard && pnpm build`
+Expected: PASS.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/common/guards src/infrastructure/health/health.controller.ts
+git commit -m "feat(auth): add jwt/roles/local guards and make /health public"
+```
+
+---
+
+## Task 11: Auth module & controllers
+
+**Files:**
+- Create: `src/features/auth/dto/login.dto.ts`, `dto/refresh.dto.ts`, `dto/logout.dto.ts`, `dto/change-password.dto.ts`, `dto/service-token.dto.ts`, `dto/create-service-credential.dto.ts`
+- Create: `src/features/auth/auth.controller.ts`
+- Create: `src/features/auth/service-credentials.controller.ts`
+- Create: `src/features/auth/auth.module.ts`
+
+**Interfaces:**
+- Consumes: everything from Tasks 4–10.
+- Produces: `AuthModule` (imports `UsersModule`, `PassportModule`, `JwtModule`; exports `AuthService`, `TokenService`); `/auth/*` and `/service-credentials` routes.
+
+- [ ] **Step 1: Create the DTOs**
+
+Create `src/features/auth/dto/login.dto.ts`:
+
+```ts
+import { z } from 'zod';
+export const loginSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+});
+export type LoginDto = z.infer<typeof loginSchema>;
+```
+
+Create `src/features/auth/dto/refresh.dto.ts`:
+
+```ts
+import { z } from 'zod';
+export const refreshSchema = z.object({ refreshToken: z.string().min(1) });
+export type RefreshDto = z.infer<typeof refreshSchema>;
+```
+
+Create `src/features/auth/dto/logout.dto.ts`:
+
+```ts
+import { z } from 'zod';
+export const logoutSchema = z.object({ refreshToken: z.string().min(1) });
+export type LogoutDto = z.infer<typeof logoutSchema>;
+```
+
+Create `src/features/auth/dto/change-password.dto.ts`:
+
+```ts
+import { z } from 'zod';
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: z.string().min(12).max(200),
+});
+export type ChangePasswordDto = z.infer<typeof changePasswordSchema>;
+```
+
+Create `src/features/auth/dto/service-token.dto.ts`:
+
+```ts
+import { z } from 'zod';
+export const serviceTokenSchema = z.object({ apiKey: z.string().min(1) });
+export type ServiceTokenDto = z.infer<typeof serviceTokenSchema>;
+```
+
+Create `src/features/auth/dto/create-service-credential.dto.ts`:
+
+```ts
+import { z } from 'zod';
+export const createServiceCredentialSchema = z.object({
+  name: z.string().min(1).max(255),
+});
+export type CreateServiceCredentialDto = z.infer<
+  typeof createServiceCredentialSchema
+>;
+```
+
+- [ ] **Step 2: Create the auth controller**
+
+Create `src/features/auth/auth.controller.ts`:
+
+```ts
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Patch,
+  Post,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
+import type { Request } from 'express';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Public } from '../../common/decorators/public.decorator';
+import { LocalAuthGuard } from '../../common/guards/local-auth.guard';
+import type { Principal } from '../../common/principal';
+import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import type { UserRow } from '../../infrastructure/database/schema/identity.schema';
+import { AuthService } from './auth.service';
+import { changePasswordSchema, type ChangePasswordDto } from './dto/change-password.dto';
+import { loginSchema, type LoginDto } from './dto/login.dto';
+import { logoutSchema, type LogoutDto } from './dto/logout.dto';
+import { refreshSchema, type RefreshDto } from './dto/refresh.dto';
+import { serviceTokenSchema, type ServiceTokenDto } from './dto/service-token.dto';
+import { ServiceCredentialService } from './service-credential.service';
+
+function reqContext(req: Request) {
+  return { userAgent: req.headers['user-agent'], ip: req.ip };
+}
+
+@Controller('auth')
+export class AuthController {
+  constructor(
+    private readonly auth: AuthService,
+    private readonly credentials: ServiceCredentialService,
+  ) {}
+
+  @Public()
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  @UseGuards(LocalAuthGuard)
+  @Post('login')
+  @HttpCode(200)
+  login(
+    @Body(new ZodValidationPipe(loginSchema)) _body: LoginDto,
+    @Req() req: Request & { user: UserRow },
+  ) {
+    // LocalAuthGuard validated credentials and set req.user = UserRow.
+    return this.auth.login(req.user, reqContext(req));
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('refresh')
+  @HttpCode(200)
+  refresh(
+    @Body(new ZodValidationPipe(refreshSchema)) body: RefreshDto,
+    @Req() req: Request,
+  ) {
+    return this.auth.refresh(body.refreshToken, reqContext(req));
+  }
+
+  @Public()
+  @Post('logout')
+  @HttpCode(204)
+  async logout(@Body(new ZodValidationPipe(logoutSchema)) body: LogoutDto) {
+    await this.auth.logout(body.refreshToken);
+  }
+
+  @Post('logout-all')
+  @HttpCode(204)
+  async logoutAll(@CurrentUser() user: Principal) {
+    await this.auth.logoutAll(user.id as string);
+  }
+
+  @Get('me')
+  me(@CurrentUser() user: Principal) {
+    return user;
+  }
+
+  @Get('sessions')
+  sessions(@CurrentUser() user: Principal) {
+    return this.auth.listSessions(user.id as string);
+  }
+
+  @Patch('password')
+  @HttpCode(204)
+  async changePassword(
+    @CurrentUser() user: Principal,
+    @Body(new ZodValidationPipe(changePasswordSchema)) body: ChangePasswordDto,
+  ) {
+    await this.auth.changePassword(
+      user.id as string,
+      body.currentPassword,
+      body.newPassword,
+    );
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @Post('service-token')
+  @HttpCode(200)
+  serviceToken(
+    @Body(new ZodValidationPipe(serviceTokenSchema)) body: ServiceTokenDto,
+  ) {
+    return this.credentials.exchangeForToken(body.apiKey);
+  }
+}
+```
+
+- [ ] **Step 3: Create the service-credentials controller**
+
+Create `src/features/auth/service-credentials.controller.ts`:
+
+```ts
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  ParseUUIDPipe,
+  Post,
+} from '@nestjs/common';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Roles } from '../../common/decorators/roles.decorator';
+import type { Principal } from '../../common/principal';
+import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import {
+  createServiceCredentialSchema,
+  type CreateServiceCredentialDto,
+} from './dto/create-service-credential.dto';
+import { ServiceCredentialService } from './service-credential.service';
+
+/** Admin management of agent API keys. */
+@Roles('admin')
+@Controller('service-credentials')
+export class ServiceCredentialsController {
+  constructor(private readonly credentials: ServiceCredentialService) {}
+
+  @Post()
+  create(
+    @Body(new ZodValidationPipe(createServiceCredentialSchema))
+    dto: CreateServiceCredentialDto,
+    @CurrentUser() admin: Principal,
+  ) {
+    return this.credentials.issue(dto.name, admin.id);
+  }
+
+  @Get()
+  list() {
+    return this.credentials.list();
+  }
+
+  @Delete(':id')
+  @HttpCode(204)
+  async revoke(@Param('id', ParseUUIDPipe) id: string): Promise<void> {
+    await this.credentials.revoke(id);
+  }
+}
+```
+
+- [ ] **Step 4: Create the auth module**
+
+Create `src/features/auth/auth.module.ts`:
+
+```ts
+import { Module } from '@nestjs/common';
+import { JwtModule } from '@nestjs/jwt';
+import { PassportModule } from '@nestjs/passport';
+import { UsersModule } from '../users/users.module';
+import { AuthController } from './auth.controller';
+import { AuthService } from './auth.service';
+import { ServiceCredentialRepository } from './service-credential.repository';
+import { ServiceCredentialService } from './service-credential.service';
+import { ServiceCredentialsController } from './service-credentials.controller';
+import { SessionRepository } from './session.repository';
+import { JwtStrategy } from './strategies/jwt.strategy';
+import { LocalStrategy } from './strategies/local.strategy';
+import { TokenService } from './token.service';
+
+/**
+ * Auth feature. Depends on UsersModule (UserRepository + PasswordService) and
+ * wires the Passport strategies. Access tokens are signed per-call with the
+ * secret from auth config, so JwtModule needs no static secret here.
+ */
+@Module({
+  imports: [UsersModule, PassportModule, JwtModule.register({})],
+  controllers: [AuthController, ServiceCredentialsController],
+  providers: [
+    AuthService,
+    TokenService,
+    SessionRepository,
+    ServiceCredentialRepository,
+    ServiceCredentialService,
+    LocalStrategy,
+    JwtStrategy,
+  ],
+  exports: [AuthService, TokenService],
+})
+export class AuthModule {}
+```
+
+- [ ] **Step 5: Build**
+
+Run: `pnpm build && pnpm test`
+Expected: PASS (compiles; existing unit tests unaffected).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/features/auth/dto src/features/auth/auth.controller.ts src/features/auth/service-credentials.controller.ts src/features/auth/auth.module.ts
+git commit -m "feat(auth): add auth + service-credential controllers and auth module"
+```
+
+---
+
+## Task 12: App wiring & security baseline
+
+**Files:**
+- Modify: `src/app.module.ts`
+- Modify: `src/main.ts`
+
+**Interfaces:**
+- Consumes: `AuthModule`/`UsersModule` (Tasks 6/11), `AuthConfig` (Task 1), guards (Task 10).
+- Produces: global `ThrottlerGuard` → `JwtAuthGuard` → `RolesGuard`; Helmet + CORS.
+
+- [ ] **Step 1: Wire modules, throttler, and global guards**
+
+Replace `src/app.module.ts` with (keeping the existing import-order comments; MastraModule stays last):
+
+```ts
+import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ConfigModule } from './config/config.module';
+import type { AuthConfig } from './config/configurations/auth.config';
+import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
+import { RolesGuard } from './common/guards/roles.guard';
+import { CacheModule } from './infrastructure/cache/cache.module';
+import { SessionCacheModule } from './infrastructure/cache/session/session-cache.module';
+import { DatabaseModule } from './infrastructure/database/database.module';
+import { FileManageModule } from './infrastructure/file-manage/file-manage.module';
+import { HealthModule } from './infrastructure/health/health.module';
+import { LoggerModule } from './infrastructure/logger/logger.module';
+import { ObservabilityModule } from './infrastructure/observability/sentry.module';
+import { QueueModule } from './infrastructure/queue/queue.module';
+import { SearchEngineModule } from './infrastructure/search-engine/search-engine.module';
+import { AuthModule } from './features/auth/auth.module';
+import { FileProcessorModule } from './features/file-processor/file-processor.module';
+import { MastraModule } from './features/mastra/mastra.module';
+import { SearchServiceModule } from './features/search-service/search-service.module';
+import { UsersModule } from './features/users/users.module';
+
+/**
+ * Composition root. Import order is load-bearing:
+ *  - ObservabilityModule (Sentry) is first so instrumentation wraps everything.
+ *  - MastraModule is last because its catch-all controller would otherwise
+ *    intercept unrelated routes.
+ *
+ * Global guards run in registration order: throttle → authenticate → authorize.
+ */
+@Module({
+  imports: [
+    ObservabilityModule,
+    ConfigModule,
+    ThrottlerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => {
+        const auth = config.getOrThrow<AuthConfig>('auth');
+        return [{ ttl: auth.throttleTtl * 1000, limit: auth.throttleLimit }];
+      },
+    }),
+
+    LoggerModule,
+    DatabaseModule,
+    CacheModule,
+    SessionCacheModule,
+    QueueModule,
+    FileManageModule,
+    SearchEngineModule,
+    HealthModule,
+
+    // Feature modules.
+    AuthModule,
+    UsersModule,
+    FileProcessorModule,
+    SearchServiceModule,
+
+    // Mastra AI — must remain last.
+    MastraModule,
+  ],
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: RolesGuard },
+  ],
+})
+export class AppModule {}
+```
+
+- [ ] **Step 2: Add Helmet + CORS in main.ts**
+
+In `src/main.ts`, add the imports at the top:
+
+```ts
+import { ConfigService } from '@nestjs/config';
+import helmet from 'helmet';
+import type { AuthConfig } from './config/configurations/auth.config';
+```
+
+Then, after `const app = await NestFactory.create(...)` and before `app.listen`, add:
+
+```ts
+  app.use(helmet());
+
+  const auth = app.get(ConfigService).getOrThrow<AuthConfig>('auth');
+  app.enableCors({
+    origin: auth.corsOrigins.length > 0 ? auth.corsOrigins : true,
+    credentials: false, // Bearer transport — no cookies, no CSRF surface
+  });
+```
+
+- [ ] **Step 3: Build**
+
+Run: `pnpm build`
+Expected: PASS.
+
+- [ ] **Step 4: Smoke-test boot (requires Postgres + Redis running)**
+
+Run: `pnpm start:dev` (Ctrl-C after it logs "listening"). In another shell:
+`curl -s -o /dev/null -w "%{http_code}\n" localhost:3000/health` → `200` or `503` (public).
+`curl -s -o /dev/null -w "%{http_code}\n" localhost:3000/users` → `401` (protected).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/app.module.ts src/main.ts
+git commit -m "feat(security): wire global auth guards, throttler, helmet, and cors"
+```
+
+---
+
+## Task 13: Initial-admin seeder
+
+**Files:**
+- Create: `src/infrastructure/database/seeders/initial-admin.seeder.ts`
+- Modify: `src/infrastructure/database/seeders/index.ts`
+
+**Interfaces:**
+- Consumes: `users` schema, `SEED_ADMIN_*` env, argon2.
+- Produces: `InitialAdminSeeder` implementing `Seeder`.
+
+- [ ] **Step 1: Create the seeder**
+
+Create `src/infrastructure/database/seeders/initial-admin.seeder.ts`:
+
+```ts
+import * as argon2 from 'argon2';
+import { and, eq } from 'drizzle-orm';
+import { validateEnv } from '../../../config/env.validation';
+import type { DrizzleDB } from '../drizzle.constants';
+import { users } from '../schema/identity.schema';
+import type { Seeder } from './seeder.interface';
+
+/**
+ * Idempotently creates the initial admin from SEED_ADMIN_EMAIL /
+ * SEED_ADMIN_PASSWORD. This is the only bootstrap path — public signup is
+ * disabled. Skips (with a warning) if no password is configured, or if an admin
+ * already exists.
+ */
+export class InitialAdminSeeder implements Seeder {
+  readonly name = 'initial-admin';
+
+  async run(db: DrizzleDB): Promise<void> {
+    const env = validateEnv(process.env);
+    const email = env.SEED_ADMIN_EMAIL.toLowerCase();
+    const password = env.SEED_ADMIN_PASSWORD;
+
+    if (!password) {
+      console.warn('  ↳ SEED_ADMIN_PASSWORD not set — skipping admin seed.');
+      return;
+    }
+
+    const existing = await db
+      .select()
+      .from(users)
+      .where(and(eq(users.role, 'admin'), eq(users.isDeleted, false)))
+      .limit(1);
+    if (existing.length > 0) {
+      console.log('  ↳ An admin already exists — skipping.');
+      return;
+    }
+
+    const passwordHash = await argon2.hash(password, { type: argon2.argon2id });
+    await db.insert(users).values({ email, passwordHash, role: 'admin' });
+    console.log(`  ↳ Created initial admin: ${email}`);
+  }
+}
+```
+
+- [ ] **Step 2: Register the seeder**
+
+Replace the body of `src/infrastructure/database/seeders/index.ts`:
+
+```ts
+import { InitialAdminSeeder } from './initial-admin.seeder';
+import type { Seeder } from './seeder.interface';
+
+/** Ordered list of seeders run by `pnpm seed`. */
+export const seeders: Seeder[] = [new InitialAdminSeeder()];
+```
+
+- [ ] **Step 3: Build + verify (requires Postgres + migrations applied)**
+
+Run: `pnpm build`. Then, with `SEED_ADMIN_PASSWORD` set in `.env` and `pnpm db:migrate` applied: `pnpm seed`.
+Expected: logs `Seeding: initial-admin` then `Created initial admin: ...` (on a second run: `An admin already exists — skipping.`).
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/infrastructure/database/seeders
+git commit -m "feat(auth): add idempotent initial-admin seeder"
+```
+
+---
+
+## Task 14: End-to-end tests
+
+**Files:**
+- Create: `test/auth.e2e-spec.ts`
+
+**Interfaces:**
+- Consumes: `AuthModule`, `UsersModule`, `DatabaseModule`, `ConfigModule`, `ThrottlerModule`, guards, `UsersService`.
+
+**Prerequisites:** PostgreSQL + Redis running (see `.env`), and migrations applied (`pnpm db:migrate`). Boots a focused module subset (NOT `AppModule`) and registers the same global guards, mirroring the search e2e pattern.
+
+- [ ] **Step 1: Write the e2e spec**
+
+Create `test/auth.e2e-spec.ts`:
+
+```ts
+import { INestApplication } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
+import { Test } from '@nestjs/testing';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import request from 'supertest';
+import { JwtAuthGuard } from '../src/common/guards/jwt-auth.guard';
+import { RolesGuard } from '../src/common/guards/roles.guard';
+import { ConfigModule } from '../src/config/config.module';
+import type { AuthConfig } from '../src/config/configurations/auth.config';
+import { AuthModule } from '../src/features/auth/auth.module';
+import { UsersModule } from '../src/features/users/users.module';
+import { UsersService } from '../src/features/users/users.service';
+import { DatabaseModule } from '../src/infrastructure/database/database.module';
+
+/**
+ * Auth HTTP contract e2e. Boots ConfigModule + DatabaseModule + AuthModule +
+ * UsersModule + ThrottlerModule and registers the global guards, so this avoids
+ * MastraModule's ESM-only dependency. Requires Postgres (schema migrated) +
+ * Redis. Run with `pnpm test:e2e -- auth.e2e`.
+ */
+describe('Auth API (e2e)', () => {
+  let app: INestApplication;
+  const stamp = String(Date.now());
+  const adminEmail = `admin_${stamp}@e2e.local`;
+  const adminPass = 'admin-e2e-password-123';
+  let adminAccess: string;
+  let userEmail: string;
+  let userAccess: string;
+  let userRefresh: string;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        ConfigModule,
+        DatabaseModule,
+        ThrottlerModule.forRootAsync({
+          inject: [ConfigService],
+          useFactory: (c: ConfigService) => {
+            const a = c.getOrThrow<AuthConfig>('auth');
+            return [{ ttl: a.throttleTtl * 1000, limit: 10_000 }]; // high, avoid flakiness
+          },
+        }),
+        AuthModule,
+        UsersModule,
+      ],
+      providers: [
+        { provide: APP_GUARD, useClass: ThrottlerGuard },
+        { provide: APP_GUARD, useClass: JwtAuthGuard },
+        { provide: APP_GUARD, useClass: RolesGuard },
+      ],
+    }).compile();
+
+    app = moduleRef.createNestApplication();
+    await app.init();
+
+    // Bootstrap the first admin directly (bypasses the admin-only guard).
+    await app.get(UsersService).create({
+      email: adminEmail,
+      password: adminPass,
+      role: 'admin',
+    });
+  });
+
+  afterAll(async () => {
+    await app?.close();
+  });
+
+  const server = () => app.getHttpServer();
+
+  it('rejects unauthenticated access to a protected route', async () => {
+    await request(server()).get('/users').expect(401);
+  });
+
+  it('logs the admin in and returns a token pair', async () => {
+    const res = await request(server())
+      .post('/auth/login')
+      .send({ email: adminEmail, password: adminPass })
+      .expect(200);
+    expect(res.body.accessToken).toBeDefined();
+    adminAccess = res.body.accessToken;
+  });
+
+  it('lets the admin create a user', async () => {
+    userEmail = `user_${stamp}@e2e.local`;
+    const res = await request(server())
+      .post('/users')
+      .set('Authorization', `Bearer ${adminAccess}`)
+      .send({ email: userEmail, password: 'user-e2e-password-123', role: 'user' })
+      .expect(201);
+    expect(res.body.passwordHash).toBeUndefined();
+    expect(res.body.role).toBe('user');
+  });
+
+  it('lets the new user log in', async () => {
+    const res = await request(server())
+      .post('/auth/login')
+      .send({ email: userEmail, password: 'user-e2e-password-123' })
+      .expect(200);
+    userAccess = res.body.accessToken;
+    userRefresh = res.body.refreshToken;
+  });
+
+  it('exposes /auth/me with the resolved principal', async () => {
+    const res = await request(server())
+      .get('/auth/me')
+      .set('Authorization', `Bearer ${userAccess}`)
+      .expect(200);
+    expect(res.body.role).toBe('user');
+  });
+
+  it('forbids a non-admin from the admin route', async () => {
+    await request(server())
+      .get('/users')
+      .set('Authorization', `Bearer ${userAccess}`)
+      .expect(403);
+  });
+
+  it('rotates the refresh token and detects reuse', async () => {
+    const rotated = await request(server())
+      .post('/auth/refresh')
+      .send({ refreshToken: userRefresh })
+      .expect(200);
+    expect(rotated.body.refreshToken).not.toBe(userRefresh);
+
+    // Replaying the now-revoked original token must fail (reuse detection).
+    await request(server())
+      .post('/auth/refresh')
+      .send({ refreshToken: userRefresh })
+      .expect(401);
+  });
+
+  it('issues an agent token from a service credential', async () => {
+    const created = await request(server())
+      .post('/service-credentials')
+      .set('Authorization', `Bearer ${adminAccess}`)
+      .send({ name: 'e2e-agent' })
+      .expect(201);
+    expect(created.body.apiKey).toMatch(/^svc_/);
+
+    const token = await request(server())
+      .post('/auth/service-token')
+      .send({ apiKey: created.body.apiKey })
+      .expect(200);
+
+    const me = await request(server())
+      .get('/auth/me')
+      .set('Authorization', `Bearer ${token.body.accessToken}`)
+      .expect(200);
+    expect(me.body.role).toBe('agent');
+  });
+});
+```
+
+- [ ] **Step 2: Run the e2e**
+
+Run: `pnpm test:e2e -- auth.e2e`
+Expected: PASS (all cases green).
+
+- [ ] **Step 3: Full verification sweep**
+
+Run: `pnpm build && pnpm test && pnpm lint`
+Expected: build clean, all unit tests pass, no lint errors.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add test/auth.e2e-spec.ts
+git commit -m "test(auth): add end-to-end auth/authorization coverage"
+```
+
+---
+
+## Self-Review Notes (for the implementer)
+
+- **Spec coverage:** Tasks map 1:1 to design §§2–11 — deps/env (T1), schema (T2), principal/decorators (T3), password (T4), tokens (T5), users+admin CRUD (T6), login/refresh/rotation/reuse-detection/logout/change-password (T7), agent service credentials (T8), passport strategies (T9), guards + public health (T10), controllers + module (T11), helmet/CORS/throttler + global guards (T12), seeded admin (T13), e2e (T14).
+- **Type consistency:** `AccessTokenClaims { sub, role, email?, kind }` is produced in T5, signed in T7/T8, read in T9. `TokenPair` shape is identical across T5/T7 and asserted in T14. `Principal.role` is optional everywhere; guards normalize absent → `'guest'`.
+- **Deliberate deviation from the design doc:** `Principal.role` is optional (not required) to avoid breaking ~20 existing `{ id }` call sites — recorded in Global Constraints.
+- **Known infra dependencies:** T12 smoke test, T13 seed, and T14 e2e require Postgres (migrated) + Redis. Unit tests (T1–T11) require neither.

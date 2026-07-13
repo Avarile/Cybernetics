@@ -1,12 +1,19 @@
 import { UnauthorizedException } from '@nestjs/common';
+import type { UserRow } from '../../infrastructure/database/schema/identity.schema';
 import { AuthService } from './auth.service';
 
-function makeUser(overrides: Record<string, any> = {}) {
+function makeUser(overrides: Partial<UserRow> = {}): UserRow {
   return {
     id: 'u1',
     email: 'a@b.co',
     passwordHash: 'HASH',
     role: 'user',
+    displayName: null,
+    lastLoginAt: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    isDeleted: false,
+    deletedAt: null,
     ...overrides,
   };
 }

@@ -1,12 +1,20 @@
 # Goal: design and implement the Auth System(as well as the basic security system)
 
 1. Design a authentication and authorization system based on the passport.js(authentication), and a simple version of authorization using the example provided in the Nestjs doc.
+2. Only Email / Password login is supported.
+3. Session will be persisted using JWT.
+4. 4 types of user for authorization: guest, user, admin, agent.
 5. This design has to be a simple but production grade system design. This is the first version, it should be simple, clean and reliable.
 6. Design the schemas as well.
 
 ## Reference / Docs:
 
 - [Nestjs Passport](https://docs.nestjs.com/recipes/passport)
+- [Nestjs Authorization](https://docs.nestjs.com/security/authorization)
+- [Nestjs Authentication](https://docs.nestjs.com/security/authentication)
+- [Nestjs Security ](https://docs.nestjs.com/security/helmet)
+- [Nestjs Cors ](https://docs.nestjs.com/security/cors)
+- [Nestjs Rate limiting ](https://docs.nestjs.com/security/rate-limiting)
 
 ## Action:
 

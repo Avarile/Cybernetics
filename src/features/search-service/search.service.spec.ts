@@ -72,11 +72,16 @@ function makeService(engineOverrides: Record<string, any> = {}) {
   return { service, engine, queue };
 }
 
+/** Options object passed to the engine's Nth `search` call (test-only cast). */
+function searchArg(engine: any, call = 0): any {
+  return engine.search.mock.calls[call]?.[1];
+}
+
 describe('SearchService.search', () => {
   it('injects an owner filter for a user principal (allowPublic)', async () => {
     const { service, engine } = makeService();
     await service.search('files', { q: 'x', page: 1 }, { id: 'user-1' });
-    expect(engine.search.mock.calls[0][1].filter).toEqual([
+    expect(searchArg(engine).filter).toEqual([
       '(ownerId = "user-1" OR ownerId IS NULL)',
     ]);
   });
@@ -84,7 +89,7 @@ describe('SearchService.search', () => {
   it('does NOT scope for the system principal', async () => {
     const { service, engine } = makeService();
     await service.search('files', { q: 'x', page: 1 }, { id: null });
-    expect(engine.search.mock.calls[0][1].filter).toBeUndefined();
+    expect(searchArg(engine).filter).toBeUndefined();
   });
 
   it('ANDs allowlisted user filters after the owner clause', async () => {
@@ -94,7 +99,7 @@ describe('SearchService.search', () => {
       { q: '', page: 1, filters: { status: 'AVAILABLE' } },
       { id: 'u' },
     );
-    expect(engine.search.mock.calls[0][1].filter).toEqual([
+    expect(searchArg(engine).filter).toEqual([
       '(ownerId = "u" OR ownerId IS NULL)',
       'status = "AVAILABLE"',
     ]);
@@ -129,7 +134,7 @@ describe('SearchService.search', () => {
       { q: '', page: 1, limit: 9999 },
       { id: null },
     );
-    expect(engine.search.mock.calls[0][1].hitsPerPage).toBe(100);
+    expect(searchArg(engine).hitsPerPage).toBe(100);
   });
 
   it('404s on an unknown index', async () => {
@@ -162,7 +167,7 @@ describe('SearchService.search', () => {
       { q: '', page: 1, filters: { status: malicious } },
       { id: null },
     );
-    expect(engine.search.mock.calls[0][1].filter).toEqual([
+    expect(searchArg(engine).filter).toEqual([
       `status = ${expectedQuote(malicious)}`,
     ]);
   });
@@ -174,7 +179,7 @@ describe('SearchService.search', () => {
       { q: '', page: 1, filters: { tags: ['a', 'b"c'] } },
       { id: null },
     );
-    expect(engine.search.mock.calls[0][1].filter).toEqual([
+    expect(searchArg(engine).filter).toEqual([
       `tags IN [${expectedQuote('a')}, ${expectedQuote('b"c')}]`,
     ]);
   });
@@ -186,7 +191,7 @@ describe('SearchService.search', () => {
       { q: '', page: 1, filters: { size: 10 } },
       { id: null },
     );
-    expect(engine.search.mock.calls[0][1].filter).toEqual(['size = 10']);
+    expect(searchArg(engine).filter).toEqual(['size = 10']);
   });
 
   it('rejects a sort on a non-allowlisted field', async () => {

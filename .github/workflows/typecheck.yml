@@ -1,0 +1,37 @@
+name: Typecheck
+
+# CI gate: fails the build on any TypeScript error. Runs `tsc --noEmit` over the
+# whole project (src + specs) — jest uses @swc/jest, which strips types without
+# checking, so this is the only thing that actually enforces type correctness.
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+# Cancel superseded runs on the same ref to save minutes.
+concurrency:
+  group: typecheck-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4 # version resolved from package.json "packageManager"
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # Native deps (e.g. argon2) are allowlisted in pnpm.onlyBuiltDependencies;
+      # --frozen-lockfile fails if pnpm-lock.yaml is out of date.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck

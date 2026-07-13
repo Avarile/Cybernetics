@@ -27,7 +27,7 @@ function makeClient() {
     tasks: {
       waitForTask: jest.fn(async () => ({
         status: 'succeeded',
-        error: undefined,
+        error: undefined as { message: string; code: string } | undefined,
       })),
     },
     __index: index,
