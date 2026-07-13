@@ -76,6 +76,25 @@ export const envSchema = z
       .default(5_000),
     SEARCH_DEFAULT_PAGE_SIZE: z.coerce.number().int().positive().default(20),
     SEARCH_MAX_PAGE_SIZE: z.coerce.number().int().positive().default(100),
+
+    // Auth / JWT
+    JWT_ACCESS_SECRET: z
+      .string()
+      .min(1)
+      .default('dev-insecure-secret-change-me-please'),
+    JWT_ACCESS_TTL: z.coerce.number().int().positive().default(900),
+    JWT_REFRESH_TTL: z.coerce.number().int().positive().default(604_800),
+    AGENT_TOKEN_TTL: z.coerce.number().int().positive().default(900),
+    JWT_ISSUER: z.string().min(1).default('cybernetics'),
+
+    // Security
+    THROTTLE_TTL: z.coerce.number().int().positive().default(60),
+    THROTTLE_LIMIT: z.coerce.number().int().positive().default(100),
+    CORS_ORIGINS: z.string().default(''),
+
+    // Auth seeding
+    SEED_ADMIN_EMAIL: z.string().email().default('admin@cybernetics.local'),
+    SEED_ADMIN_PASSWORD: z.string().default(''),
   })
   .superRefine((env, ctx) => {
     // Refuse the well-known default MinIO credentials in production.
@@ -101,6 +120,28 @@ export const envSchema = z
         code: z.ZodIssueCode.custom,
         path: ['MEILISEARCH_MASTER_KEY'],
         message: 'MEILISEARCH_MASTER_KEY is required when NODE_ENV=production.',
+      });
+    }
+
+    if (
+      env.NODE_ENV === 'production' &&
+      (env.JWT_ACCESS_SECRET === 'dev-insecure-secret-change-me-please' ||
+        env.JWT_ACCESS_SECRET.length < 32)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['JWT_ACCESS_SECRET'],
+        message:
+          'JWT_ACCESS_SECRET must be a strong non-default value (>= 32 chars) when NODE_ENV=production.',
+      });
+    }
+
+    if (env.NODE_ENV === 'production' && env.SEED_ADMIN_PASSWORD.length < 12) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SEED_ADMIN_PASSWORD'],
+        message:
+          'SEED_ADMIN_PASSWORD must be set (>= 12 chars) when NODE_ENV=production.',
       });
     }
   });

@@ -1,6 +1,7 @@
 import { Global, Module } from '@nestjs/common';
 import { ConfigModule as NestConfigModule } from '@nestjs/config';
 import { appConfig } from './configurations/app.config';
+import { authConfig } from './configurations/auth.config';
 import { databaseConfig } from './configurations/database.config';
 import { redisConfig } from './configurations/redis.config';
 import { searchConfig } from './configurations/search.config';
@@ -26,6 +27,7 @@ import { validateEnv } from './env.validation';
       validate: validateEnv,
       load: [
         appConfig,
+        authConfig,
         databaseConfig,
         redisConfig,
         sentryConfig,

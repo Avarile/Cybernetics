@@ -43,3 +43,28 @@ describe('validateEnv', () => {
     ).toThrow(/MEILISEARCH_MASTER_KEY/);
   });
 });
+
+describe('auth env', () => {
+  it('applies auth/security defaults', () => {
+    const env = validateEnv({});
+    expect(env.JWT_ACCESS_TTL).toBe(900);
+    expect(env.JWT_REFRESH_TTL).toBe(604800);
+    expect(env.JWT_ISSUER).toBe('cybernetics');
+    expect(env.THROTTLE_LIMIT).toBe(100);
+  });
+
+  it('rejects the placeholder JWT secret in production', () => {
+    expect(() =>
+      validateEnv({
+        NODE_ENV: 'production',
+        JWT_ACCESS_SECRET: 'dev-insecure-secret-change-me-please',
+      }),
+    ).toThrow(/JWT_ACCESS_SECRET/);
+  });
+
+  it('requires a seed admin password in production', () => {
+    expect(() =>
+      validateEnv({ NODE_ENV: 'production', SEED_ADMIN_PASSWORD: '' }),
+    ).toThrow(/SEED_ADMIN_PASSWORD/);
+  });
+});
