@@ -1,5 +1,11 @@
 import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { ConfigModule } from './config/config.module';
+import type { AuthConfig } from './config/configurations/auth.config';
+import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
+import { RolesGuard } from './common/guards/roles.guard';
 import { CacheModule } from './infrastructure/cache/cache.module';
 import { SessionCacheModule } from './infrastructure/cache/session/session-cache.module';
 import { DatabaseModule } from './infrastructure/database/database.module';
@@ -9,25 +15,32 @@ import { LoggerModule } from './infrastructure/logger/logger.module';
 import { ObservabilityModule } from './infrastructure/observability/sentry.module';
 import { QueueModule } from './infrastructure/queue/queue.module';
 import { SearchEngineModule } from './infrastructure/search-engine/search-engine.module';
+import { AuthModule } from './features/auth/auth.module';
 import { FileProcessorModule } from './features/file-processor/file-processor.module';
 import { MastraModule } from './features/mastra/mastra.module';
 import { SearchServiceModule } from './features/search-service/search-service.module';
+import { UsersModule } from './features/users/users.module';
 
 /**
  * Composition root. Import order is load-bearing:
  *  - ObservabilityModule (Sentry) is first so instrumentation wraps everything.
  *  - MastraModule is last because its catch-all controller would otherwise
  *    intercept unrelated routes.
+ *
+ * Global guards run in registration order: throttle → authenticate → authorize.
  */
 @Module({
   imports: [
-    // Observability (Sentry) — first.
     ObservabilityModule,
-
-    // Configuration (global, validated).
     ConfigModule,
+    ThrottlerModule.forRootAsync({
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) => {
+        const auth = config.getOrThrow<AuthConfig>('auth');
+        return [{ ttl: auth.throttleTtl * 1000, limit: auth.throttleLimit }];
+      },
+    }),
 
-    // Infrastructure.
     LoggerModule,
     DatabaseModule,
     CacheModule,
@@ -37,12 +50,19 @@ import { SearchServiceModule } from './features/search-service/search-service.mo
     SearchEngineModule,
     HealthModule,
 
-    // Feature modules (application layer goes here as it grows).
+    // Feature modules.
+    AuthModule,
+    UsersModule,
     FileProcessorModule,
     SearchServiceModule,
 
     // Mastra AI — must remain last.
     MastraModule,
+  ],
+  providers: [
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: RolesGuard },
   ],
 })
 export class AppModule {}
