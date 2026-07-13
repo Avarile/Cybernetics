@@ -69,6 +69,11 @@ describe('AuthService', () => {
       await expect(result).rejects.toBeInstanceOf(UnauthorizedException);
       await expect(result).rejects.toThrow('Invalid credentials');
     });
+    it('throws 401 (not a TypeError) when email is not a string', async () => {
+      const result = service.validateUser(['a@b.co'] as any, 'pw');
+      await expect(result).rejects.toBeInstanceOf(UnauthorizedException);
+      await expect(result).rejects.toThrow('Invalid credentials');
+    });
   });
 
   describe('login', () => {

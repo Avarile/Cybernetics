@@ -16,6 +16,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       ignoreExpiration: false,
       secretOrKey: cfg.jwtAccessSecret,
       issuer: cfg.issuer,
+      algorithms: ['HS256'],
     });
   }
 

@@ -32,6 +32,9 @@ export class AuthService {
 
   /** Used by LocalStrategy. Uniform 401 — never reveals which factor failed. */
   async validateUser(email: string, password: string): Promise<UserRow> {
+    if (typeof email !== 'string' || typeof password !== 'string') {
+      throw new UnauthorizedException('Invalid credentials');
+    }
     const user = await this.users.findByEmail(email.toLowerCase());
     const ok = user
       ? await this.passwords.verify(user.passwordHash, password)
