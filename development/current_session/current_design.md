@@ -58,15 +58,18 @@ Secrets, redaction, audit, and caching are owned by the service layer.
                    PostgreSQL
 ```
 
-**Module deps:** `DatabaseModule` (the `DRIZZLE` token) and `CacheModule`
-(`CACHE_MANAGER`) are both `@Global`, so `SystemModule` only needs to import the
-new `CryptoModule` and inject `DRIZZLE` / `CACHE_MANAGER` directly. It is
+**Module deps:** `SystemModule` imports `CryptoModule` and `CacheModule`, and
+injects `DRIZZLE` (from the `@Global` `DatabaseModule`) directly. It is
 registered in `AppModule`'s feature list **before `MastraModule`** (whose
 catch-all controller must remain last). Admin-only access is enforced entirely
 by the existing global `RolesGuard` via `@Roles('admin')` — no new guard.
-(Validated: `DatabaseModule` and `CacheModule` are `@Global`; `CACHE_MANAGER`
-comes from `@nestjs/cache-manager`, its `Cache` type from `cache-manager`, and
-`cache.set`'s TTL is in **milliseconds**.)
+(Validated in implementation: `CACHE_MANAGER` comes from `@nestjs/cache-manager`,
+its `Cache` type from `cache-manager`, and `cache.set`'s TTL is in
+**milliseconds**. `CacheModule` is `@Global`, but `SystemModule` still imports it
+explicitly: the e2e boots a module subset without `AppModule`, so relying on
+`CacheModule`'s `@Global` registration happening via `AppModule` would leave
+`CACHE_MANAGER` unavailable — importing it makes `SystemModule` self-sufficient,
+and a repeat import of a `@Global` module is an idempotent no-op in the real app.)
 
 ---
 
