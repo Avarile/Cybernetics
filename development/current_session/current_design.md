@@ -58,11 +58,15 @@ Secrets, redaction, audit, and caching are owned by the service layer.
                    PostgreSQL
 ```
 
-**Module deps:** `SystemModule` imports `DatabaseModule` (the `DRIZZLE` token),
-`CacheModule` (existing cache-manager), and the new `CryptoModule`. It is
+**Module deps:** `DatabaseModule` (the `DRIZZLE` token) and `CacheModule`
+(`CACHE_MANAGER`) are both `@Global`, so `SystemModule` only needs to import the
+new `CryptoModule` and inject `DRIZZLE` / `CACHE_MANAGER` directly. It is
 registered in `AppModule`'s feature list **before `MastraModule`** (whose
 catch-all controller must remain last). Admin-only access is enforced entirely
 by the existing global `RolesGuard` via `@Roles('admin')` — no new guard.
+(Validated: `DatabaseModule` and `CacheModule` are `@Global`; `CACHE_MANAGER`
+comes from `@nestjs/cache-manager`, its `Cache` type from `cache-manager`, and
+`cache.set`'s TTL is in **milliseconds**.)
 
 ---
 
@@ -100,10 +104,13 @@ must be *decryptable* to be used, so they are encrypted, not hashed.
   ```
 
 - **Config / env additions:**
-  - `env.validation.ts`: `SYSTEM_ENCRYPTION_KEY: z.string().default('')`, with a
-    length check when set (decoded === 32 bytes).
-  - `superRefine`: when `NODE_ENV === 'production'`, reject empty
-    `SYSTEM_ENCRYPTION_KEY` (same pattern as the MinIO/Meili prod guards).
+  - `env.validation.ts`: `SYSTEM_ENCRYPTION_KEY` defaults to a base64 32-zero-byte
+    key (dev/test only, so the app boots without extra setup); the
+    `EncryptionService` constructor rejects any key that does not decode to 32
+    bytes. Add `SYSTEM_ENCRYPTION_KEY_VERSION` (default `1`).
+  - `superRefine`: when `NODE_ENV === 'production'`, require
+    `SYSTEM_ENCRYPTION_KEY` to decode to exactly 32 bytes (same pattern as the
+    MinIO/Meili prod guards) — the dev default is rejected in prod.
   - New namespace `systemConfig = registerAs('system', ...)` exposing
     `{ encryptionKey, encryptionKeyVersion }`, added to `ConfigModule.load[]`.
 
@@ -220,8 +227,9 @@ injecting the `DRIZZLE` token (existing pattern). Soft-delete-aware queries
 (`WHERE is_deleted = false`) mirror `UserRepository`.
 
 - `SmtpConfigRepository` — `findActiveById`, `list`, `update`, `softDelete`,
-  `findActive()` (the single active profile), `deactivateAll(tx)`,
-  `stampTest(id, status)`.
+  `findActive()` (the single active profile), `activate(id)` (runs the
+  deactivate-others → activate-target **transaction internally**, rather than
+  exposing a `deactivateAll(tx)` to the service), `stampTest(id, status)`.
 - `ImapConfigRepository` — same surface as SMTP.
 - `IntegrationCredentialRepository` — `list({ provider? })`,
   `findByProviderAndName`, `update`, `softDelete`, `stampUsed`, `stampTest`.
@@ -230,8 +238,10 @@ injecting the `DRIZZLE` token (existing pattern). Soft-delete-aware queries
 - `SystemAuditRepository` — `insert` (append), `list({ entityType?, entityId?,
   actorId?, page, limit })`. Read + append only.
 
-`activate()` uses a Drizzle transaction: `deactivateAll` → set target
-`isActive = true`. The partial unique index is the DB-level backstop.
+The repository's `activate(id)` wraps the whole flow in a single Drizzle
+transaction (`db.transaction`): deactivate every active row → set the target
+`isActive = true`. Doing both in one transaction avoids the single-active
+partial unique index colliding mid-update; the index is the DB-level backstop.
 
 ---
 
@@ -279,9 +289,11 @@ interface PublicSmtpConfig {
 ### Caching (settings)
 
 `SystemSettingsService` reads through the existing cache-manager:
-- keys `system:setting:<key>` and `system:settings:all`
-- populated on read, **invalidated on any write/delete**
-- typed getters are the hot path for internal consumers, so they benefit most.
+- per-key entries `system:setting:<key>`
+- populated on read (cache-through), **invalidated (`cache.del`) on any
+  write/delete**; TTL is in milliseconds (`@nestjs/cache-manager` v3)
+- typed getters (`getString/Number/Boolean/Json`) are the hot path for internal
+  consumers and reuse the same cache-through read.
 
 ### Connection testing
 
