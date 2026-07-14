@@ -11,3 +11,4 @@
 export * from './file.schema';
 export * from './identity.schema';
 export * from './system.schema';
+export * from './search.schema';
