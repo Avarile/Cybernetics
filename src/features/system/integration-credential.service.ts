@@ -105,7 +105,17 @@ export class IntegrationCredentialService {
     dto: UpdateIntegrationDto,
     ctx: AuditContext,
   ): Promise<PublicIntegrationCredential> {
-    await this.getRow(id);
+    const current = await this.getRow(id);
+    if (dto.provider !== undefined || dto.name !== undefined) {
+      const provider = dto.provider ?? current.provider;
+      const name = dto.name ?? current.name;
+      const clash = await this.repo.findByProviderAndName(provider, name);
+      if (clash && clash.id !== id) {
+        throw new ConflictException(
+          `A credential named "${name}" already exists for ${provider}`,
+        );
+      }
+    }
     const patch: Record<string, unknown> = {};
     if (dto.provider !== undefined) patch.provider = dto.provider;
     if (dto.name !== undefined) patch.name = dto.name;

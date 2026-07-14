@@ -81,6 +81,27 @@ describe('IntegrationCredentialService', () => {
     ).rejects.toBeInstanceOf(ConflictException);
   });
 
+  it('rejects renaming to a (provider, name) owned by a different credential', async () => {
+    repo.findByProviderAndName.mockResolvedValueOnce(
+      makeRow({ id: 'other-id' }),
+    );
+    await expect(
+      service.update('c1', { name: 'taken' } as any, ctx),
+    ).rejects.toBeInstanceOf(ConflictException);
+  });
+
+  it('allows update when the (provider, name) match is the same row (no-op rename)', async () => {
+    repo.findByProviderAndName.mockResolvedValueOnce(makeRow({ id: 'c1' }));
+    const res = await service.update('c1', { name: 'prod' } as any, ctx);
+    expect(res.id).toBe('c1');
+  });
+
+  it('allows update when there is no (provider, name) collision', async () => {
+    repo.findByProviderAndName.mockResolvedValueOnce(null);
+    const res = await service.update('c1', { name: 'new-name' } as any, ctx);
+    expect(res.id).toBe('c1');
+  });
+
   it('404s on a missing credential', async () => {
     repo.findActiveById.mockResolvedValueOnce(null);
     await expect(service.findById('nope')).rejects.toBeInstanceOf(
