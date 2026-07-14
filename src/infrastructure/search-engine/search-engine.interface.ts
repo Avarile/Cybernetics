@@ -59,6 +59,7 @@ export interface SearchEngine {
   deleteDocuments(index: string, ids: string[]): Promise<TaskRef>;
   deleteByFilter(index: string, filter: string | string[]): Promise<TaskRef>;
   clearIndex(index: string): Promise<TaskRef>;
+  deleteIndex(index: string): Promise<TaskRef>;
   search<T = Record<string, unknown>>(
     index: string,
     query: EngineQuery,

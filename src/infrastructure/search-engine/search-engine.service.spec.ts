@@ -23,6 +23,7 @@ function makeClient() {
   return {
     index: jest.fn(() => index),
     createIndex: jest.fn(async () => ({ taskUid: 1 })),
+    deleteIndex: jest.fn(async () => ({ taskUid: 7 })),
     isHealthy: jest.fn(async () => true),
     tasks: {
       waitForTask: jest.fn(async () => ({
@@ -85,6 +86,12 @@ describe('SearchEngineService', () => {
     expect(res.hits).toEqual([{ id: 'a' }]);
     expect(res.totalHits).toBe(1);
     expect(res.totalPages).toBe(1);
+  });
+
+  it('deleteIndex deletes the prefixed index and returns the task ref', async () => {
+    const ref = await service.deleteIndex('articles');
+    expect(client.deleteIndex).toHaveBeenCalledWith('test_articles');
+    expect(ref).toEqual({ taskUid: 7 });
   });
 
   it('waitForTask throws SearchEngineError when a task fails', async () => {

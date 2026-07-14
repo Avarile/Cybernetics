@@ -92,6 +92,11 @@ export class SearchEngineService implements SearchEngine {
     return { taskUid: task.taskUid };
   }
 
+  async deleteIndex(index: string): Promise<TaskRef> {
+    const task = await this.client.deleteIndex(this.uid(index));
+    return { taskUid: task.taskUid };
+  }
+
   async search<T = Record<string, unknown>>(
     index: string,
     query: EngineQuery,
