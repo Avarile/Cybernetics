@@ -1,54 +1,68 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
+import type {
+  CollectionRow,
+  FieldSpec,
+} from '../../infrastructure/database/schema/search.schema';
 import type { IndexDefinition } from '../../infrastructure/search-engine/search-engine.interface';
-import { SEARCH_INDEX_DEFINITIONS } from './search.constants';
+import { CollectionRepository } from './collection.repository';
+import { fieldSpecToIndexDefinition } from './document-validator';
 
-/** How an index is tenant-scoped, if at all. */
-export interface OwnerScope {
-  attribute: string;
-  allowPublic?: boolean; // also match rows whose owner attribute IS NULL
+/** A collection compiled for runtime use: config + derived Meili definition. */
+export interface CompiledCollection {
+  name: string;
+  displayName: string;
+  description: string | null;
+  fields: FieldSpec[];
+  definition: IndexDefinition;
 }
 
 /**
- * A fully-described index: Meili settings + feature-level access rules and an
- * (optional) rebuild source used by reconciliation.
+ * In-memory cache of compiled collections over the `collections` table. A
+ * cache miss falls back to the repository so a collection created on another
+ * instance is still resolvable without a restart. Mutations call `invalidate`.
  */
-export interface RegisteredIndex extends IndexDefinition {
-  ownerScope?: OwnerScope;
-  allowedFilterFields: string[];
-  allowedSortFields: string[];
-  source?: () => Promise<Array<Record<string, unknown>>>;
-}
-
-/**
- * The app's registered indexes. Consumers (e.g. the files feature, later)
- * append their definition here. Empty for now — the engine + service are
- * generic and gain indexes without any change to this module.
- */
-export const APP_SEARCH_INDEXES: RegisteredIndex[] = [];
-
-/** In-memory lookup over the registered index definitions. */
 @Injectable()
 export class IndexRegistry {
-  private readonly byName = new Map<string, RegisteredIndex>();
+  private readonly cache = new Map<string, CompiledCollection>();
 
-  constructor(@Inject(SEARCH_INDEX_DEFINITIONS) defs: RegisteredIndex[]) {
-    for (const def of defs) {
-      if (this.byName.has(def.name)) {
-        throw new Error(`Duplicate search index definition: ${def.name}`);
-      }
-      this.byName.set(def.name, def);
+  constructor(private readonly collections: CollectionRepository) {}
+
+  /** Resolve a collection by name (cache-first, repo fallback). */
+  async resolve(name: string): Promise<CompiledCollection | null> {
+    const cached = this.cache.get(name);
+    if (cached) return cached;
+    const found = await this.collections.findByName(name);
+    if (!found) return null;
+    const compiled = compile(found);
+    this.cache.set(name, compiled);
+    return compiled;
+  }
+
+  /** Drop a cached entry so the next resolve recompiles from the DB. */
+  invalidate(name: string): void {
+    this.cache.delete(name);
+  }
+
+  /** Load and cache every active collection (boot warm-up). */
+  async warm(): Promise<CompiledCollection[]> {
+    const rows = await this.collections.listActive();
+    this.cache.clear();
+    const all: CompiledCollection[] = [];
+    for (const row of rows) {
+      const compiled = compile(row);
+      this.cache.set(row.name, compiled);
+      all.push(compiled);
     }
+    return all;
   }
+}
 
-  has(name: string): boolean {
-    return this.byName.has(name);
-  }
-
-  get(name: string): RegisteredIndex | undefined {
-    return this.byName.get(name);
-  }
-
-  all(): RegisteredIndex[] {
-    return [...this.byName.values()];
-  }
+function compile(row: CollectionRow): CompiledCollection {
+  return {
+    name: row.name,
+    displayName: row.displayName,
+    description: row.description,
+    fields: row.fields,
+    definition: fieldSpecToIndexDefinition(row.name, row.fields),
+  };
 }
