@@ -1,0 +1,11 @@
+# Goal: design and implement an system records module to manage the system related info like system setups(smtp, imap setups, system settings, api tokens for 3rd party integrations, etc)
+
+1. Design the bottom service layer to operate the repo layer.
+2. Design the Controller layer that is controlled and restricted by authorization that only the admin can access this module.
+3. the design has to be comprehensive, and add what ever should be included(yet not mention by me)
+4. This design has to be a simple but production grade system design. This is the first version, it should be simple, clean and reliable.
+5. Design the schemas as well.
+
+## Action:
+
+Design the system management module and output in [development/current_session/current_design]
