@@ -7,6 +7,7 @@ import { redisConfig } from './configurations/redis.config';
 import { searchConfig } from './configurations/search.config';
 import { sentryConfig } from './configurations/sentry.config';
 import { storageConfig } from './configurations/storage.config';
+import { systemConfig } from './configurations/system.config';
 import { validateEnv } from './env.validation';
 
 /**
@@ -33,6 +34,7 @@ import { validateEnv } from './env.validation';
         sentryConfig,
         storageConfig,
         searchConfig,
+        systemConfig,
       ],
     }),
   ],

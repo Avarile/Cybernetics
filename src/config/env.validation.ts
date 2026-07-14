@@ -95,6 +95,16 @@ export const envSchema = z
     // Auth seeding
     SEED_ADMIN_EMAIL: z.string().email().default('admin@cybernetics.local'),
     SEED_ADMIN_PASSWORD: z.string().default(''),
+
+    // System module (secret encryption at rest)
+    SYSTEM_ENCRYPTION_KEY: z
+      .string()
+      .default('AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='), // 32 zero-bytes (dev/test only)
+    SYSTEM_ENCRYPTION_KEY_VERSION: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(1),
   })
   .superRefine((env, ctx) => {
     // Refuse the well-known default MinIO credentials in production.
@@ -143,6 +153,24 @@ export const envSchema = z
         message:
           'SEED_ADMIN_PASSWORD must be set (>= 12 chars) when NODE_ENV=production.',
       });
+    }
+
+    // Require a real 32-byte encryption key in production.
+    if (env.NODE_ENV === 'production') {
+      let keyBytes = 0;
+      try {
+        keyBytes = Buffer.from(env.SYSTEM_ENCRYPTION_KEY, 'base64').length;
+      } catch {
+        keyBytes = 0;
+      }
+      if (keyBytes !== 32) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['SYSTEM_ENCRYPTION_KEY'],
+          message:
+            'SYSTEM_ENCRYPTION_KEY must be a base64-encoded 32-byte key when NODE_ENV=production.',
+        });
+      }
     }
   });
 
