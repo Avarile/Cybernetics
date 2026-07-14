@@ -22,6 +22,13 @@
       "when": 1783914900054,
       "tag": "0002_perpetual_blade",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1783999792165,
+      "tag": "0003_military_shinobi_shaw",
+      "breakpoints": true
     }
   ]
 }
