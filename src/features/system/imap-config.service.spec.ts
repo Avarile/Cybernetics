@@ -82,6 +82,26 @@ describe('ImapConfigService', () => {
     expect(res.isActive).toBe(true);
   });
 
+  it('short-circuits an empty patch without writing or auditing', async () => {
+    const res = await service.update('i1', {} as any, ctx);
+    expect(repo.update).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+    expect(res).toEqual({
+      id: 'i1',
+      name: 'Inbox',
+      host: 'imap.example.com',
+      port: 993,
+      username: 'reader',
+      secure: true,
+      isActive: false,
+      hasSecret: true,
+      lastTestedAt: null,
+      lastTestStatus: null,
+      createdAt: new Date('2020-01-01'),
+      updatedAt: new Date('2020-01-01'),
+    });
+  });
+
   it('reports a failed connection test without throwing', async () => {
     (testImapConnection as jest.Mock).mockRejectedValueOnce(
       new Error('login rejected'),

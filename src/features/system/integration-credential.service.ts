@@ -125,6 +125,10 @@ export class IntegrationCredentialService {
     if (dto.secret !== undefined)
       patch.secretEnc = this.crypto.encrypt(dto.secret);
 
+    if (Object.keys(patch).length === 0) {
+      return this.toPublic(current);
+    }
+
     const row = await this.repo.update(id, patch);
     if (!row) throw new NotFoundException('Integration credential not found');
     await this.audit.record({

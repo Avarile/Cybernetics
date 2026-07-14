@@ -102,6 +102,27 @@ describe('IntegrationCredentialService', () => {
     expect(res.id).toBe('c1');
   });
 
+  it('short-circuits an empty patch without writing or auditing', async () => {
+    const res = await service.update('c1', {} as any, ctx);
+    expect(repo.update).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+    expect(res).toEqual({
+      id: 'c1',
+      provider: 'openai',
+      name: 'prod',
+      kind: 'api_key',
+      meta: { baseUrl: 'https://api.openai.com' },
+      expiresAt: null,
+      isActive: true,
+      hasSecret: true,
+      lastUsedAt: null,
+      lastTestedAt: null,
+      lastTestStatus: null,
+      createdAt: new Date('2020-01-01'),
+      updatedAt: new Date('2020-01-01'),
+    });
+  });
+
   it('404s on a missing credential', async () => {
     repo.findActiveById.mockResolvedValueOnce(null);
     await expect(service.findById('nope')).rejects.toBeInstanceOf(

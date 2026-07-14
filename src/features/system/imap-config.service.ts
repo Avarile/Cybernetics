@@ -90,7 +90,7 @@ export class ImapConfigService {
     dto: UpdateImapDto,
     ctx: AuditContext,
   ): Promise<PublicImapConfig> {
-    await this.getRow(id);
+    const current = await this.getRow(id);
     const patch: Record<string, unknown> = {};
     if (dto.name !== undefined) patch.name = dto.name;
     if (dto.host !== undefined) patch.host = dto.host;
@@ -99,6 +99,10 @@ export class ImapConfigService {
     if (dto.secure !== undefined) patch.secure = dto.secure;
     if (dto.secret !== undefined)
       patch.secretEnc = this.crypto.encrypt(dto.secret);
+
+    if (Object.keys(patch).length === 0) {
+      return this.toPublic(current);
+    }
 
     const row = await this.repo.update(id, patch);
     if (!row) throw new NotFoundException('IMAP config not found');

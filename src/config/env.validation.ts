@@ -155,20 +155,23 @@ export const envSchema = z
       });
     }
 
-    // Require a real 32-byte encryption key in production.
+    // Require a real, non-zero 32-byte encryption key in production. The dev
+    // default is 32 ZERO bytes, which passes a length-only check — reject it
+    // explicitly so a forgotten key can never silently ship to production.
     if (env.NODE_ENV === 'production') {
-      let keyBytes = 0;
+      let keyBuf: Buffer;
       try {
-        keyBytes = Buffer.from(env.SYSTEM_ENCRYPTION_KEY, 'base64').length;
+        keyBuf = Buffer.from(env.SYSTEM_ENCRYPTION_KEY, 'base64');
       } catch {
-        keyBytes = 0;
+        keyBuf = Buffer.alloc(0);
       }
-      if (keyBytes !== 32) {
+      const allZero = keyBuf.length > 0 && keyBuf.every((b) => b === 0);
+      if (keyBuf.length !== 32 || allZero) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['SYSTEM_ENCRYPTION_KEY'],
           message:
-            'SYSTEM_ENCRYPTION_KEY must be a base64-encoded 32-byte key when NODE_ENV=production.',
+            'SYSTEM_ENCRYPTION_KEY must be a base64-encoded, non-zero 32-byte key when NODE_ENV=production.',
         });
       }
     }

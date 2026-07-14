@@ -96,7 +96,7 @@ export class SmtpConfigService {
     dto: UpdateSmtpDto,
     ctx: AuditContext,
   ): Promise<PublicSmtpConfig> {
-    await this.getRow(id); // 404 if missing
+    const current = await this.getRow(id); // 404 if missing
     const patch: Record<string, unknown> = {};
     if (dto.name !== undefined) patch.name = dto.name;
     if (dto.host !== undefined) patch.host = dto.host;
@@ -107,6 +107,10 @@ export class SmtpConfigService {
     if (dto.fromName !== undefined) patch.fromName = dto.fromName;
     if (dto.secret !== undefined)
       patch.secretEnc = this.crypto.encrypt(dto.secret);
+
+    if (Object.keys(patch).length === 0) {
+      return this.toPublic(current);
+    }
 
     const row = await this.repo.update(id, patch);
     if (!row) throw new NotFoundException('SMTP config not found');

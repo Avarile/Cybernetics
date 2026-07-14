@@ -89,6 +89,28 @@ describe('SmtpConfigService', () => {
     expect(crypto.encrypt).toHaveBeenCalledWith('new-pass');
   });
 
+  it('short-circuits an empty patch without writing or auditing', async () => {
+    const res = await service.update('s1', {} as any, ctx);
+    expect(repo.update).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+    expect(res).toEqual({
+      id: 's1',
+      name: 'Primary',
+      host: 'smtp.example.com',
+      port: 587,
+      username: 'mailer',
+      secure: true,
+      fromAddress: 'no-reply@example.com',
+      fromName: null,
+      isActive: false,
+      hasSecret: true,
+      lastTestedAt: null,
+      lastTestStatus: null,
+      createdAt: new Date('2020-01-01'),
+      updatedAt: new Date('2020-01-01'),
+    });
+  });
+
   it('404s on a missing config', async () => {
     repo.findActiveById.mockResolvedValueOnce(null);
     await expect(service.findById('nope')).rejects.toBeInstanceOf(

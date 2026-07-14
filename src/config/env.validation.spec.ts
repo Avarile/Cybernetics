@@ -68,3 +68,39 @@ describe('auth env', () => {
     ).toThrow(/SEED_ADMIN_PASSWORD/);
   });
 });
+
+describe('system encryption key', () => {
+  const otherProdVars = {
+    MEILISEARCH_MASTER_KEY: 'a-real-master-key',
+    JWT_ACCESS_SECRET: 'a-real-jwt-secret-that-is-long-enough-32',
+    SEED_ADMIN_PASSWORD: 'a-real-admin-password',
+    MINIO_ROOT_USER: 'not-minioadmin',
+    MINIO_ROOT_PASSWORD: 'not-minioadmin',
+  };
+
+  it('rejects the all-zero dev default key in production', () => {
+    expect(() =>
+      validateEnv({ NODE_ENV: 'production', ...otherProdVars }),
+    ).toThrow(/SYSTEM_ENCRYPTION_KEY/);
+  });
+
+  it('rejects an explicit all-zero key in production', () => {
+    expect(() =>
+      validateEnv({
+        NODE_ENV: 'production',
+        ...otherProdVars,
+        SYSTEM_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+      }),
+    ).toThrow(/SYSTEM_ENCRYPTION_KEY/);
+  });
+
+  it('accepts a real non-zero 32-byte key in production', () => {
+    const realKey = Buffer.from('a'.repeat(32)).toString('base64');
+    const env = validateEnv({
+      NODE_ENV: 'production',
+      ...otherProdVars,
+      SYSTEM_ENCRYPTION_KEY: realKey,
+    });
+    expect(env.SYSTEM_ENCRYPTION_KEY).toBe(realKey);
+  });
+});
