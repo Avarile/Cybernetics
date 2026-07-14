@@ -1,25 +1,32 @@
-import { Body, Controller, Param, Post } from '@nestjs/common';
-import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Body, Controller, HttpCode, Param, Post } from '@nestjs/common';
+import { Roles } from '../../common/decorators/roles.decorator';
 import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
-import type { Principal } from '../../common/principal';
 import { searchQuerySchema, type SearchQueryDto } from './dto/search-query.dto';
-import { SearchService } from './search.service';
+import { SearchRecordService } from './search-record.service';
 
 /**
- * External search API (users). `POST /search/:index` with a JSON query body.
- * The index is validated against the registry (404 if unknown) and results are
- * owner-scoped in SearchService via the resolved principal.
+ * Query + reload surface. `POST .../query` is open to any authenticated
+ * principal (global reads); `POST .../reload` is admin-only and runs the full
+ * clear-and-rebuild through BullMQ.
  */
-@Controller('search')
-export class SearchController {
-  constructor(private readonly search: SearchService) {}
+@Controller('search/collections/:name')
+export class SearchQueryController {
+  constructor(private readonly records: SearchRecordService) {}
 
-  @Post(':index')
-  run(
-    @Param('index') index: string,
+  @Post('query')
+  @HttpCode(200)
+  query(
+    @Param('name') name: string,
     @Body(new ZodValidationPipe(searchQuerySchema)) body: SearchQueryDto,
-    @CurrentUser() user: Principal,
   ) {
-    return this.search.search(index, body, user);
+    return this.records.search(name, body);
+  }
+
+  @Post('reload')
+  @Roles('admin')
+  @HttpCode(202)
+  async reload(@Param('name') name: string): Promise<{ status: string }> {
+    await this.records.reload(name);
+    return { status: 'accepted' };
   }
 }

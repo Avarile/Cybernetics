@@ -1,32 +1,35 @@
 import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
-import { APP_SEARCH_INDEXES, IndexRegistry } from './index-registry';
+import { CollectionController } from './collection.controller';
+import { CollectionRepository } from './collection.repository';
+import { CollectionService } from './collection.service';
+import { IndexRegistry } from './index-registry';
 import { SearchIndexingProcessor } from './processors/search-indexing.processor';
+import { RecordController } from './record.controller';
 import { SearchReconciliationScheduler } from './schedulers/search-reconciliation.scheduler';
-import {
-  SEARCH_INDEXING_QUEUE,
-  SEARCH_INDEX_DEFINITIONS,
-} from './search.constants';
-import { SearchController } from './search.controller';
-import { SearchService } from './search.service';
+import { SearchQueryController } from './search.controller';
+import { SEARCH_INDEXING_QUEUE } from './search.constants';
+import { SearchRecordRepository } from './search-record.repository';
+import { SearchRecordService } from './search-record.service';
 
 /**
- * Search-service feature. Exposes the external REST API (SearchController) and
- * the internal SearchService (exported for agents / pipeline modules). Registers
- * the `search-indexing` BullMQ queue.
- *
- * Depends on the global SearchEngineModule (SEARCH_ENGINE) and QueueModule.
+ * Search-service feature: a generic data processor. Admins manage collections
+ * and persist records (Postgres = source of truth); everyone queries Meili.
+ * Registers the `search-indexing` BullMQ queue. Depends on the global
+ * SearchEngineModule (SEARCH_ENGINE), DatabaseModule (DRIZZLE), and QueueModule.
  */
 @Module({
   imports: [BullModule.registerQueue({ name: SEARCH_INDEXING_QUEUE })],
-  controllers: [SearchController],
+  controllers: [CollectionController, RecordController, SearchQueryController],
   providers: [
-    { provide: SEARCH_INDEX_DEFINITIONS, useValue: APP_SEARCH_INDEXES },
     IndexRegistry,
-    SearchService,
+    CollectionRepository,
+    SearchRecordRepository,
+    CollectionService,
+    SearchRecordService,
     SearchIndexingProcessor,
     SearchReconciliationScheduler,
   ],
-  exports: [SearchService],
+  exports: [SearchRecordService, CollectionService],
 })
 export class SearchServiceModule {}
