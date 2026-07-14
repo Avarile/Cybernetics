@@ -1,20 +1,26 @@
-import { Processor, WorkerHost } from '@nestjs/bullmq';
+import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Inject, Logger } from '@nestjs/common';
-import type { Job } from 'bullmq';
+import { Queue, type Job } from 'bullmq';
 import { SEARCH_ENGINE } from '../../../infrastructure/search-engine/meili.constants';
 import type { SearchEngine } from '../../../infrastructure/search-engine/search-engine.interface';
-import { IndexRegistry } from '../index-registry';
+import { SearchRecordRepository } from '../search-record.repository';
 import {
-  SEARCH_DELETE_DOCS_JOB,
+  DELETE_RECORD_JOB,
+  INDEX_RECORD_JOB,
+  RECONCILE_JOB,
+  RECONCILE_STALE_MS,
+  REINDEX_COLLECTION_JOB,
   SEARCH_INDEXING_QUEUE,
-  SEARCH_INDEX_DOCS_JOB,
-  SEARCH_REINDEX_JOB,
 } from '../search.constants';
+import { INDEXING_JOB_OPTS, toMeiliDocument } from '../search.util';
+
+const REINDEX_PAGE_SIZE = 500;
 
 /**
- * Consumes the `search-indexing` queue. Each job applies its mutation via
- * SEARCH_ENGINE and awaits the Meili task so a job only succeeds once the index
- * has actually converged. Idempotent: documents are keyed by primary key.
+ * Applies index mutations off the request path. Every job reads the current row
+ * from Postgres (the source of truth) so Meili converges to the latest state and
+ * rapid updates coalesce. Success stamps `INDEXED`; a throw stamps `FAILED` and
+ * rethrows so BullMQ retries.
  */
 @Processor(SEARCH_INDEXING_QUEUE)
 export class SearchIndexingProcessor extends WorkerHost {
@@ -22,79 +28,124 @@ export class SearchIndexingProcessor extends WorkerHost {
 
   constructor(
     @Inject(SEARCH_ENGINE) private readonly engine: SearchEngine,
-    private readonly registry: IndexRegistry,
+    private readonly records: SearchRecordRepository,
+    @InjectQueue(SEARCH_INDEXING_QUEUE) private readonly queue: Queue,
   ) {
     super();
   }
 
   async process(job: Job): Promise<void> {
     switch (job.name) {
-      case SEARCH_INDEX_DOCS_JOB: {
-        const { index, docs } = job.data as {
-          index: string;
-          docs: Array<Record<string, unknown>>;
-        };
-        this.assertNonEmptyString(index, job.name, 'index');
-        this.assertArray(docs, job.name, 'docs');
-        const { taskUid } = await this.engine.addOrReplace(index, docs);
-        await this.engine.waitForTask(taskUid);
-        break;
-      }
-      case SEARCH_DELETE_DOCS_JOB: {
-        const { index, ids } = job.data as { index: string; ids: string[] };
-        this.assertNonEmptyString(index, job.name, 'index');
-        this.assertArray(ids, job.name, 'ids');
-        const { taskUid } = await this.engine.deleteDocuments(index, ids);
-        await this.engine.waitForTask(taskUid);
-        break;
-      }
-      case SEARCH_REINDEX_JOB: {
-        const { index } = job.data as { index: string };
-        this.assertNonEmptyString(index, job.name, 'index');
-        await this.reindex(index);
-        break;
-      }
+      case INDEX_RECORD_JOB:
+        return this.indexRecord(this.requireString(job, 'id', job.data?.id));
+      case DELETE_RECORD_JOB:
+        return this.deleteRecord(
+          this.requireString(job, 'collection', job.data?.collection),
+          this.requireString(job, 'id', job.data?.id),
+        );
+      case REINDEX_COLLECTION_JOB:
+        return this.reindexCollection(
+          this.requireString(job, 'collection', job.data?.collection),
+        );
+      case RECONCILE_JOB:
+        return this.reconcile();
       default:
         this.logger.warn(`Unknown job "${job.name}"`);
     }
   }
 
-  /** Guards against malformed job.data — an external, replayable boundary. */
-  private assertNonEmptyString(
-    value: unknown,
-    jobName: string,
-    field: string,
-  ): asserts value is string {
-    if (typeof value !== 'string' || value.length === 0) {
-      throw new Error(
-        `Job "${jobName}": "${field}" must be a non-empty string`,
-      );
+  private async indexRecord(id: string): Promise<void> {
+    const row = await this.records.findById(id);
+    if (!row) return;
+    try {
+      if (row.isDeleted) {
+        const { taskUid } = await this.engine.deleteDocuments(row.collection, [id]);
+        await this.engine.waitForTask(taskUid);
+      } else {
+        const { taskUid } = await this.engine.addOrReplace(row.collection, [
+          toMeiliDocument(row),
+        ]);
+        await this.engine.waitForTask(taskUid);
+      }
+      await this.records.markIndexState(id, 'INDEXED', {
+        indexedAt: new Date(),
+        indexError: null,
+      });
+    } catch (error) {
+      await this.records.markIndexState(id, 'FAILED', {
+        indexError: asMessage(error),
+      });
+      throw error;
     }
   }
 
-  private assertArray(
-    value: unknown,
-    jobName: string,
-    field: string,
-  ): asserts value is unknown[] {
-    if (!Array.isArray(value)) {
-      throw new Error(`Job "${jobName}": "${field}" must be an array`);
+  private async deleteRecord(collection: string, id: string): Promise<void> {
+    try {
+      const { taskUid } = await this.engine.deleteDocuments(collection, [id]);
+      await this.engine.waitForTask(taskUid);
+      await this.records.markIndexState(id, 'INDEXED', {
+        indexedAt: new Date(),
+        indexError: null,
+      });
+    } catch (error) {
+      await this.records.markIndexState(id, 'FAILED', {
+        indexError: asMessage(error),
+      });
+      throw error;
     }
   }
 
-  private async reindex(index: string): Promise<void> {
-    const def = this.registry.get(index);
-    if (!def?.source) {
-      this.logger.warn(`Reindex "${index}" skipped: no source registered`);
-      return;
-    }
-    const docs = await def.source();
-    const cleared = await this.engine.clearIndex(index);
+  private async reindexCollection(collection: string): Promise<void> {
+    const cleared = await this.engine.clearIndex(collection);
     await this.engine.waitForTask(cleared.taskUid);
-    if (docs.length) {
-      const added = await this.engine.addOrReplace(index, docs);
+
+    let afterId: string | null = null;
+    let total = 0;
+    for (;;) {
+      const page = await this.records.pageLiveByCollection(
+        collection,
+        REINDEX_PAGE_SIZE,
+        afterId,
+      );
+      if (page.length === 0) break;
+      const added = await this.engine.addOrReplace(
+        collection,
+        page.map(toMeiliDocument),
+      );
       await this.engine.waitForTask(added.taskUid);
+      total += page.length;
+      afterId = page[page.length - 1].id;
+      if (page.length < REINDEX_PAGE_SIZE) break;
     }
-    this.logger.log(`Reindexed "${index}" with ${docs.length} documents`);
+    await this.records.markCollectionIndexed(collection);
+    this.logger.log(`Reindexed "${collection}" with ${total} documents`);
   }
+
+  private async reconcile(): Promise<void> {
+    const cutoff = new Date(Date.now() - RECONCILE_STALE_MS);
+    const rows = await this.records.findUnsynced(cutoff, 500);
+    for (const row of rows) {
+      if (row.isDeleted) {
+        await this.queue.add(
+          DELETE_RECORD_JOB,
+          { collection: row.collection, id: row.id },
+          INDEXING_JOB_OPTS,
+        );
+      } else {
+        await this.queue.add(INDEX_RECORD_JOB, { id: row.id }, INDEXING_JOB_OPTS);
+      }
+    }
+    if (rows.length) this.logger.log(`Reconcile re-enqueued ${rows.length} records`);
+  }
+
+  private requireString(job: Job, field: string, value: unknown): string {
+    if (typeof value !== 'string' || value.length === 0) {
+      throw new Error(`Job "${job.name}": "${field}" must be a non-empty string`);
+    }
+    return value;
+  }
+}
+
+function asMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -1,35 +1,31 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable } from '@nestjs/common';
 import { Queue } from 'bullmq';
-import { IndexRegistry } from '../index-registry';
-import { SEARCH_INDEXING_QUEUE, SEARCH_REINDEX_JOB } from '../search.constants';
+import { RECONCILE_JOB, SEARCH_INDEXING_QUEUE } from '../search.constants';
 
 /**
- * Registers a repeatable full-reindex sweep per index that declares a rebuild
- * source — the drift-repair path (Postgres is the source of truth; Meili is a
- * rebuildable read model). Not called at boot (mirrors FileReconciliationScheduler);
- * invoke `scheduleReconciliation` from an ops/bootstrap hook once Redis is up.
+ * Registers a repeatable `reconcile` sweep. The processor consumes it and
+ * re-enqueues any record that never converged (PENDING/FAILED beyond a
+ * threshold) — the drift-repair path, since Postgres is the source of truth and
+ * Meili is a rebuildable read model. Invoke `scheduleReconciliation` from an
+ * ops/bootstrap hook once Redis is up (mirrors FileReconciliationScheduler).
  */
 @Injectable()
 export class SearchReconciliationScheduler {
   constructor(
     @InjectQueue(SEARCH_INDEXING_QUEUE) private readonly queue: Queue,
-    private readonly registry: IndexRegistry,
   ) {}
 
   async scheduleReconciliation(everyMs = 86_400_000): Promise<void> {
-    for (const def of this.registry.all()) {
-      if (!def.source) continue;
-      await this.queue.add(
-        SEARCH_REINDEX_JOB,
-        { index: def.name },
-        {
-          repeat: { every: everyMs },
-          jobId: `reindex:${def.name}`,
-          removeOnComplete: true,
-          removeOnFail: true,
-        },
-      );
-    }
+    await this.queue.add(
+      RECONCILE_JOB,
+      {},
+      {
+        repeat: { every: everyMs },
+        jobId: 'search-reconcile',
+        removeOnComplete: true,
+        removeOnFail: true,
+      },
+    );
   }
 }
