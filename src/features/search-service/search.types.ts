@@ -1,9 +1,20 @@
-/** Registered index name. Validated against the registry at runtime. */
-export type IndexName = string;
+export type {
+  FieldSpec,
+  FieldType,
+} from '../../infrastructure/database/schema/search.schema';
 
-/** A structured filter value from an external caller (never raw Meili syntax). */
+/** Record sync state, mirroring the `search_index_state` DB enum. */
+export type IndexState = 'PENDING' | 'INDEXED' | 'FAILED';
+
+/** Registered collection name. Validated against the registry at runtime. */
+export type CollectionName = string;
+
+/** A structured filter value from a caller (never raw Meili syntax). */
 export type SearchFilterValue =
-  string | number | boolean | Array<string | number>;
+  | string
+  | number
+  | boolean
+  | Array<string | number>;
 
 /** External/internal search request (post-validation). */
 export interface SearchRequest {
@@ -16,7 +27,7 @@ export interface SearchRequest {
   highlight?: string[];
 }
 
-/** Normalised, owner-scoped search response. */
+/** Normalised search response. */
 export interface SearchResults<T> {
   hits: T[];
   page: number;
