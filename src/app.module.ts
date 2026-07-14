@@ -19,6 +19,7 @@ import { AuthModule } from './features/auth/auth.module';
 import { FileProcessorModule } from './features/file-processor/file-processor.module';
 import { MastraModule } from './features/mastra/mastra.module';
 import { SearchServiceModule } from './features/search-service/search-service.module';
+import { SystemModule } from './features/system/system.module';
 import { UsersModule } from './features/users/users.module';
 
 /**
@@ -55,6 +56,7 @@ import { UsersModule } from './features/users/users.module';
     UsersModule,
     FileProcessorModule,
     SearchServiceModule,
+    SystemModule,
 
     // Mastra AI — must remain last.
     MastraModule,
