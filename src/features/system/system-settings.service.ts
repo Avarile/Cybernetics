@@ -1,0 +1,129 @@
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import type { Cache } from 'cache-manager';
+import type {
+  SettingValue,
+  SystemSettingRow,
+} from '../../infrastructure/database/schema/system.schema';
+import type { UpsertSettingDto } from './dto/upsert-setting.dto';
+import { SystemSettingsRepository } from './system-settings.repository';
+import { SystemAuditService } from './system-audit.service';
+import type { AuditContext } from './system-audit.types';
+
+export interface PublicSetting {
+  key: string;
+  value: SettingValue;
+  type: SystemSettingRow['type'];
+  category: string;
+  description: string | null;
+  updatedAt: Date;
+}
+
+@Injectable()
+export class SystemSettingsService {
+  private readonly ttlMs = 300_000; // 5 minutes (cache-manager ttl is in ms)
+
+  constructor(
+    private readonly repo: SystemSettingsRepository,
+    @Inject(CACHE_MANAGER) private readonly cache: Cache,
+    private readonly audit: SystemAuditService,
+  ) {}
+
+  private cacheKey(key: string): string {
+    return `system:setting:${key}`;
+  }
+
+  private toPublic(row: SystemSettingRow): PublicSetting {
+    return {
+      key: row.key,
+      value: row.valueJson,
+      type: row.type,
+      category: row.category,
+      description: row.description ?? null,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  /** Cache-through read; undefined if the key does not exist. */
+  private async read(key: string): Promise<PublicSetting | undefined> {
+    const cached = await this.cache.get<PublicSetting>(this.cacheKey(key));
+    if (cached) return cached;
+    const row = await this.repo.findByKey(key);
+    if (!row) return undefined;
+    const pub = this.toPublic(row);
+    await this.cache.set(this.cacheKey(key), pub, this.ttlMs);
+    return pub;
+  }
+
+  async get(key: string): Promise<PublicSetting> {
+    const pub = await this.read(key);
+    if (!pub) throw new NotFoundException(`Setting "${key}" not found`);
+    return pub;
+  }
+
+  async list(q: { category?: string; page: number; limit: number }) {
+    const { rows, total } = await this.repo.list(q);
+    return {
+      data: rows.map((r) => this.toPublic(r)),
+      total,
+      page: q.page,
+      limit: q.limit,
+    };
+  }
+
+  async upsert(
+    key: string,
+    dto: UpsertSettingDto,
+    ctx: AuditContext,
+  ): Promise<PublicSetting> {
+    const row = await this.repo.upsertByKey(key, {
+      valueJson: dto.value as SettingValue,
+      type: dto.type,
+      category: dto.category,
+      description: dto.description,
+    });
+    await this.cache.del(this.cacheKey(key));
+    await this.audit.record({
+      ctx,
+      action: 'setting.update',
+      entityType: 'setting',
+      entityId: row.id,
+      metadata: { key, type: dto.type, category: dto.category },
+    });
+    return this.toPublic(row);
+  }
+
+  async remove(key: string, ctx: AuditContext): Promise<void> {
+    const deleted = await this.repo.softDelete(key);
+    if (!deleted) throw new NotFoundException(`Setting "${key}" not found`);
+    await this.cache.del(this.cacheKey(key));
+    await this.audit.record({
+      ctx,
+      action: 'setting.delete',
+      entityType: 'setting',
+      metadata: { key },
+    });
+  }
+
+  // --- Typed getters for internal consumers (return default when missing) ---
+
+  async getString(key: string, def?: string): Promise<string | undefined> {
+    const pub = await this.read(key);
+    return typeof pub?.value === 'string' ? pub.value : def;
+  }
+
+  async getNumber(key: string, def?: number): Promise<number | undefined> {
+    const pub = await this.read(key);
+    return typeof pub?.value === 'number' ? pub.value : def;
+  }
+
+  async getBoolean(key: string, def?: boolean): Promise<boolean | undefined> {
+    const pub = await this.read(key);
+    return typeof pub?.value === 'boolean' ? pub.value : def;
+  }
+
+  async getJson<T>(key: string, def?: T): Promise<T | undefined> {
+    const pub = await this.read(key);
+    return pub && typeof pub.value === 'object' ? (pub.value as T) : def;
+  }
+}

@@ -12,6 +12,9 @@ import { SmtpConfigService } from './smtp-config.service';
 import { SystemAuditController } from './system-audit.controller';
 import { SystemAuditRepository } from './system-audit.repository';
 import { SystemAuditService } from './system-audit.service';
+import { SystemSettingsController } from './system-settings.controller';
+import { SystemSettingsRepository } from './system-settings.repository';
+import { SystemSettingsService } from './system-settings.service';
 
 /**
  * System-records feature. Admin-only (enforced by the global RolesGuard via
@@ -25,6 +28,7 @@ import { SystemAuditService } from './system-audit.service';
     SmtpConfigController,
     ImapConfigController,
     IntegrationCredentialController,
+    SystemSettingsController,
   ],
   providers: [
     SystemAuditRepository,
@@ -35,7 +39,13 @@ import { SystemAuditService } from './system-audit.service';
     ImapConfigService,
     IntegrationCredentialRepository,
     IntegrationCredentialService,
+    SystemSettingsRepository,
+    SystemSettingsService,
   ],
-  exports: [SystemAuditService, IntegrationCredentialService],
+  exports: [
+    SystemAuditService,
+    IntegrationCredentialService,
+    SystemSettingsService,
+  ],
 })
 export class SystemModule {}
