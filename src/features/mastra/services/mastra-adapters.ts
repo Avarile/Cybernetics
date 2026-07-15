@@ -106,6 +106,19 @@ export function readUsage(result: unknown): {
 }
 
 /**
+ * Read the Mastra-side run id off a `generate()` result.
+ *
+ * `FullOutput.runId` is a real, documented field (see the `readUsage`/
+ * `toPendingApprovals` citations above), but its presence isn't reflected in a
+ * shared type here, so call sites narrow it defensively. Centralizing that
+ * narrowing keeps the "result shape" cast confined to this adapter module
+ * instead of leaking into services (e.g. `AgentRunnerService`).
+ */
+export function readMastraRunId(result: unknown): string | null {
+  return (result as { runId?: string }).runId ?? null;
+}
+
+/**
  * Resume a suspended `generate()` call after a human approves or declines the
  * pending tool call.
  *

@@ -4,6 +4,7 @@
 // injected instance, so stub the module rather than loading the real one.
 jest.mock('@mastra/nestjs', () => ({ MastraService: class {} }));
 
+import { ForbiddenException } from '@nestjs/common';
 import { ApprovalService } from './approval.service';
 
 /**
@@ -27,15 +28,23 @@ function make(appr: any) {
     declineToolCallGenerate: jest.fn(async () => undefined),
   };
   const mastra = { getAgent: jest.fn(() => agent) };
+  const conversations = {
+    getOwned: jest.fn(async () => ({
+      id: appr.conversationId,
+      ownerUserId: 'u1',
+    })),
+  };
   return {
     service: new ApprovalService(
       approvals as never,
       runs as never,
       mastra as never,
+      conversations as never,
     ),
     approvals,
     runs,
     agent,
+    conversations,
   };
 }
 
@@ -80,5 +89,40 @@ describe('ApprovalService.decide', () => {
     await expect(
       service.decide({ id: 'u1', role: 'admin' }, 'a1', { approved: true }),
     ).rejects.toThrow();
+  });
+
+  it("403s and never resumes when a non-owner, non-admin caller decides someone else's approval", async () => {
+    const { service, agent, approvals, conversations } = make({
+      ...appr,
+      conversationId: 'conv-1',
+    });
+    conversations.getOwned.mockRejectedValueOnce(
+      new ForbiddenException('Not your conversation'),
+    );
+
+    await expect(
+      service.decide({ id: 'u2', role: 'user' }, 'a1', { approved: true }),
+    ).rejects.toThrow(ForbiddenException);
+
+    expect(conversations.getOwned).toHaveBeenCalledWith(
+      { id: 'u2', role: 'user' },
+      'conv-1',
+    );
+    expect(agent.approveToolCallGenerate).not.toHaveBeenCalled();
+    expect(approvals.decide).not.toHaveBeenCalled();
+  });
+
+  it('403s a non-admin caller when the approval has no conversationId to check ownership against', async () => {
+    const { service, agent, approvals } = make({
+      ...appr,
+      conversationId: null,
+    });
+
+    await expect(
+      service.decide({ id: 'u2', role: 'user' }, 'a1', { approved: true }),
+    ).rejects.toThrow(ForbiddenException);
+
+    expect(agent.approveToolCallGenerate).not.toHaveBeenCalled();
+    expect(approvals.decide).not.toHaveBeenCalled();
   });
 });

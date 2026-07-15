@@ -1,6 +1,8 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { MastraService } from '@mastra/nestjs';
@@ -8,6 +10,7 @@ import { AGENT_ID } from '../mastra.constants';
 import type { PrincipalRef } from '../mastra.types';
 import { AgentRunRepository } from '../repositories/agent-run.repository';
 import { ApprovalRepository } from '../repositories/approval.repository';
+import { ConversationService } from './conversation.service';
 import { resumeAfterApproval } from './mastra-adapters';
 
 export interface DecisionInput {
@@ -24,10 +27,13 @@ export interface DecisionInput {
  */
 @Injectable()
 export class ApprovalService {
+  private readonly logger = new Logger(ApprovalService.name);
+
   constructor(
     private readonly approvals: ApprovalRepository,
     private readonly runs: AgentRunRepository,
     private readonly mastra: MastraService,
+    private readonly conversations: ConversationService,
   ) {}
 
   async listForOwner(principal: PrincipalRef) {
@@ -41,12 +47,41 @@ export class ApprovalService {
       throw new ConflictException('Approval already decided');
     }
 
+    // Ownership gate: the GET path (`findPendingForOwner`) already scopes by
+    // owner, but this mutation resumes a real side-effect (send-email/db-write),
+    // so it must not be resolvable by an arbitrary authenticated caller.
+    // Admins bypass; everyone else must own the approval's conversation.
+    if (principal.role !== 'admin') {
+      if (!appr.conversationId) {
+        throw new ForbiddenException('Not your approval');
+      }
+      // Throws ForbiddenException/NotFoundException for a non-owner.
+      await this.conversations.getOwned(principal, appr.conversationId);
+    }
+
     try {
       await resumeAfterApproval(this.mastra.getAgent(AGENT_ID) as never, {
         mastraRunId: appr.mastraRunId,
         toolCallId: appr.toolCallId,
         approved: decision.approved,
       });
+    } catch (err) {
+      // Resume itself failed: no side-effect happened, safe to mark failed.
+      await this.approvals.decide(id, {
+        status: 'failed',
+        decidedByUserId: principal.id,
+        decidedAt: new Date(),
+        result: { error: err instanceof Error ? err.message : String(err) },
+      });
+      throw err;
+    }
+
+    // Resume succeeded — the tool call (and any real side-effect) already
+    // happened. A failure reconciling our own ledger below must NOT be
+    // reported as an approval failure (that would contradict a side-effect
+    // that actually occurred), so it gets its own try/catch that never
+    // touches approval status.
+    try {
       await this.approvals.decide(id, {
         status: decision.approved ? 'executed' : 'rejected',
         decidedByUserId: principal.id,
@@ -57,15 +92,14 @@ export class ApprovalService {
         status: decision.approved ? 'succeeded' : 'cancelled',
         finishedAt: new Date(),
       });
-      return { id, status: decision.approved ? 'executed' : 'rejected' };
     } catch (err) {
-      await this.approvals.decide(id, {
-        status: 'failed',
-        decidedByUserId: principal.id,
-        decidedAt: new Date(),
-        result: { error: err instanceof Error ? err.message : String(err) },
-      });
+      this.logger.error(
+        `Approval ${id} resumed successfully but reconciling the approval/run ` +
+          `ledger failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
       throw err;
     }
+
+    return { id, status: decision.approved ? 'executed' : 'rejected' };
   }
 }

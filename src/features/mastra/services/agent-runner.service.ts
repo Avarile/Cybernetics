@@ -7,6 +7,7 @@ import { ApprovalRepository } from '../repositories/approval.repository';
 import { ConversationService } from './conversation.service';
 import {
   buildRequestContext,
+  readMastraRunId,
   readUsage,
   toPendingApprovals,
 } from './mastra-adapters';
@@ -73,7 +74,7 @@ export class AgentRunnerService {
         await this.approvals.create({
           runId: run.id,
           conversationId: conv.id,
-          mastraRunId: (result as { runId?: string }).runId ?? null,
+          mastraRunId: readMastraRunId(result),
           toolCallId: p.toolCallId,
           actionType: p.actionType,
           title: p.title,
