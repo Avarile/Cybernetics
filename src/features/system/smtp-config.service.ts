@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { EncryptionService } from '../../infrastructure/crypto/encryption.service';
 import type { SmtpConfigRow } from '../../infrastructure/database/schema/system.schema';
-import { testSmtpConnection } from './connection/smtp-tester';
+import { sendSmtpMail, testSmtpConnection } from './connection/smtp-tester';
 import type { CreateSmtpDto } from './dto/create-smtp.dto';
 import type { UpdateSmtpDto } from './dto/update-smtp.dto';
 import { SmtpConfigRepository } from './smtp-config.repository';
@@ -182,5 +182,32 @@ export class SmtpConfigService {
       });
       return { ok: false, error };
     }
+  }
+
+  /**
+   * Sends a real email through the currently active SMTP config. Used by the
+   * mastra send-email tool (behind approval gating) — no controller route.
+   */
+  async sendActive(msg: {
+    to: string;
+    subject: string;
+    text: string;
+    cc?: string;
+  }): Promise<void> {
+    const row = await this.repo.findActive();
+    if (!row) throw new NotFoundException('No active SMTP config');
+    await sendSmtpMail({
+      host: row.host,
+      port: row.port,
+      secure: row.secure,
+      username: row.username,
+      password: row.secretEnc ? this.crypto.decrypt(row.secretEnc) : null,
+      fromAddress: row.fromAddress,
+      fromName: row.fromName,
+      to: msg.to,
+      subject: msg.subject,
+      text: msg.text,
+      cc: msg.cc,
+    });
   }
 }

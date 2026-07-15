@@ -48,6 +48,7 @@ import { SystemSettingsService } from './system-settings.service';
   ],
   exports: [
     SystemAuditService,
+    SmtpConfigService,
     IntegrationCredentialService,
     SystemSettingsService,
   ],
