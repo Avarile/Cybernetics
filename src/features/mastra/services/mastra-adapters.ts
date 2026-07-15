@@ -104,3 +104,68 @@ export function readUsage(result: unknown): {
     text: r.text ?? '',
   };
 }
+
+/**
+ * Resume a suspended `generate()` call after a human approves or declines the
+ * pending tool call.
+ *
+ * Confirmed against `node_modules/@mastra/core` 1.50.1
+ * `dist/agent/agent.d.ts` (L1377-1472) and
+ * `dist/docs/references/docs-agents-agent-approval.md` ("Tool approval with
+ * `generate()`" section + the stream/generate comparison table):
+ * - `Agent` exposes FOUR resume methods, split by call style: `approveToolCall`
+ *   / `declineToolCall` resume a suspended `stream()` and return a
+ *   `MastraModelOutput` you must iterate (`Promise<MastraModelOutput<OUTPUT>>`,
+ *   `agent.d.ts` L1392, L1429). `approveToolCallGenerate` /
+ *   `declineToolCallGenerate` resume a suspended `generate()` and resolve
+ *   directly to the finished result (`Awaited<ReturnType<MastraModelOutput<OUTPUT
+ *   >['getFullOutput']>>`, `agent.d.ts` L1449-1472) — the same `FullOutput`
+ *   shape `readUsage`/`toPendingApprovals` already read above.
+ * - `AgentRunnerService.runChat` calls `agent.generate(...)` (not `stream()`),
+ *   so the correct bind here is `approveToolCallGenerate` /
+ *   `declineToolCallGenerate`, NOT the guessed `approveToolCall` /
+ *   `declineToolCall` — those are the streaming counterparts and would return
+ *   an unconsumed stream instead of resolving.
+ * - Both `*Generate` methods take `{ runId: string; toolCallId?: string }`
+ *   (`agent.d.ts` L1449-1451, L1469-1471). `toolCallId` is optional — "When
+ *   omitted, the agent resumes the most recent suspended tool call" (approval
+ *   doc, stream/generate comparison table note) — but we always have it from
+ *   the stored `agent_approval` row, so we pass it to disambiguate.
+ * - No `memory`/`resource`+`thread` context is required: the "Resuming after a
+ *   restart" example (approval doc) rediscovers and resumes a suspended run
+ *   using only `runId` (+ optional `toolCallId`) with no `memory` option
+ *   passed — the run's persisted snapshot, keyed by `runId`, already carries
+ *   the thread/resource context needed to resume. `memory` is optional on
+ *   `AgentExecutionOptionsBase` (`agent.types.d.ts` L400), which both
+ *   `*Generate` methods extend. Confirmed: `ApprovalService` does NOT need a
+ *   `ConversationRepository` dependency for this call.
+ */
+export async function resumeAfterApproval(
+  agent: {
+    approveToolCallGenerate: (args: {
+      runId: string;
+      toolCallId?: string;
+    }) => Promise<unknown>;
+    declineToolCallGenerate: (args: {
+      runId: string;
+      toolCallId?: string;
+    }) => Promise<unknown>;
+  },
+  args: {
+    mastraRunId: string | null;
+    toolCallId: string | null;
+    approved: boolean;
+  },
+): Promise<void> {
+  if (!args.mastraRunId) {
+    throw new Error(
+      'resumeAfterApproval requires a mastraRunId on the approval row',
+    );
+  }
+  const payload = {
+    runId: args.mastraRunId,
+    toolCallId: args.toolCallId ?? undefined,
+  };
+  if (args.approved) await agent.approveToolCallGenerate(payload);
+  else await agent.declineToolCallGenerate(payload);
+}
