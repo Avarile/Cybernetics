@@ -10,8 +10,8 @@ function make() {
     softDelete: jest.fn(async () => undefined),
   };
   const queue = {
-    add: jest.fn(async () => undefined),
-    removeRepeatable: jest.fn(async () => undefined),
+    upsertJobScheduler: jest.fn(async () => undefined),
+    removeJobScheduler: jest.fn(async () => undefined),
   };
   return {
     service: new ScheduleService(repo as never, queue as never),
@@ -21,7 +21,7 @@ function make() {
 }
 
 describe('ScheduleService', () => {
-  it('creates a schedule and registers a repeatable job when enabled', async () => {
+  it('creates a schedule and registers a job scheduler when enabled', async () => {
     const { service, queue } = make();
     await service.create({
       name: 'daily',
@@ -29,12 +29,13 @@ describe('ScheduleService', () => {
       agentId: 'orchestrator',
       promptTemplate: 'report',
     } as any);
-    expect(queue.add).toHaveBeenCalledWith(
-      'run-schedule',
-      expect.objectContaining({ scheduleId: 'sch-1' }),
+    expect(queue.upsertJobScheduler).toHaveBeenCalledWith(
+      'sch-1',
+      expect.objectContaining({ pattern: '0 9 * * *' }),
       expect.objectContaining({
-        jobId: 'sch-1',
-        repeat: expect.objectContaining({ pattern: '0 9 * * *' }),
+        name: 'run-schedule',
+        data: expect.objectContaining({ scheduleId: 'sch-1' }),
+        opts: expect.objectContaining({ attempts: 3 }),
       }),
     );
   });
@@ -42,6 +43,13 @@ describe('ScheduleService', () => {
   it('syncRepeatableJobs registers all enabled schedules', async () => {
     const { service, queue } = make();
     await service.syncRepeatableJobs();
-    expect(queue.add).toHaveBeenCalledTimes(1);
+    expect(queue.upsertJobScheduler).toHaveBeenCalledTimes(1);
+  });
+
+  it('remove soft-deletes the schedule and removes its job scheduler', async () => {
+    const { service, repo, queue } = make();
+    await service.remove('sch-1');
+    expect(repo.softDelete).toHaveBeenCalledWith('sch-1');
+    expect(queue.removeJobScheduler).toHaveBeenCalledWith('sch-1');
   });
 });
