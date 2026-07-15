@@ -3,6 +3,7 @@ import { ConfigModule as NestConfigModule } from '@nestjs/config';
 import { appConfig } from './configurations/app.config';
 import { authConfig } from './configurations/auth.config';
 import { databaseConfig } from './configurations/database.config';
+import { mastraConfig } from './configurations/mastra.config';
 import { redisConfig } from './configurations/redis.config';
 import { searchConfig } from './configurations/search.config';
 import { sentryConfig } from './configurations/sentry.config';
@@ -35,6 +36,7 @@ import { validateEnv } from './env.validation';
         storageConfig,
         searchConfig,
         systemConfig,
+        mastraConfig,
       ],
     }),
   ],

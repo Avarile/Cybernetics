@@ -77,6 +77,18 @@ export const envSchema = z
     SEARCH_DEFAULT_PAGE_SIZE: z.coerce.number().int().positive().default(20),
     SEARCH_MAX_PAGE_SIZE: z.coerce.number().int().positive().default(100),
 
+    // Mastra AI agent
+    AI_GATEWAY_API_KEY: z.string().default(''),
+    MASTRA_MODEL: z.string().min(1).default('anthropic/claude-sonnet-4.6'),
+    MASTRA_MAX_RETRIES: z.coerce.number().int().min(0).default(2),
+    MASTRA_MEMORY_LAST_MESSAGES: z.coerce.number().int().positive().default(20),
+    MASTRA_APPROVAL_TTL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(86_400_000),
+    MASTRA_SCHEDULES_ENABLED: booleanFromEnv.default(false),
+
     // Auth / JWT
     JWT_ACCESS_SECRET: z
       .string()
@@ -143,6 +155,14 @@ export const envSchema = z
         path: ['JWT_ACCESS_SECRET'],
         message:
           'JWT_ACCESS_SECRET must be a strong non-default value (>= 32 chars) when NODE_ENV=production.',
+      });
+    }
+
+    if (env.NODE_ENV === 'production' && env.AI_GATEWAY_API_KEY.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['AI_GATEWAY_API_KEY'],
+        message: 'AI_GATEWAY_API_KEY is required when NODE_ENV=production.',
       });
     }
 

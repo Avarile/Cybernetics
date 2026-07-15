@@ -76,6 +76,7 @@ describe('system encryption key', () => {
     SEED_ADMIN_PASSWORD: 'a-real-admin-password',
     MINIO_ROOT_USER: 'not-minioadmin',
     MINIO_ROOT_PASSWORD: 'not-minioadmin',
+    AI_GATEWAY_API_KEY: 'a-real-gateway-api-key',
   };
 
   it('rejects the all-zero dev default key in production', () => {
