@@ -22,6 +22,7 @@ export class ActionLogRepository {
 
   /** Insert one audit entry. */
   async record(entry: ActionLogEntry): Promise<void> {
+    if (!entry.runId) throw new Error('ActionLogRepository.record requires a runId');
     await this.db
       .insert(agentActionLog)
       .values(entry as unknown as NewAgentActionLogRow);
