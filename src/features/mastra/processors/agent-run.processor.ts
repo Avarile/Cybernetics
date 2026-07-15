@@ -63,10 +63,18 @@ export class AgentRunProcessor extends WorkerHost {
       input: { scheduleId: schedule.id },
       startedAt: new Date(),
     } as never);
+    // Execution-only try/catch: this is the SOLE handler for a thrown execution
+    // error (e.g. `createRun`/`start` rejecting outright). It must not wrap the
+    // status switch below — the `'failed'`/default branches there also finish
+    // the run + stamp the schedule and then `throw` (to trigger a BullMQ retry),
+    // and if that throw were caught here too, `finish`/`stampRun` would each run
+    // a second time for the same failure.
+    const wf = this.mastra.getWorkflow(SCHEDULED_REPORT_WORKFLOW_ID);
+    let runHandle: Awaited<ReturnType<typeof wf.createRun>>;
+    let result: Awaited<ReturnType<typeof runHandle.start>>;
     try {
-      const wf = this.mastra.getWorkflow(SCHEDULED_REPORT_WORKFLOW_ID);
-      const runHandle = await wf.createRun();
-      const result = await runHandle.start({
+      runHandle = await wf.createRun();
+      result = await runHandle.start({
         inputData: {
           scheduleId: schedule.id,
           userId: schedule.targetUserId ?? null,
@@ -81,75 +89,6 @@ export class AgentRunProcessor extends WorkerHost {
           conversationId: null,
         }),
       } as never);
-
-      const status = (result as { status?: string }).status;
-      switch (status) {
-        case 'success': {
-          await this.runs.finish(run.id, {
-            status: 'succeeded',
-            output: result as never,
-            mastraRunId: runHandle.runId ?? null,
-            finishedAt: new Date(),
-          });
-          await this.schedules.stampRun(schedule.id, 'succeeded', run.id);
-          return;
-        }
-        case 'suspended': {
-          this.logger.warn(
-            `Scheduled run ${runHandle.runId} (schedule ${schedule.id}) suspended ` +
-              'awaiting human approval; resuming a scheduled workflow run via the ' +
-              'external-email approval flow is deferred to v2, so this run is ' +
-              'recorded as awaiting_approval, NOT succeeded.',
-          );
-          await this.runs.finish(run.id, {
-            status: 'awaiting_approval',
-            output: result as never,
-            mastraRunId: runHandle.runId ?? null,
-            finishedAt: new Date(),
-          });
-          await this.schedules.stampRun(schedule.id, 'suspended', run.id);
-          return;
-        }
-        case 'failed': {
-          const resultError = (result as { error?: unknown }).error;
-          await this.runs.finish(run.id, {
-            status: 'failed',
-            error: {
-              message:
-                resultError instanceof Error
-                  ? resultError.message
-                  : String(resultError),
-            },
-            output: result as never,
-            mastraRunId: runHandle.runId ?? null,
-            finishedAt: new Date(),
-          });
-          await this.schedules.stampRun(schedule.id, 'failed', run.id);
-          throw resultError instanceof Error
-            ? resultError
-            : new Error(String(resultError));
-        }
-        default: {
-          // 'tripwire' | 'paused' (or anything future): the scheduled-report
-          // workflow doesn't use scorers or step-level pausing today, so these
-          // aren't expected in practice — but treat conservatively as a failure
-          // rather than silently reporting success.
-          this.logger.warn(
-            `Scheduled run ${runHandle.runId} (schedule ${schedule.id}) resolved ` +
-              `with unexpected status "${String(status)}"; marking failed.`,
-          );
-          const message = `Unexpected workflow result status: ${String(status)}`;
-          await this.runs.finish(run.id, {
-            status: 'failed',
-            error: { message },
-            output: result as never,
-            mastraRunId: runHandle.runId ?? null,
-            finishedAt: new Date(),
-          });
-          await this.schedules.stampRun(schedule.id, 'failed', run.id);
-          throw new Error(message);
-        }
-      }
     } catch (err) {
       await this.runs.finish(run.id, {
         status: 'failed',
@@ -158,6 +97,78 @@ export class AgentRunProcessor extends WorkerHost {
       });
       await this.schedules.stampRun(schedule.id, 'failed', run.id);
       throw err; // let BullMQ retry
+    }
+
+    const status = (result as { status?: string }).status;
+    switch (status) {
+      case 'success': {
+        await this.runs.finish(run.id, {
+          status: 'succeeded',
+          output: result as never,
+          mastraRunId: runHandle.runId ?? null,
+          finishedAt: new Date(),
+        });
+        await this.schedules.stampRun(schedule.id, 'succeeded', run.id);
+        return;
+      }
+      case 'suspended': {
+        this.logger.warn(
+          `Scheduled run ${runHandle.runId} (schedule ${schedule.id}) suspended ` +
+            'awaiting human approval; resuming a scheduled workflow run via the ' +
+            'external-email approval flow is deferred to v2, so this run is ' +
+            'recorded as awaiting_approval, NOT succeeded.',
+        );
+        await this.runs.finish(run.id, {
+          status: 'awaiting_approval',
+          output: result as never,
+          mastraRunId: runHandle.runId ?? null,
+          finishedAt: new Date(),
+        });
+        await this.schedules.stampRun(schedule.id, 'suspended', run.id);
+        return;
+      }
+      case 'failed': {
+        const resultError = (result as { error?: unknown }).error;
+        await this.runs.finish(run.id, {
+          status: 'failed',
+          error: {
+            message:
+              resultError instanceof Error
+                ? resultError.message
+                : String(resultError),
+          },
+          output: result as never,
+          mastraRunId: runHandle.runId ?? null,
+          finishedAt: new Date(),
+        });
+        await this.schedules.stampRun(schedule.id, 'failed', run.id);
+        // Not caught by the try/catch above (it's outside that block), so this
+        // propagates straight out of `process()` without re-triggering finish/
+        // stampRun — it only triggers BullMQ's retry.
+        throw resultError instanceof Error
+          ? resultError
+          : new Error(String(resultError));
+      }
+      default: {
+        // 'tripwire' | 'paused' (or anything future): the scheduled-report
+        // workflow doesn't use scorers or step-level pausing today, so these
+        // aren't expected in practice — but treat conservatively as a failure
+        // rather than silently reporting success.
+        this.logger.warn(
+          `Scheduled run ${runHandle.runId} (schedule ${schedule.id}) resolved ` +
+            `with unexpected status "${String(status)}"; marking failed.`,
+        );
+        const message = `Unexpected workflow result status: ${String(status)}`;
+        await this.runs.finish(run.id, {
+          status: 'failed',
+          error: { message },
+          output: result as never,
+          mastraRunId: runHandle.runId ?? null,
+          finishedAt: new Date(),
+        });
+        await this.schedules.stampRun(schedule.id, 'failed', run.id);
+        throw new Error(message);
+      }
     }
   }
 }

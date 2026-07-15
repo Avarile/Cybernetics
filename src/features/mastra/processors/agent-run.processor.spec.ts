@@ -98,6 +98,65 @@ describe('AgentRunProcessor.process', () => {
       'failed',
       'run-1',
     );
+    // Locks out the double-write regression: the 'failed' switch branch and
+    // the execution try/catch must not BOTH run finish/stampRun for the same
+    // failure (see the processor's comment on why they're no longer nested).
+    expect(runs.finish).toHaveBeenCalledTimes(1);
+    expect(schedules.stampRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks the run failed, stamps the schedule failed exactly once, and rethrows on a genuine workflow-execution error', async () => {
+    const schedule = {
+      id: 'sched-1',
+      enabled: true,
+      agentId: 'orchestrator',
+      targetUserId: null,
+      promptTemplate: 'summarize last week',
+      params: {},
+      deliveryChannel: 'conversation',
+      deliveryTarget: null,
+    };
+    const schedules = {
+      findLiveById: jest.fn(async () => schedule),
+      stampRun: jest.fn(async () => undefined),
+    };
+    const runs = {
+      create: jest.fn(async () => ({ id: 'run-1' })),
+      finish: jest.fn(async () => undefined),
+    };
+    const workflow = {
+      createRun: async () => ({
+        runId: 'mr1',
+        start: async () => {
+          throw new Error('createRun/start rejected outright');
+        },
+      }),
+    };
+    const mastra = { getWorkflow: jest.fn(() => workflow) };
+    const processor = new AgentRunProcessor(
+      schedules as never,
+      runs as never,
+      mastra as never,
+    );
+
+    await expect(processor.process(job)).rejects.toThrow(
+      'createRun/start rejected outright',
+    );
+
+    expect(runs.finish).toHaveBeenCalledWith(
+      'run-1',
+      expect.objectContaining({
+        status: 'failed',
+        error: { message: 'createRun/start rejected outright' },
+      }),
+    );
+    expect(schedules.stampRun).toHaveBeenCalledWith(
+      'sched-1',
+      'failed',
+      'run-1',
+    );
+    expect(runs.finish).toHaveBeenCalledTimes(1);
+    expect(schedules.stampRun).toHaveBeenCalledTimes(1);
   });
 
   it('marks the run awaiting_approval (not succeeded) and stamps the schedule "suspended" on a "suspended" workflow result', async () => {
