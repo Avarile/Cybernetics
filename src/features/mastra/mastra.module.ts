@@ -1,18 +1,97 @@
+import { BullModule } from '@nestjs/bullmq';
 import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { MastraModule as MastraCoreModule } from '@mastra/nestjs';
-import { mastra } from './index';
+import type { Pool } from 'pg';
+import { PG_POOL } from '../../infrastructure/database/drizzle.constants';
+import type { MastraConfig } from '../../config/configurations/mastra.config';
+import { SearchServiceModule } from '../search-service/search-service.module';
+import { SearchRecordService } from '../search-service/search-record.service';
+import { SystemModule } from '../system/system.module';
+import { SmtpConfigService } from '../system/smtp-config.service';
+import { buildMastra } from './index';
+import { AGENT_RUN_QUEUE } from './mastra.constants';
+import type { ToolServices } from './mastra.types';
+import { ChatController } from './controllers/chat.controller';
+import { ApprovalController } from './controllers/approval.controller';
+import { ScheduleController } from './controllers/schedule.controller';
+import { ConversationRepository } from './repositories/conversation.repository';
+import { AgentRunRepository } from './repositories/agent-run.repository';
+import { ApprovalRepository } from './repositories/approval.repository';
+import { ActionLogRepository } from './repositories/action-log.repository';
+import { ScheduleRepository } from './repositories/schedule.repository';
+import { ConversationService } from './services/conversation.service';
+import { AgentRunnerService } from './services/agent-runner.service';
+import { ApprovalService } from './services/approval.service';
+import { ScheduleService } from './services/schedule.service';
+import { AgentRunProcessor } from './processors/agent-run.processor';
+import { AgentScheduleScheduler } from './schedulers/agent-schedule.scheduler';
 
 /**
- * Mastra AI feature module (scaffold).
+ * Mastra AI feature module.
  *
- * Registers the Mastra instance with the `@mastra/nestjs` adapter, which
- * exposes registered agents under `/api/agents/{agentId}` and provides
- * `MastraService` / the `MASTRA` token for injection.
+ * Registers the app-lifetime `Mastra` instance (agent + scheduled-report
+ * workflow, Postgres-backed storage) with the `@mastra/nestjs` adapter via
+ * `registerAsync`, which exposes `MastraService` for injection and mounts the
+ * adapter's own routes under the `prefix` below. `ConfigService` and
+ * `PG_POOL` are available for injection without importing their modules
+ * here because `ConfigModule` and `DatabaseModule` are both `@Global()`.
  *
- * NOTE: this module MUST be imported last in `AppModule` — the adapter mounts a
- * catch-all controller that would otherwise intercept unrelated routes.
+ * `prefix: '/api/agent-core'` scopes the adapter's catch-all controller away
+ * from this module's own `/agent/*` routes (chat/approvals/schedules) — see
+ * `MastraModuleOptions.prefix` (default `/api`) in
+ * `node_modules/@mastra/nestjs/dist/mastra.module.d.ts`.
+ *
+ * NOTE: this module MUST be imported last in `AppModule` — the adapter mounts
+ * a catch-all controller that would otherwise intercept unrelated routes.
  */
 @Module({
-  imports: [MastraCoreModule.register({ mastra })],
+  imports: [
+    SearchServiceModule,
+    SystemModule,
+    BullModule.registerQueue({ name: AGENT_RUN_QUEUE }),
+    MastraCoreModule.registerAsync({
+      imports: [SearchServiceModule, SystemModule],
+      inject: [
+        ConfigService,
+        SearchRecordService,
+        SmtpConfigService,
+        ActionLogRepository,
+        PG_POOL,
+      ],
+      useFactory: (
+        config: ConfigService,
+        search: SearchRecordService,
+        smtp: SmtpConfigService,
+        actionLog: ActionLogRepository,
+        pool: Pool,
+      ) => {
+        const cfg = config.getOrThrow<MastraConfig>('mastra');
+        const services: ToolServices = {
+          searchRecords: search,
+          sendEmail: (m) => smtp.sendActive(m),
+          recordAction: (e) => actionLog.record(e),
+        };
+        return {
+          mastra: buildMastra({ cfg, pool, services }),
+          prefix: '/api/agent-core',
+        };
+      },
+    }),
+  ],
+  controllers: [ChatController, ApprovalController, ScheduleController],
+  providers: [
+    ConversationRepository,
+    AgentRunRepository,
+    ApprovalRepository,
+    ActionLogRepository,
+    ScheduleRepository,
+    ConversationService,
+    AgentRunnerService,
+    ApprovalService,
+    ScheduleService,
+    AgentRunProcessor,
+    AgentScheduleScheduler,
+  ],
 })
 export class MastraModule {}
