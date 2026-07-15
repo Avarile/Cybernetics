@@ -1,0 +1,15 @@
+# Goal: design and implement / update the existing search service in src/features/search-service 
+
+feature description: expose a data processor apis for users to persist and query data, the data will be persisted in the database(Postgres) first, then added to the MeiliSearch. When query, only query from the Meilisearch. The postgres database will be used as source of truth. Besides the normal peresit / query APIs used by users, admin will access the reload api(remove all records in a index then reload from the database, all of the reloads should be done through the BullMQ). 
+
+1. Design the Structure so clean and clear layers between the controller, service and repos.
+   1. The repo of the records in postgres can also be used to do asyncing data to meilisearch
+2. Design the Controller layer that is controlled and restricted by authorization that only the admin can persist records as well as triggers the index reloads. users and agents can query everything, cannot persist.
+3. the design has to be comprehensive, and add what ever should be included(yet not mention by me)
+4. This design has to be a simple but production grade system design. This is the first version, it should be simple, clean and reliable.
+5. Design the schemas as well, discuss the schema with me, as this is the hardest part.
+  
+
+## Action:
+
+Design the search management module and output the design to [development/current_session/current_design]
