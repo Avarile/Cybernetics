@@ -9,7 +9,12 @@ import { INBOUND_EMAIL_COLLECTION } from './mailbox.constants';
 import { MailboxRepository } from './mailbox.repository';
 import type { NewEmailAttachmentRow } from '../../infrastructure/database/schema/mailbox.schema';
 import type { IngestMessage } from '../../infrastructure/email/email.types';
-import { computeThreadId, makeSnippet, normalizeReferences, toSearchDocument } from './mailbox.util';
+import {
+  computeThreadId,
+  makeSnippet,
+  normalizeReferences,
+  toSearchDocument,
+} from './mailbox.util';
 
 @Injectable()
 export class MailboxIngestService {
@@ -171,8 +176,14 @@ export class MailboxIngestService {
       attachmentRows,
     );
 
-    await this.search.persist(INBOUND_EMAIL_COLLECTION, [
-      { externalId: row.id, document: toSearchDocument(row) },
-    ]);
+    try {
+      await this.search.persist(INBOUND_EMAIL_COLLECTION, [
+        { externalId: row.id, document: toSearchDocument(row) },
+      ]);
+    } catch (error) {
+      this.logger.warn(
+        `Failed to index message ${row.id} for search: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 }
