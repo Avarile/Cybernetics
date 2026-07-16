@@ -1,0 +1,162 @@
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  type OnApplicationBootstrap,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import type { MailboxConfig } from '../../config/configurations/mailbox.config';
+import type { PresignedTarget } from '../../infrastructure/file-manage/object-storage.interface';
+import { SYSTEM_PRINCIPAL } from '../../common/principal';
+import { FileService } from '../file-processor/file.service';
+import { CollectionService } from '../search-service/collection.service';
+import { SearchRecordService } from '../search-service/search-record.service';
+import type { FieldSpec } from '../../infrastructure/database/schema/search.schema';
+import type { EmailMessageRow } from '../../infrastructure/database/schema/mailbox.schema';
+import { INBOUND_EMAIL_COLLECTION } from './mailbox.constants';
+import { MailboxRepository } from './mailbox.repository';
+import { MailboxSyncScheduler } from './schedulers/mailbox-sync.scheduler';
+import type { MessageDetail, MessageSummary } from './mailbox.types';
+import { toSearchDocument } from './mailbox.util';
+
+const INBOUND_EMAIL_FIELDS: FieldSpec[] = [
+  { name: 'subject', type: 'string', searchable: true },
+  { name: 'bodyText', type: 'string', searchable: true },
+  { name: 'fromAddress', type: 'string', searchable: true, filterable: true },
+  { name: 'fromName', type: 'string', searchable: true },
+  { name: 'mailbox', type: 'string', filterable: true },
+  { name: 'threadId', type: 'string', filterable: true },
+  { name: 'accountId', type: 'string', filterable: true },
+  { name: 'seen', type: 'boolean', filterable: true },
+  { name: 'flagged', type: 'boolean', filterable: true },
+  { name: 'receivedAt', type: 'number', filterable: true, sortable: true },
+  { name: 'sentAt', type: 'number', sortable: true },
+];
+
+@Injectable()
+export class MailboxService implements OnApplicationBootstrap {
+  private readonly logger = new Logger(MailboxService.name);
+  private readonly cfg: MailboxConfig;
+
+  constructor(
+    private readonly repo: MailboxRepository,
+    private readonly files: FileService,
+    private readonly search: SearchRecordService,
+    private readonly collections: CollectionService,
+    private readonly scheduler: MailboxSyncScheduler,
+    config: ConfigService,
+  ) {
+    this.cfg = config.getOrThrow<MailboxConfig>('mailbox');
+  }
+
+  /** Ensure the system-owned inbound_email collection exists (best-effort). */
+  async onApplicationBootstrap(): Promise<void> {
+    try {
+      await this.collections.get(INBOUND_EMAIL_COLLECTION);
+    } catch {
+      try {
+        await this.collections.create({
+          name: INBOUND_EMAIL_COLLECTION,
+          displayName: 'Inbound Email',
+          description: 'Durably persisted inbound messages',
+          fields: INBOUND_EMAIL_FIELDS,
+        });
+        this.logger.log(`Created "${INBOUND_EMAIL_COLLECTION}" collection`);
+      } catch (err) {
+        this.logger.warn(
+          `Could not ensure inbound_email collection: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  }
+
+  resolveAccountId(explicit?: string): string {
+    const id = explicit ?? this.cfg.defaultAccountId;
+    if (!id) {
+      throw new BadRequestException(
+        'No mailbox account specified and MAILBOX_DEFAULT_ACCOUNT_ID is unset',
+      );
+    }
+    return id;
+  }
+
+  async list(
+    accountId: string,
+    mailbox: string,
+    page: number,
+    limit: number,
+    unseenOnly: boolean,
+  ): Promise<{
+    items: MessageSummary[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    const { rows, total } = await this.repo.listMessages(
+      accountId,
+      mailbox,
+      page,
+      limit,
+      unseenOnly,
+    );
+    return { items: rows.map(toSummary), total, page, limit };
+  }
+
+  async get(id: string): Promise<MessageDetail> {
+    const found = await this.repo.findByIdWithAttachments(id);
+    if (!found) throw new NotFoundException('Message not found');
+    return {
+      ...toSummary(found.message),
+      to: found.message.toAddresses,
+      cc: found.message.ccAddresses,
+      sentAt: found.message.sentAt,
+      bodyText: found.message.bodyText,
+      bodyHtml: found.message.bodyHtml,
+      attachments: found.attachments.map((a) => ({
+        id: a.id,
+        filename: a.filename,
+        contentType: a.contentType,
+        size: a.size,
+        inline: a.inline,
+      })),
+    };
+  }
+
+  async downloadAttachment(
+    id: string,
+    attachmentId: string,
+  ): Promise<PresignedTarget> {
+    const att = await this.repo.findAttachment(id, attachmentId);
+    if (!att) throw new NotFoundException('Attachment not found');
+    return this.files.getDownloadUrl(att.fileId, SYSTEM_PRINCIPAL);
+  }
+
+  async markSeen(id: string, seen: boolean): Promise<void> {
+    const row = await this.repo.setSeen(id, seen);
+    if (!row) throw new NotFoundException('Message not found');
+    await this.search.persist(INBOUND_EMAIL_COLLECTION, [
+      { externalId: row.id, document: toSearchDocument(row) },
+    ]);
+  }
+
+  async triggerSync(accountId: string, mailbox: string): Promise<void> {
+    await this.scheduler.enqueueSync(accountId, mailbox);
+  }
+}
+
+function toSummary(row: EmailMessageRow): MessageSummary {
+  return {
+    id: row.id,
+    mailbox: row.mailbox,
+    fromAddress: row.fromAddress,
+    fromName: row.fromName,
+    subject: row.subject,
+    snippet: row.snippet,
+    receivedAt: row.receivedAt,
+    seen: row.seen,
+    flagged: row.flagged,
+    hasAttachments: row.hasAttachments,
+    threadId: row.threadId,
+  };
+}
