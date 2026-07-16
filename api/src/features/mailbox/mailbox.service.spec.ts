@@ -61,6 +61,30 @@ describe('MailboxService', () => {
     ]);
   });
 
+  it('markSeen resolves even when search.persist rejects, and still updates the row', async () => {
+    const row = {
+      id: 'm1',
+      accountId: 'acc',
+      mailbox: 'INBOX',
+      subject: 's',
+      bodyText: 'b',
+      fromAddress: 'a@x.com',
+      fromName: null,
+      threadId: '<t>',
+      seen: true,
+      flagged: false,
+      receivedAt: new Date('2020-01-01'),
+      sentAt: null,
+    };
+    const { svc, repo, search } = make({
+      repo: { setSeen: jest.fn(async () => row) },
+    });
+    search.persist.mockRejectedValueOnce(new Error('meili down'));
+
+    await expect(svc.markSeen('m1', true)).resolves.toBeUndefined();
+    expect(repo.setSeen).toHaveBeenCalledWith('m1', true);
+  });
+
   it('resolveAccountId prefers the explicit arg then the config default', () => {
     const { svc } = make();
     expect(svc.resolveAccountId('explicit')).toBe('explicit');

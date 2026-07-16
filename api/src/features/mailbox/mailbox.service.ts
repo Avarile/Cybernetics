@@ -135,9 +135,15 @@ export class MailboxService implements OnApplicationBootstrap {
   async markSeen(id: string, seen: boolean): Promise<void> {
     const row = await this.repo.setSeen(id, seen);
     if (!row) throw new NotFoundException('Message not found');
-    await this.search.persist(INBOUND_EMAIL_COLLECTION, [
-      { externalId: row.id, document: toSearchDocument(row) },
-    ]);
+    try {
+      await this.search.persist(INBOUND_EMAIL_COLLECTION, [
+        { externalId: row.id, document: toSearchDocument(row) },
+      ]);
+    } catch (error) {
+      this.logger.warn(
+        `Search re-index failed for message ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async triggerSync(accountId: string, mailbox: string): Promise<void> {
