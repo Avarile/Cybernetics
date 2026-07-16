@@ -10,8 +10,11 @@ jest.mock('mailparser', () => ({ simpleParser: jest.fn() }));
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import {
+  fetchForIngest,
   fetchMessage,
   listMessages,
+  listUidsSince,
+  mailboxState,
   setSeen,
   verifyImap,
 } from './imap.transport';
@@ -33,6 +36,7 @@ function makeClient(overrides: Record<string, any> = {}) {
     fetch: jest.fn(),
     fetchOne: jest.fn(),
     search: jest.fn(async () => [] as number[]),
+    status: jest.fn(),
     messageFlagsAdd: jest.fn(async () => true),
     messageFlagsRemove: jest.fn(async () => true),
     ...overrides,
@@ -198,5 +202,75 @@ describe('imap.transport', () => {
       ['\\Seen'],
       { uid: true },
     );
+  });
+
+  it('mailboxState returns server uidValidity + uidNext', async () => {
+    currentClient.status = jest.fn(async () => ({
+      uidValidity: 42,
+      uidNext: 99,
+    }));
+    const res = await mailboxState(conn, 'INBOX');
+    expect(currentClient.status).toHaveBeenCalledWith('INBOX', {
+      uidValidity: true,
+      uidNext: true,
+    });
+    expect(res).toEqual({ uidValidity: 42, uidNext: 99 });
+  });
+
+  it('listUidsSince returns only UIDs strictly greater than the cursor, sorted, capped', async () => {
+    currentClient.search = jest.fn(async () => [3, 5, 4, 2]); // 2 is <= cursor (IMAP N:* quirk)
+    const res = await listUidsSince(conn, 2, { limit: 2 });
+    expect(res).toEqual([3, 4]);
+  });
+
+  it('fetchForIngest returns raw source + parsed fields + attachment buffers', async () => {
+    const raw = Buffer.from('raw-mime');
+    const content = Buffer.from('PDFBYTES');
+    currentClient.fetchOne.mockResolvedValue({
+      uid: 7,
+      source: raw,
+      size: 1234,
+      flags: new Set(['\\Seen']),
+    });
+    simpleParserMock.mockResolvedValue({
+      messageId: '<m@x>',
+      inReplyTo: '<p@x>',
+      references: ['<r@x>', '<p@x>'],
+      from: { value: [{ address: 'a@x.com', name: 'A' }] },
+      to: [{ text: 'b@x.com', value: [{ address: 'b@x.com', name: 'B' }] }],
+      cc: undefined,
+      subject: 'Hi',
+      date: new Date('2020-01-01'),
+      text: 'plain',
+      html: '<p>rich</p>',
+      attachments: [
+        {
+          filename: 'f.pdf',
+          contentType: 'application/pdf',
+          size: 8,
+          content,
+          cid: 'cid-1',
+          contentDisposition: 'attachment',
+        },
+      ],
+    });
+    const res = await fetchForIngest(conn, 7);
+    expect(res?.raw).toBe(raw);
+    expect(res?.seen).toBe(true);
+    expect(res?.from).toEqual({ address: 'a@x.com', name: 'A' });
+    expect(res?.to).toEqual([{ address: 'b@x.com', name: 'B' }]);
+    expect(res?.attachments[0]).toEqual({
+      filename: 'f.pdf',
+      contentType: 'application/pdf',
+      size: 8,
+      contentId: 'cid-1',
+      inline: false,
+      content,
+    });
+  });
+
+  it('fetchForIngest returns null when the message is missing', async () => {
+    currentClient.fetchOne.mockResolvedValue(false);
+    expect(await fetchForIngest(conn, 999)).toBeNull();
   });
 });
