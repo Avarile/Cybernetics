@@ -1,0 +1,18 @@
+# Goal: design and implement the core function module of this system: the ai agent using mastra ai in src/features/mastra 
+
+feature description: this agent is used for comprehensive human interaction, for stage one, the goal is to implement an agent to query the data based on the scheduled events(like draft report based on yesterday's tasks) or human interactions(like "give me a comprehensive analysis of the ERP Project"). Digest the data, analysis and then give feedback to the user / update data / take some action(like send email, call api, etc...)
+
+1. this agent needs to remember the conversation, so basically it needs a store to persist the conversations.
+2. this agent needs comprehensive error handling, fail - retry logic, and human-in-the-loop logic.
+3. craft the tools needed for agent to interact with the Postgres(when write), and Meilisearcnh(when query / search), some caculation heavy tasks like caculate all of the income from last month(a specific finance module in this example will be created next step, here it just an example) will requires specific tools to pull those info and caculate first then feed the curated data to the Agent instead of feeding raw data to agent.
+4. the design has to be comprehensive, and add what ever should be included(yet not mention by me)
+5. This design has to be a simple but production grade system design. This is the first version, it should be simple, clean and reliable.
+6. Design the schemas as well, discuss the schema with me, as this is the hardest part.
+7. Review the lastest API doc for Mastra AI, as it changing very fast.
+8. I have an pre-designed folder structure for you to start with in `src/features/mastra`
+9. this is a complex module, so discuss with me if you need.
+  
+
+## Action:
+
+Design the mastra module and output the design to [development/current_session/current_design]
