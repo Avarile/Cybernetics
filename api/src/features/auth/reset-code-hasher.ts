@@ -32,6 +32,11 @@ export class ResetCodeHasher {
     const expected = Buffer.from(this.hash(code), 'hex');
     let actual: Buffer;
     try {
+      // Buffer.from(str, 'hex') never throws for a string input (it silently
+      // truncates at the first invalid byte pair) — this only guards against
+      // a non-string `hash` at runtime. The real defense against a
+      // malformed/short hex string reaching timingSafeEqual (which throws on
+      // a length mismatch) is the length check below.
       actual = Buffer.from(hash, 'hex');
     } catch {
       return false;

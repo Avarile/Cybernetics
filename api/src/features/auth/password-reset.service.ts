@@ -49,14 +49,14 @@ export class PasswordResetService {
       expiresAt: new Date(Date.now() + this.ttlMs),
     });
     this.logger.log(`forgot_requested userId=${user.id}`);
-    try {
-      await this.mailer.sendCode(user.email, code);
-    } catch (err) {
-      this.logger.error(
-        `reset code email failed userId=${user.id}`,
-        err instanceof Error ? err.stack : String(err),
+    void this.mailer
+      .sendCode(user.email, code)
+      .catch((err) =>
+        this.logger.error(
+          `reset code email failed userId=${user.id}`,
+          err instanceof Error ? err.stack : String(err),
+        ),
       );
-    }
   }
 
   /**

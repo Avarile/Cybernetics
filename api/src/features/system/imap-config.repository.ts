@@ -28,17 +28,6 @@ export class ImapConfigRepository {
     return rows[0] ?? null;
   }
 
-  async findActive(): Promise<ImapConfigRow | null> {
-    const rows = await this.db
-      .select()
-      .from(imapConfigs)
-      .where(
-        and(eq(imapConfigs.isActive, true), eq(imapConfigs.isDeleted, false)),
-      )
-      .limit(1);
-    return rows[0] ?? null;
-  }
-
   async list(
     page: number,
     limit: number,

@@ -28,17 +28,6 @@ export class SmtpConfigRepository {
     return rows[0] ?? null;
   }
 
-  async findActive(): Promise<SmtpConfigRow | null> {
-    const rows = await this.db
-      .select()
-      .from(smtpConfigs)
-      .where(
-        and(eq(smtpConfigs.isActive, true), eq(smtpConfigs.isDeleted, false)),
-      )
-      .limit(1);
-    return rows[0] ?? null;
-  }
-
   async list(
     page: number,
     limit: number,
