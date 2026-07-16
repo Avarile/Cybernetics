@@ -41,6 +41,7 @@ export async function sendMail(
       subject: msg.subject,
       text: msg.text,
       html: msg.html,
+      attachments: msg.attachments,
     });
   } finally {
     transport.close();

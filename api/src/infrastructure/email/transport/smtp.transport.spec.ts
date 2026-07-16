@@ -89,4 +89,22 @@ describe('smtp.transport', () => {
       expect.objectContaining({ from: 'no-reply@example.com' }),
     );
   });
+
+  it('sendMail forwards attachments to the transport', async () => {
+    const pdf = Buffer.from('PDFBYTES');
+    const png = Buffer.from('PNG');
+    const attachments = [
+      { filename: 'report.pdf', content: pdf, contentType: 'application/pdf' },
+      { filename: 'logo.png', content: png, cid: 'logo@cyb' },
+    ];
+    await sendMail(conn, {
+      to: 'user@example.com',
+      subject: 'With files',
+      text: 'body',
+      attachments,
+    });
+    expect(sendMailFn).toHaveBeenCalledWith(
+      expect.objectContaining({ attachments }),
+    );
+  });
 });

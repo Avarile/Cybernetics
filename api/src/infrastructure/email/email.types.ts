@@ -18,6 +18,15 @@ export interface ImapConn {
   password: string | null;
 }
 
+/** An outbound attachment. `content` is the raw bytes (or a UTF-8 string); set
+ * `cid` to reference the part inline from `html` via `cid:`. */
+export interface EmailAttachment {
+  filename: string;
+  content: Buffer | string;
+  contentType?: string;
+  cid?: string;
+}
+
 /** An outbound message. `html` is optional; `text` is always sent. */
 export interface EmailMessage {
   to: string;
@@ -25,6 +34,7 @@ export interface EmailMessage {
   text: string;
   html?: string;
   cc?: string;
+  attachments?: EmailAttachment[];
 }
 
 /** Envelope-level summary of a mailbox message. */
