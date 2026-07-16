@@ -81,6 +81,7 @@ describe('PasswordResetService', () => {
     await expect(
       service.request('nobody@example.com'),
     ).resolves.toBeUndefined();
+    expect(codes.consumeAllForUser).not.toHaveBeenCalled();
     expect(codes.insert).not.toHaveBeenCalled();
     expect(mailer.sendCode).not.toHaveBeenCalled();
   });
@@ -105,6 +106,20 @@ describe('PasswordResetService', () => {
     expect(mailer.sendChangedConfirmation).toHaveBeenCalledWith(
       'user@example.com',
     );
+    // Lock the success-path ORDER: a reorder that revoked sessions before
+    // persisting the password (or confirmed before revoking, etc.) must fail.
+    expect(passwords.hash.mock.invocationCallOrder[0]).toBeLessThan(
+      users.update.mock.invocationCallOrder[0],
+    );
+    expect(users.update.mock.invocationCallOrder[0]).toBeLessThan(
+      codes.consume.mock.invocationCallOrder[0],
+    );
+    expect(codes.consume.mock.invocationCallOrder[0]).toBeLessThan(
+      sessions.revokeAllForUser.mock.invocationCallOrder[0],
+    );
+    expect(sessions.revokeAllForUser.mock.invocationCallOrder[0]).toBeLessThan(
+      mailer.sendChangedConfirmation.mock.invocationCallOrder[0],
+    );
   });
 
   it('reset throws 401 for an unknown email and does equalizing HMAC work', async () => {
@@ -121,6 +136,10 @@ describe('PasswordResetService', () => {
     await expect(
       service.reset('user@example.com', '482913', 'a-strong-password'),
     ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(hasher.verify).toHaveBeenCalledWith(
+      expect.any(String),
+      '0'.repeat(64),
+    ); // equalizing decoy comparison ran
   });
 
   it('reset throws 401 when the code is expired', async () => {
@@ -134,6 +153,10 @@ describe('PasswordResetService', () => {
       service.reset('user@example.com', '482913', 'a-strong-password'),
     ).rejects.toBeInstanceOf(UnauthorizedException);
     expect(passwords.hash).not.toHaveBeenCalled();
+    expect(hasher.verify).toHaveBeenCalledWith(
+      expect.any(String),
+      '0'.repeat(64),
+    ); // equalizing decoy comparison ran
   });
 
   it('reset on a wrong code increments attempts and throws', async () => {
