@@ -1,4 +1,4 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { UsersService } from './users.service';
 
 function makeRow(overrides: Record<string, any> = {}) {
@@ -34,7 +34,7 @@ describe('UsersService', () => {
       list: jest.fn(async () => ({ rows: [makeRow()], total: 1 })),
     };
     passwords = { hash: jest.fn(async () => 'HASH') };
-    service = new UsersService(repo, passwords);
+    service = new UsersService(repo, passwords, new ExceptionService());
   });
 
   it('creates a user: lowercases email, hashes password, strips the hash', async () => {
@@ -62,14 +62,14 @@ describe('UsersService', () => {
         password: 'a-very-strong-pass',
         role: 'user',
       }),
-    ).rejects.toBeInstanceOf(ConflictException);
+    ).rejects.toMatchObject({ code: ErrorCode.USER_EMAIL_TAKEN });
   });
 
   it('404s when updating a missing user', async () => {
     repo.findActiveById.mockResolvedValueOnce(null);
     await expect(
       service.update('nope', { role: 'admin' }),
-    ).rejects.toBeInstanceOf(NotFoundException);
+    ).rejects.toMatchObject({ code: ErrorCode.USER_NOT_FOUND });
   });
 
   it('soft-deletes an existing user', async () => {

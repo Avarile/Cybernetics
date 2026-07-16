@@ -1,8 +1,5 @@
-import {
-  ConflictException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { PasswordService } from '../auth/password.service';
 import type { UserRow } from '../../infrastructure/database/schema/identity.schema';
 import type { CreateUserDto } from './dto/create-user.dto';
@@ -24,6 +21,7 @@ export class UsersService {
   constructor(
     private readonly repo: UserRepository,
     private readonly passwords: PasswordService,
+    private readonly errors: ExceptionService,
   ) {}
 
   private toPublic(row: UserRow): PublicUser {
@@ -40,7 +38,7 @@ export class UsersService {
   async create(dto: CreateUserDto): Promise<PublicUser> {
     const email = dto.email.toLowerCase();
     if (await this.repo.findByEmail(email)) {
-      throw new ConflictException('Email already registered');
+      throw this.errors.create(ErrorCode.USER_EMAIL_TAKEN);
     }
     const passwordHash = await this.passwords.hash(dto.password);
     const row = await this.repo.create({
@@ -54,7 +52,7 @@ export class UsersService {
 
   async findById(id: string): Promise<PublicUser> {
     const row = await this.repo.findActiveById(id);
-    if (!row) throw new NotFoundException('User not found');
+    if (!row) throw this.errors.create(ErrorCode.USER_NOT_FOUND);
     return this.toPublic(row);
   }
 
@@ -71,7 +69,7 @@ export class UsersService {
     if (dto.password)
       patch.passwordHash = await this.passwords.hash(dto.password);
     const row = await this.repo.update(id, patch);
-    if (!row) throw new NotFoundException('User not found');
+    if (!row) throw this.errors.create(ErrorCode.USER_NOT_FOUND);
     return this.toPublic(row);
   }
 
