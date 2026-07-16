@@ -1,14 +1,13 @@
 import {
-  BadRequestException,
   Injectable,
   Logger,
-  NotFoundException,
   type OnApplicationBootstrap,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { MailboxConfig } from '../../config/configurations/mailbox.config';
 import type { PresignedTarget } from '../../infrastructure/file-manage/object-storage.interface';
 import { SYSTEM_PRINCIPAL } from '../../common/principal';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { FileService } from '../file-processor/file.service';
 import { CollectionService } from '../search-service/collection.service';
 import { SearchRecordService } from '../search-service/search-record.service';
@@ -46,6 +45,7 @@ export class MailboxService implements OnApplicationBootstrap {
     private readonly collections: CollectionService,
     private readonly scheduler: MailboxSyncScheduler,
     config: ConfigService,
+    private readonly errors: ExceptionService,
   ) {
     this.cfg = config.getOrThrow<MailboxConfig>('mailbox');
   }
@@ -74,9 +74,10 @@ export class MailboxService implements OnApplicationBootstrap {
   resolveAccountId(explicit?: string): string {
     const id = explicit ?? this.cfg.defaultAccountId;
     if (!id) {
-      throw new BadRequestException(
-        'No mailbox account specified and MAILBOX_DEFAULT_ACCOUNT_ID is unset',
-      );
+      throw this.errors.create(ErrorCode.MAILBOX_ACCOUNT_UNRESOLVED, {
+        message:
+          'No mailbox account specified and MAILBOX_DEFAULT_ACCOUNT_ID is unset',
+      });
     }
     return id;
   }
@@ -105,7 +106,7 @@ export class MailboxService implements OnApplicationBootstrap {
 
   async get(id: string): Promise<MessageDetail> {
     const found = await this.repo.findByIdWithAttachments(id);
-    if (!found) throw new NotFoundException('Message not found');
+    if (!found) throw this.errors.create(ErrorCode.MAILBOX_MESSAGE_NOT_FOUND);
     return {
       ...toSummary(found.message),
       to: found.message.toAddresses,
@@ -128,13 +129,13 @@ export class MailboxService implements OnApplicationBootstrap {
     attachmentId: string,
   ): Promise<PresignedTarget> {
     const att = await this.repo.findAttachment(id, attachmentId);
-    if (!att) throw new NotFoundException('Attachment not found');
+    if (!att) throw this.errors.create(ErrorCode.MAILBOX_ATTACHMENT_NOT_FOUND);
     return this.files.getDownloadUrl(att.fileId, SYSTEM_PRINCIPAL);
   }
 
   async markSeen(id: string, seen: boolean): Promise<void> {
     const row = await this.repo.setSeen(id, seen);
-    if (!row) throw new NotFoundException('Message not found');
+    if (!row) throw this.errors.create(ErrorCode.MAILBOX_MESSAGE_NOT_FOUND);
     try {
       await this.search.persist(INBOUND_EMAIL_COLLECTION, [
         { externalId: row.id, document: toSearchDocument(row) },

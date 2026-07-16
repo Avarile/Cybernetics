@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { MailboxService } from './mailbox.service';
 
 function make(over: any = {}) {
@@ -26,6 +26,7 @@ function make(over: any = {}) {
     collections as any,
     scheduler as any,
     config as any,
+    new ExceptionService(),
   );
   return { svc, repo, files, search, collections, scheduler };
 }
@@ -33,7 +34,10 @@ function make(over: any = {}) {
 describe('MailboxService', () => {
   it('get throws NotFound when the message is absent', async () => {
     const { svc } = make();
-    await expect(svc.get('missing')).rejects.toBeInstanceOf(NotFoundException);
+    await expect(svc.get('missing')).rejects.toMatchObject({
+      code: ErrorCode.MAILBOX_MESSAGE_NOT_FOUND,
+      message: 'Message not found',
+    });
   });
 
   it('markSeen updates the row and re-persists the search doc', async () => {
