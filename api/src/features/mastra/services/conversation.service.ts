@@ -1,8 +1,8 @@
+import { Injectable } from '@nestjs/common';
 import {
-  ForbiddenException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+  ErrorCode,
+  ExceptionService,
+} from '../../../infrastructure/exceptions';
 import type { ConversationKind, PrincipalRef } from '../mastra.types';
 import { ConversationRepository } from '../repositories/conversation.repository';
 
@@ -13,7 +13,10 @@ import { ConversationRepository } from '../repositories/conversation.repository'
  */
 @Injectable()
 export class ConversationService {
-  constructor(private readonly repo: ConversationRepository) {}
+  constructor(
+    private readonly repo: ConversationRepository,
+    private readonly errors: ExceptionService,
+  ) {}
 
   private resourceOf(p: PrincipalRef): string {
     return p.id ?? 'system';
@@ -30,13 +33,17 @@ export class ConversationService {
   ) {
     if (conversationId) {
       const existing = await this.repo.findLiveById(conversationId);
-      if (!existing) throw new NotFoundException('Conversation not found');
+      if (!existing) {
+        throw this.errors.create(ErrorCode.AGENT_CONVERSATION_NOT_FOUND);
+      }
       if (
         principal.id &&
         existing.ownerUserId &&
         existing.ownerUserId !== principal.id
       ) {
-        throw new ForbiddenException('Not your conversation');
+        throw this.errors.create(ErrorCode.FORBIDDEN, {
+          message: 'Not your conversation',
+        });
       }
       return existing;
     }
@@ -56,9 +63,11 @@ export class ConversationService {
   /** Fetch a conversation by id, 404 if missing, 403 if not owned by the principal. */
   async getOwned(principal: PrincipalRef, id: string) {
     const conv = await this.repo.findLiveById(id);
-    if (!conv) throw new NotFoundException('Conversation not found');
+    if (!conv) throw this.errors.create(ErrorCode.AGENT_CONVERSATION_NOT_FOUND);
     if (principal.id && conv.ownerUserId && conv.ownerUserId !== principal.id) {
-      throw new ForbiddenException('Not your conversation');
+      throw this.errors.create(ErrorCode.FORBIDDEN, {
+        message: 'Not your conversation',
+      });
     }
     return conv;
   }

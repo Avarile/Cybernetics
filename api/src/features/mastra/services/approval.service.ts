@@ -1,11 +1,9 @@
-import {
-  ConflictException,
-  ForbiddenException,
-  Injectable,
-  Logger,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { MastraService } from '@mastra/nestjs';
+import {
+  ErrorCode,
+  ExceptionService,
+} from '../../../infrastructure/exceptions';
 import { AGENT_ID } from '../mastra.constants';
 import type { PrincipalRef } from '../mastra.types';
 import { AgentRunRepository } from '../repositories/agent-run.repository';
@@ -34,6 +32,7 @@ export class ApprovalService {
     private readonly runs: AgentRunRepository,
     private readonly mastra: MastraService,
     private readonly conversations: ConversationService,
+    private readonly errors: ExceptionService,
   ) {}
 
   async listForOwner(principal: PrincipalRef) {
@@ -42,9 +41,9 @@ export class ApprovalService {
 
   async decide(principal: PrincipalRef, id: string, decision: DecisionInput) {
     const appr = await this.approvals.findById(id);
-    if (!appr) throw new NotFoundException('Approval not found');
+    if (!appr) throw this.errors.create(ErrorCode.AGENT_APPROVAL_NOT_FOUND);
     if (appr.status !== 'pending') {
-      throw new ConflictException('Approval already decided');
+      throw this.errors.create(ErrorCode.AGENT_APPROVAL_CONFLICT);
     }
 
     // Ownership gate: the GET path (`findPendingForOwner`) already scopes by
@@ -53,9 +52,9 @@ export class ApprovalService {
     // Admins bypass; everyone else must own the approval's conversation.
     if (principal.role !== 'admin') {
       if (!appr.conversationId) {
-        throw new ForbiddenException('Not your approval');
+        throw this.errors.create(ErrorCode.AGENT_APPROVAL_FORBIDDEN);
       }
-      // Throws ForbiddenException/NotFoundException for a non-owner.
+      // Throws FORBIDDEN/AGENT_CONVERSATION_NOT_FOUND for a non-owner.
       await this.conversations.getOwned(principal, appr.conversationId);
     }
 

@@ -1,3 +1,7 @@
+import {
+  ErrorCode,
+  ExceptionService,
+} from '../../../infrastructure/exceptions';
 import { ConversationService } from './conversation.service';
 
 function make(over: Record<string, any> = {}) {
@@ -8,7 +12,10 @@ function make(over: Record<string, any> = {}) {
     touch: jest.fn(async () => undefined),
     ...over,
   };
-  return { service: new ConversationService(repo as never), repo };
+  return {
+    service: new ConversationService(repo as never, new ExceptionService()),
+    repo,
+  };
 }
 
 describe('ConversationService.ensure', () => {
@@ -43,6 +50,11 @@ describe('ConversationService.ensure', () => {
         ownerUserId: 'someone-else',
       })),
     });
-    await expect(service.ensure({ id: 'user-9' }, 'conv-3')).rejects.toThrow();
+    await expect(
+      service.ensure({ id: 'user-9' }, 'conv-3'),
+    ).rejects.toMatchObject({
+      code: ErrorCode.FORBIDDEN,
+      message: 'Not your conversation',
+    });
   });
 });
