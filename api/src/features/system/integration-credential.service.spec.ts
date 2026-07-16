@@ -1,4 +1,4 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { IntegrationCredentialService } from './integration-credential.service';
 
 function makeRow(overrides: Record<string, any> = {}) {
@@ -46,7 +46,12 @@ describe('IntegrationCredentialService', () => {
       decrypt: jest.fn(() => 'sk-secret'),
     };
     audit = { record: jest.fn(async () => undefined) };
-    service = new IntegrationCredentialService(repo, crypto, audit);
+    service = new IntegrationCredentialService(
+      repo,
+      crypto,
+      audit,
+      new ExceptionService(),
+    );
   });
 
   it('encrypts the secret on create and redacts it', async () => {
@@ -78,7 +83,10 @@ describe('IntegrationCredentialService', () => {
         } as any,
         ctx,
       ),
-    ).rejects.toBeInstanceOf(ConflictException);
+    ).rejects.toMatchObject({
+      code: ErrorCode.CONFLICT,
+      message: 'A credential named "prod" already exists for openai',
+    });
   });
 
   it('rejects renaming to a (provider, name) owned by a different credential', async () => {
@@ -87,7 +95,10 @@ describe('IntegrationCredentialService', () => {
     );
     await expect(
       service.update('c1', { name: 'taken' } as any, ctx),
-    ).rejects.toBeInstanceOf(ConflictException);
+    ).rejects.toMatchObject({
+      code: ErrorCode.CONFLICT,
+      message: 'A credential named "taken" already exists for openai',
+    });
   });
 
   it('allows update when the (provider, name) match is the same row (no-op rename)', async () => {
@@ -125,9 +136,10 @@ describe('IntegrationCredentialService', () => {
 
   it('404s on a missing credential', async () => {
     repo.findActiveById.mockResolvedValueOnce(null);
-    await expect(service.findById('nope')).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    await expect(service.findById('nope')).rejects.toMatchObject({
+      code: ErrorCode.CONFIG_NOT_FOUND,
+      message: 'Integration credential not found',
+    });
   });
 
   it('decrypts the secret for internal consumers only', async () => {

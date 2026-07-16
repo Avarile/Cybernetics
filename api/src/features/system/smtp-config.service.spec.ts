@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { SmtpConfigService } from './smtp-config.service';
 
 jest.mock('../../infrastructure/email/transport/smtp.transport', () => ({
@@ -54,7 +54,12 @@ describe('SmtpConfigService', () => {
       decrypt: jest.fn(() => 'plaintext-pass'),
     };
     audit = { record: jest.fn(async () => undefined) };
-    service = new SmtpConfigService(repo, crypto, audit);
+    service = new SmtpConfigService(
+      repo,
+      crypto,
+      audit,
+      new ExceptionService(),
+    );
   });
 
   it('encrypts the secret on create and never returns it', async () => {
@@ -113,9 +118,10 @@ describe('SmtpConfigService', () => {
 
   it('404s on a missing config', async () => {
     repo.findActiveById.mockResolvedValueOnce(null);
-    await expect(service.findById('nope')).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    await expect(service.findById('nope')).rejects.toMatchObject({
+      code: ErrorCode.CONFIG_NOT_FOUND,
+      message: 'SMTP config not found',
+    });
   });
 
   it('activates via the repo transaction and audits', async () => {

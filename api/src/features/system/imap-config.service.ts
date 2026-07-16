@@ -1,5 +1,6 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { EncryptionService } from '../../infrastructure/crypto/encryption.service';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import type { ImapConfigRow } from '../../infrastructure/database/schema/system.schema';
 import { verifyImap } from '../../infrastructure/email/transport/imap.transport';
 import type { CreateImapDto } from './dto/create-imap.dto';
@@ -29,6 +30,7 @@ export class ImapConfigService {
     private readonly repo: ImapConfigRepository,
     private readonly crypto: EncryptionService,
     private readonly audit: SystemAuditService,
+    private readonly errors: ExceptionService,
   ) {}
 
   private toPublic(row: ImapConfigRow): PublicImapConfig {
@@ -50,7 +52,10 @@ export class ImapConfigService {
 
   private async getRow(id: string): Promise<ImapConfigRow> {
     const row = await this.repo.findActiveById(id);
-    if (!row) throw new NotFoundException('IMAP config not found');
+    if (!row)
+      throw this.errors.create(ErrorCode.CONFIG_NOT_FOUND, {
+        message: 'IMAP config not found',
+      });
     return row;
   }
 
@@ -105,7 +110,10 @@ export class ImapConfigService {
     }
 
     const row = await this.repo.update(id, patch);
-    if (!row) throw new NotFoundException('IMAP config not found');
+    if (!row)
+      throw this.errors.create(ErrorCode.CONFIG_NOT_FOUND, {
+        message: 'IMAP config not found',
+      });
     await this.audit.record({
       ctx,
       action: 'imap.update',
@@ -130,7 +138,10 @@ export class ImapConfigService {
   async activate(id: string, ctx: AuditContext): Promise<PublicImapConfig> {
     await this.getRow(id);
     const row = await this.repo.activate(id);
-    if (!row) throw new NotFoundException('IMAP config not found');
+    if (!row)
+      throw this.errors.create(ErrorCode.CONFIG_NOT_FOUND, {
+        message: 'IMAP config not found',
+      });
     await this.audit.record({
       ctx,
       action: 'imap.activate',

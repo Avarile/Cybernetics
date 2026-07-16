@@ -1,9 +1,6 @@
-import {
-  ConflictException,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { EncryptionService } from '../../infrastructure/crypto/encryption.service';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import type { IntegrationCredentialRow } from '../../infrastructure/database/schema/system.schema';
 import type { CreateIntegrationDto } from './dto/create-integration.dto';
 import type { UpdateIntegrationDto } from './dto/update-integration.dto';
@@ -33,6 +30,7 @@ export class IntegrationCredentialService {
     private readonly repo: IntegrationCredentialRepository,
     private readonly crypto: EncryptionService,
     private readonly audit: SystemAuditService,
+    private readonly errors: ExceptionService,
   ) {}
 
   private toPublic(row: IntegrationCredentialRow): PublicIntegrationCredential {
@@ -55,7 +53,10 @@ export class IntegrationCredentialService {
 
   private async getRow(id: string): Promise<IntegrationCredentialRow> {
     const row = await this.repo.findActiveById(id);
-    if (!row) throw new NotFoundException('Integration credential not found');
+    if (!row)
+      throw this.errors.create(ErrorCode.CONFIG_NOT_FOUND, {
+        message: 'Integration credential not found',
+      });
     return row;
   }
 
@@ -64,9 +65,9 @@ export class IntegrationCredentialService {
     ctx: AuditContext,
   ): Promise<PublicIntegrationCredential> {
     if (await this.repo.findByProviderAndName(dto.provider, dto.name)) {
-      throw new ConflictException(
-        `A credential named "${dto.name}" already exists for ${dto.provider}`,
-      );
+      throw this.errors.create(ErrorCode.CONFLICT, {
+        message: `A credential named "${dto.name}" already exists for ${dto.provider}`,
+      });
     }
     const row = await this.repo.create({
       provider: dto.provider,
@@ -111,9 +112,9 @@ export class IntegrationCredentialService {
       const name = dto.name ?? current.name;
       const clash = await this.repo.findByProviderAndName(provider, name);
       if (clash && clash.id !== id) {
-        throw new ConflictException(
-          `A credential named "${name}" already exists for ${provider}`,
-        );
+        throw this.errors.create(ErrorCode.CONFLICT, {
+          message: `A credential named "${name}" already exists for ${provider}`,
+        });
       }
     }
     const patch: Record<string, unknown> = {};
@@ -130,7 +131,10 @@ export class IntegrationCredentialService {
     }
 
     const row = await this.repo.update(id, patch);
-    if (!row) throw new NotFoundException('Integration credential not found');
+    if (!row)
+      throw this.errors.create(ErrorCode.CONFIG_NOT_FOUND, {
+        message: 'Integration credential not found',
+      });
     await this.audit.record({
       ctx,
       action: 'integration.update',

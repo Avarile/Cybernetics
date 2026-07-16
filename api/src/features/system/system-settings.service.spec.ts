@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { SystemSettingsService } from './system-settings.service';
 
 function makeRow(overrides: Record<string, any> = {}) {
@@ -40,7 +40,12 @@ describe('SystemSettingsService', () => {
       del: jest.fn(async () => true),
     };
     audit = { record: jest.fn(async () => undefined) };
-    service = new SystemSettingsService(repo, cache, audit);
+    service = new SystemSettingsService(
+      repo,
+      cache,
+      audit,
+      new ExceptionService(),
+    );
   });
 
   it('reads through cache and populates it on a miss', async () => {
@@ -74,7 +79,10 @@ describe('SystemSettingsService', () => {
 
   it('404s on a missing key', async () => {
     repo.findByKey.mockResolvedValueOnce(null);
-    await expect(service.get('nope')).rejects.toBeInstanceOf(NotFoundException);
+    await expect(service.get('nope')).rejects.toMatchObject({
+      code: ErrorCode.CONFIG_NOT_FOUND,
+      message: 'Setting "nope" not found',
+    });
   });
 
   it('upserts, audits, and invalidates the cache', async () => {

@@ -1,5 +1,6 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { EncryptionService } from '../../infrastructure/crypto/encryption.service';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import type { SmtpConfigRow } from '../../infrastructure/database/schema/system.schema';
 import { verifySmtp } from '../../infrastructure/email/transport/smtp.transport';
 import type { CreateSmtpDto } from './dto/create-smtp.dto';
@@ -31,6 +32,7 @@ export class SmtpConfigService {
     private readonly repo: SmtpConfigRepository,
     private readonly crypto: EncryptionService,
     private readonly audit: SystemAuditService,
+    private readonly errors: ExceptionService,
   ) {}
 
   private toPublic(row: SmtpConfigRow): PublicSmtpConfig {
@@ -54,7 +56,10 @@ export class SmtpConfigService {
 
   private async getRow(id: string): Promise<SmtpConfigRow> {
     const row = await this.repo.findActiveById(id);
-    if (!row) throw new NotFoundException('SMTP config not found');
+    if (!row)
+      throw this.errors.create(ErrorCode.CONFIG_NOT_FOUND, {
+        message: 'SMTP config not found',
+      });
     return row;
   }
 
@@ -113,7 +118,10 @@ export class SmtpConfigService {
     }
 
     const row = await this.repo.update(id, patch);
-    if (!row) throw new NotFoundException('SMTP config not found');
+    if (!row)
+      throw this.errors.create(ErrorCode.CONFIG_NOT_FOUND, {
+        message: 'SMTP config not found',
+      });
     await this.audit.record({
       ctx,
       action: 'smtp.update',
@@ -138,7 +146,10 @@ export class SmtpConfigService {
   async activate(id: string, ctx: AuditContext): Promise<PublicSmtpConfig> {
     await this.getRow(id);
     const row = await this.repo.activate(id);
-    if (!row) throw new NotFoundException('SMTP config not found');
+    if (!row)
+      throw this.errors.create(ErrorCode.CONFIG_NOT_FOUND, {
+        message: 'SMTP config not found',
+      });
     await this.audit.record({
       ctx,
       action: 'smtp.activate',

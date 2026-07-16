@@ -1,6 +1,7 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
-import { Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import type { Cache } from 'cache-manager';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import type {
   SettingValue,
   SystemSettingRow,
@@ -27,6 +28,7 @@ export class SystemSettingsService {
     private readonly repo: SystemSettingsRepository,
     @Inject(CACHE_MANAGER) private readonly cache: Cache,
     private readonly audit: SystemAuditService,
+    private readonly errors: ExceptionService,
   ) {}
 
   private cacheKey(key: string): string {
@@ -57,7 +59,10 @@ export class SystemSettingsService {
 
   async get(key: string): Promise<PublicSetting> {
     const pub = await this.read(key);
-    if (!pub) throw new NotFoundException(`Setting "${key}" not found`);
+    if (!pub)
+      throw this.errors.create(ErrorCode.CONFIG_NOT_FOUND, {
+        message: `Setting "${key}" not found`,
+      });
     return pub;
   }
 
@@ -95,7 +100,10 @@ export class SystemSettingsService {
 
   async remove(key: string, ctx: AuditContext): Promise<void> {
     const deleted = await this.repo.softDelete(key);
-    if (!deleted) throw new NotFoundException(`Setting "${key}" not found`);
+    if (!deleted)
+      throw this.errors.create(ErrorCode.CONFIG_NOT_FOUND, {
+        message: `Setting "${key}" not found`,
+      });
     await this.cache.del(this.cacheKey(key));
     await this.audit.record({
       ctx,

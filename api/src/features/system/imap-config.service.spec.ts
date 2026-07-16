@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { ImapConfigService } from './imap-config.service';
 
 jest.mock('../../infrastructure/email/transport/imap.transport', () => ({
@@ -49,7 +49,12 @@ describe('ImapConfigService', () => {
     };
     crypto = { encrypt: jest.fn(() => 'v1.enc'), decrypt: jest.fn(() => 'pw') };
     audit = { record: jest.fn(async () => undefined) };
-    service = new ImapConfigService(repo, crypto, audit);
+    service = new ImapConfigService(
+      repo,
+      crypto,
+      audit,
+      new ExceptionService(),
+    );
   });
 
   it('encrypts the secret on create and redacts it', async () => {
@@ -71,9 +76,10 @@ describe('ImapConfigService', () => {
 
   it('404s on a missing config', async () => {
     repo.findActiveById.mockResolvedValueOnce(null);
-    await expect(service.findById('nope')).rejects.toBeInstanceOf(
-      NotFoundException,
-    );
+    await expect(service.findById('nope')).rejects.toMatchObject({
+      code: ErrorCode.CONFIG_NOT_FOUND,
+      message: 'IMAP config not found',
+    });
   });
 
   it('activates via the repo transaction', async () => {
