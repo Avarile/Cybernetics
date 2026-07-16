@@ -14,3 +14,4 @@ export * from './system.schema';
 export * from './search.schema';
 export * from './agent.schema';
 export * from './password-reset.schema';
+export * from './mailbox.schema';

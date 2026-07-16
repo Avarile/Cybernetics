@@ -1,7 +1,14 @@
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import type { AddressObject } from 'mailparser';
-import type { ImapConn, MailboxSummary, ParsedMessage } from '../email.types';
+import type {
+  ImapConn,
+  IngestAttachment,
+  IngestMessage,
+  MailboxState,
+  MailboxSummary,
+  ParsedMessage,
+} from '../email.types';
 
 function makeClient(conn: ImapConn): ImapFlow {
   return new ImapFlow({
@@ -102,6 +109,118 @@ export async function fetchMessage(
           contentType: a.contentType,
           size: a.size,
         })),
+      };
+    } finally {
+      lock.release();
+    }
+  });
+}
+
+/** Probe a mailbox for its current UIDVALIDITY + UIDNEXT (no lock needed). */
+export async function mailboxState(
+  conn: ImapConn,
+  mailbox = 'INBOX',
+): Promise<MailboxState> {
+  return withClient(conn, async (client) => {
+    const status = await client.status(mailbox, {
+      uidValidity: true,
+      uidNext: true,
+    });
+    return {
+      uidValidity: Number(status.uidValidity ?? 0),
+      uidNext: Number(status.uidNext ?? 0),
+    };
+  });
+}
+
+/**
+ * UIDs strictly greater than `sinceUid`, ascending, capped at `limit` (default
+ * 200). The `${since+1}:*` range can echo the highest existing UID even when
+ * none are newer (an IMAP quirk), so we filter `> sinceUid` defensively.
+ */
+export async function listUidsSince(
+  conn: ImapConn,
+  sinceUid: number,
+  opts?: { mailbox?: string; limit?: number },
+): Promise<number[]> {
+  const mailbox = opts?.mailbox ?? 'INBOX';
+  const limit = opts?.limit ?? 200;
+  return withClient(conn, async (client) => {
+    const lock = await client.getMailboxLock(mailbox);
+    try {
+      const found = await client.search(
+        { uid: `${sinceUid + 1}:*` },
+        { uid: true },
+      );
+      // `search` resolves to `number[] | false` (imapflow returns `false` if
+      // the search itself failed) — `||`, not `??`, so the falsy `false`
+      // case is also normalized to an empty array.
+      const uids = (found || [])
+        .filter((u) => u > sinceUid)
+        .sort((a, b) => a - b);
+      return uids.slice(0, limit);
+    } finally {
+      lock.release();
+    }
+  });
+}
+
+function toAddr(a: { address?: string; name?: string }): {
+  address: string;
+  name: string | null;
+} {
+  return { address: a.address ?? '', name: a.name ? a.name : null };
+}
+
+function addrList(
+  addr: AddressObject | AddressObject[] | undefined,
+): { address: string; name: string | null }[] {
+  if (!addr) return [];
+  const objs = Array.isArray(addr) ? addr : [addr];
+  return objs.flatMap((o) => (o.value ?? []).map(toAddr));
+}
+
+/** Fetch one message's raw source + parsed fields + attachment buffers by UID. */
+export async function fetchForIngest(
+  conn: ImapConn,
+  uid: number,
+  mailbox = 'INBOX',
+): Promise<IngestMessage | null> {
+  return withClient(conn, async (client) => {
+    const lock = await client.getMailboxLock(mailbox);
+    try {
+      const msg = await client.fetchOne(
+        uid,
+        { uid: true, source: true, flags: true, size: true },
+        { uid: true },
+      );
+      if (!msg || !msg.source) return null;
+      const parsed = await simpleParser(msg.source);
+      const from = parsed.from?.value?.[0];
+      const attachments: IngestAttachment[] = parsed.attachments.map((a) => ({
+        filename: a.filename ?? null,
+        contentType: a.contentType,
+        size: a.size,
+        contentId: a.cid ?? null,
+        inline: a.contentDisposition === 'inline' || Boolean(a.related),
+        content: a.content,
+      }));
+      return {
+        uid,
+        raw: msg.source,
+        messageId: parsed.messageId ?? null,
+        inReplyTo: parsed.inReplyTo ?? null,
+        references: parsed.references,
+        from: from ? toAddr(from) : { address: '', name: null },
+        to: addrList(parsed.to),
+        cc: addrList(parsed.cc),
+        subject: parsed.subject ?? '',
+        sentAt: parsed.date ?? null,
+        text: parsed.text ?? '',
+        html: typeof parsed.html === 'string' ? parsed.html : null,
+        seen: msg.flags?.has('\\Seen') ?? false,
+        sizeBytes: Number(msg.size ?? msg.source.length),
+        attachments,
       };
     } finally {
       lock.release();

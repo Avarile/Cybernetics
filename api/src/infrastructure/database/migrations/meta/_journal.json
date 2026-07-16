@@ -57,6 +57,13 @@
       "when": 1784178267527,
       "tag": "0007_curved_hiroim",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1784200606165,
+      "tag": "0008_aromatic_johnny_blaze",
+      "breakpoints": true
     }
   ]
 }

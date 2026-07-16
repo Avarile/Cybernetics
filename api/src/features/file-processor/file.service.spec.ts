@@ -206,4 +206,74 @@ describe('FileService', () => {
       expect(repo.softDelete).toHaveBeenCalledWith('id');
     });
   });
+
+  describe('putFromStream allowAnyMime', () => {
+    // The outer `config` allows every MIME type (empty allowlist), so these
+    // cases need a restricted allowlist to exercise the bypass meaningfully.
+    const restrictedConfig = {
+      getOrThrow: () => ({
+        maxFileSize: 100,
+        allowedMimeTypes: ['application/pdf'],
+        presignExpirySeconds: 300,
+      }),
+    } as unknown as ConfigService;
+
+    it('rejects a disallowed MIME by default', async () => {
+      const restricted = new FileService(
+        storage,
+        repo,
+        queue,
+        restrictedConfig,
+      );
+      await expect(
+        restricted.putFromStream(
+          Buffer.from('x'),
+          { filename: 'a.bin', mimeType: 'application/zip', size: 4 },
+          { id: null },
+        ),
+      ).rejects.toThrow(/not allowed/);
+    });
+
+    it('accepts a disallowed MIME when allowAnyMime is set', async () => {
+      const restricted = new FileService(
+        storage,
+        repo,
+        queue,
+        restrictedConfig,
+      );
+      const res = await restricted.putFromStream(
+        Buffer.from('x'),
+        {
+          filename: 'a.bin',
+          mimeType: 'application/zip',
+          size: 4,
+          allowAnyMime: true,
+        },
+        { id: null },
+      );
+      expect(res.id).toBeDefined();
+      expect(repo.create).toHaveBeenCalled();
+    });
+
+    it('still enforces maxFileSize even with allowAnyMime', async () => {
+      const restricted = new FileService(
+        storage,
+        repo,
+        queue,
+        restrictedConfig,
+      );
+      await expect(
+        restricted.putFromStream(
+          Buffer.from('x'),
+          {
+            filename: 'a.bin',
+            mimeType: 'application/zip',
+            size: 9999,
+            allowAnyMime: true,
+          },
+          { id: null },
+        ),
+      ).rejects.toThrow(/exceeds the maximum/);
+    });
+  });
 });
