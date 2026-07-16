@@ -1,4 +1,4 @@
-import { UnauthorizedException } from '@nestjs/common';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { PasswordResetService } from './password-reset.service';
 
 function makeConfig() {
@@ -61,6 +61,7 @@ describe('PasswordResetService', () => {
       hasher,
       mailer,
       makeConfig(),
+      new ExceptionService(),
     );
   });
 
@@ -126,7 +127,7 @@ describe('PasswordResetService', () => {
     users.findByEmail.mockResolvedValueOnce(null);
     await expect(
       service.reset('nobody@example.com', '482913', 'a-strong-password'),
-    ).rejects.toBeInstanceOf(UnauthorizedException);
+    ).rejects.toMatchObject({ code: ErrorCode.AUTH_RESET_CODE_INVALID });
     expect(hasher.verify).toHaveBeenCalled(); // decoy comparison ran
     expect(users.update).not.toHaveBeenCalled();
   });
@@ -135,7 +136,7 @@ describe('PasswordResetService', () => {
     codes.findLiveByUser.mockResolvedValueOnce(null);
     await expect(
       service.reset('user@example.com', '482913', 'a-strong-password'),
-    ).rejects.toBeInstanceOf(UnauthorizedException);
+    ).rejects.toMatchObject({ code: ErrorCode.AUTH_RESET_CODE_INVALID });
     expect(hasher.verify).toHaveBeenCalledWith(
       expect.any(String),
       '0'.repeat(64),
@@ -151,7 +152,7 @@ describe('PasswordResetService', () => {
     });
     await expect(
       service.reset('user@example.com', '482913', 'a-strong-password'),
-    ).rejects.toBeInstanceOf(UnauthorizedException);
+    ).rejects.toMatchObject({ code: ErrorCode.AUTH_RESET_CODE_INVALID });
     expect(passwords.hash).not.toHaveBeenCalled();
     expect(hasher.verify).toHaveBeenCalledWith(
       expect.any(String),
@@ -163,7 +164,7 @@ describe('PasswordResetService', () => {
     hasher.verify.mockReturnValueOnce(false);
     await expect(
       service.reset('user@example.com', '000000', 'a-strong-password'),
-    ).rejects.toBeInstanceOf(UnauthorizedException);
+    ).rejects.toMatchObject({ code: ErrorCode.AUTH_RESET_CODE_INVALID });
     expect(codes.incrementAttempts).toHaveBeenCalledWith('c1');
     expect(codes.consume).not.toHaveBeenCalled();
   });
@@ -173,7 +174,7 @@ describe('PasswordResetService', () => {
     codes.incrementAttempts.mockResolvedValueOnce(5);
     await expect(
       service.reset('user@example.com', '000000', 'a-strong-password'),
-    ).rejects.toBeInstanceOf(UnauthorizedException);
+    ).rejects.toMatchObject({ code: ErrorCode.AUTH_RESET_CODE_INVALID });
     expect(codes.consume).toHaveBeenCalledWith('c1');
   });
 });

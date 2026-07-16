@@ -1,5 +1,5 @@
-import { UnauthorizedException } from '@nestjs/common';
 import type { UserRow } from '../../infrastructure/database/schema/identity.schema';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { AuthService } from './auth.service';
 
 function makeUser(overrides: Partial<UserRow> = {}): UserRow {
@@ -55,7 +55,13 @@ describe('AuthService', () => {
       verify: jest.fn(async () => true),
       hash: jest.fn(async () => 'NEWHASH'),
     };
-    service = new AuthService(users, sessions, tokens, passwords);
+    service = new AuthService(
+      users,
+      sessions,
+      tokens,
+      passwords,
+      new ExceptionService(),
+    );
   });
 
   describe('validateUser', () => {
@@ -67,18 +73,24 @@ describe('AuthService', () => {
     it('throws 401 when the user is unknown', async () => {
       users.findByEmail.mockResolvedValueOnce(null);
       const result = service.validateUser('x@y.z', 'pw');
-      await expect(result).rejects.toBeInstanceOf(UnauthorizedException);
+      await expect(result).rejects.toMatchObject({
+        code: ErrorCode.AUTH_INVALID_CREDENTIALS,
+      });
       await expect(result).rejects.toThrow('Invalid credentials');
     });
     it('throws 401 when the password is wrong', async () => {
       passwords.verify.mockResolvedValueOnce(false);
       const result = service.validateUser('a@b.co', 'bad');
-      await expect(result).rejects.toBeInstanceOf(UnauthorizedException);
+      await expect(result).rejects.toMatchObject({
+        code: ErrorCode.AUTH_INVALID_CREDENTIALS,
+      });
       await expect(result).rejects.toThrow('Invalid credentials');
     });
     it('throws 401 (not a TypeError) when email is not a string', async () => {
       const result = service.validateUser(['a@b.co'] as any, 'pw');
-      await expect(result).rejects.toBeInstanceOf(UnauthorizedException);
+      await expect(result).rejects.toMatchObject({
+        code: ErrorCode.AUTH_INVALID_CREDENTIALS,
+      });
       await expect(result).rejects.toThrow('Invalid credentials');
     });
   });
@@ -128,17 +140,17 @@ describe('AuthService', () => {
         revokedAt: new Date(),
         expiresAt: new Date(Date.now() + 10000),
       });
-      await expect(service.refresh('refresh-raw', {})).rejects.toBeInstanceOf(
-        UnauthorizedException,
-      );
+      await expect(service.refresh('refresh-raw', {})).rejects.toMatchObject({
+        code: ErrorCode.AUTH_TOKEN_REUSE,
+      });
       expect(sessions.revokeFamily).toHaveBeenCalledWith('fam-1');
     });
 
     it('throws 401 for an unknown refresh token', async () => {
       sessions.findByTokenHash.mockResolvedValueOnce(null);
-      await expect(service.refresh('nope', {})).rejects.toBeInstanceOf(
-        UnauthorizedException,
-      );
+      await expect(service.refresh('nope', {})).rejects.toMatchObject({
+        code: ErrorCode.AUTH_TOKEN_INVALID,
+      });
     });
   });
 
@@ -152,9 +164,15 @@ describe('AuthService', () => {
     });
     it('throws 401 when the current password is wrong', async () => {
       passwords.verify.mockResolvedValueOnce(false);
-      await expect(
-        service.changePassword('u1', 'wrong', 'new-strong-password'),
-      ).rejects.toBeInstanceOf(UnauthorizedException);
+      const result = service.changePassword(
+        'u1',
+        'wrong',
+        'new-strong-password',
+      );
+      await expect(result).rejects.toMatchObject({
+        code: ErrorCode.AUTH_INVALID_CREDENTIALS,
+      });
+      await expect(result).rejects.toThrow('Current password is incorrect');
     });
   });
 });

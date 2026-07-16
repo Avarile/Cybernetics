@@ -1,4 +1,4 @@
-import { UnauthorizedException } from '@nestjs/common';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { ServiceCredentialService } from './service-credential.service';
 
 describe('ServiceCredentialService', () => {
@@ -19,7 +19,11 @@ describe('ServiceCredentialService', () => {
       signAccessToken: jest.fn(() => 'agent.jwt'),
       agentTtl: jest.fn(() => 300),
     };
-    service = new ServiceCredentialService(repo, tokens);
+    service = new ServiceCredentialService(
+      repo,
+      tokens,
+      new ExceptionService(),
+    );
   });
 
   it('issues a credential and returns the plaintext key exactly once', async () => {
@@ -53,9 +57,9 @@ describe('ServiceCredentialService', () => {
 
   it('rejects an unknown key', async () => {
     repo.findByKeyHash.mockResolvedValueOnce(null);
-    await expect(service.exchangeForToken('nope')).rejects.toBeInstanceOf(
-      UnauthorizedException,
-    );
+    await expect(service.exchangeForToken('nope')).rejects.toMatchObject({
+      code: ErrorCode.AUTH_SERVICE_CREDENTIAL_INVALID,
+    });
   });
 
   it('rejects a revoked key', async () => {
@@ -67,6 +71,8 @@ describe('ServiceCredentialService', () => {
     });
     await expect(
       service.exchangeForToken('svc_abc_secret'),
-    ).rejects.toBeInstanceOf(UnauthorizedException);
+    ).rejects.toMatchObject({
+      code: ErrorCode.AUTH_SERVICE_CREDENTIAL_INVALID,
+    });
   });
 });

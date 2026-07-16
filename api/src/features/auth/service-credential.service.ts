@@ -1,6 +1,7 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 import type { ServiceCredentialRow } from '../../infrastructure/database/schema/identity.schema';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { ServiceCredentialRepository } from './service-credential.repository';
 import { TokenService } from './token.service';
 
@@ -28,6 +29,7 @@ export class ServiceCredentialService {
   constructor(
     private readonly repo: ServiceCredentialRepository,
     private readonly tokens: TokenService,
+    private readonly errors: ExceptionService,
   ) {}
 
   async issue(
@@ -58,7 +60,7 @@ export class ServiceCredentialService {
       cred.revokedAt ||
       (cred.expiresAt && cred.expiresAt.getTime() <= Date.now())
     ) {
-      throw new UnauthorizedException('Invalid service credential');
+      throw this.errors.create(ErrorCode.AUTH_SERVICE_CREDENTIAL_INVALID);
     }
     await this.repo.touch(cred.id);
     const ttl = this.tokens.agentTtl();

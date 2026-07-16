@@ -1,5 +1,6 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import type { UserRow } from '../../infrastructure/database/schema/identity.schema';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { UserRepository } from '../users/user.repository';
 import type { TokenPair } from './auth.types';
 import { PasswordService } from './password.service';
@@ -28,18 +29,20 @@ export class AuthService {
     private readonly sessions: SessionRepository,
     private readonly tokens: TokenService,
     private readonly passwords: PasswordService,
+    private readonly errors: ExceptionService,
   ) {}
 
   /** Used by LocalStrategy. Uniform 401 — never reveals which factor failed. */
   async validateUser(email: string, password: string): Promise<UserRow> {
     if (typeof email !== 'string' || typeof password !== 'string') {
-      throw new UnauthorizedException('Invalid credentials');
+      throw this.errors.create(ErrorCode.AUTH_INVALID_CREDENTIALS);
     }
     const user = await this.users.findByEmail(email.toLowerCase());
     const ok = user
       ? await this.passwords.verify(user.passwordHash, password)
       : false;
-    if (!user || !ok) throw new UnauthorizedException('Invalid credentials');
+    if (!user || !ok)
+      throw this.errors.create(ErrorCode.AUTH_INVALID_CREDENTIALS);
     return user;
   }
 
@@ -53,19 +56,19 @@ export class AuthService {
   async refresh(refreshToken: string, ctx: RequestContext): Promise<TokenPair> {
     const tokenHash = this.tokens.hashToken(refreshToken);
     const session = await this.sessions.findByTokenHash(tokenHash);
-    if (!session) throw new UnauthorizedException('Invalid refresh token');
+    if (!session) throw this.errors.create(ErrorCode.AUTH_TOKEN_INVALID);
 
     if (session.revokedAt) {
       // Replay of a rotated/revoked token → assume theft; revoke the family.
       await this.sessions.revokeFamily(session.familyId);
-      throw new UnauthorizedException('Refresh token reuse detected');
+      throw this.errors.create(ErrorCode.AUTH_TOKEN_REUSE);
     }
     if (session.expiresAt.getTime() <= Date.now()) {
-      throw new UnauthorizedException('Refresh token expired');
+      throw this.errors.create(ErrorCode.AUTH_TOKEN_EXPIRED);
     }
 
     const user = await this.users.findActiveById(session.userId);
-    if (!user) throw new UnauthorizedException('Invalid refresh token');
+    if (!user) throw this.errors.create(ErrorCode.AUTH_TOKEN_INVALID);
 
     await this.sessions.revokeById(session.id);
     return this.issuePair(user, session.familyId, ctx);
@@ -91,7 +94,9 @@ export class AuthService {
   ): Promise<void> {
     const user = await this.users.findActiveById(userId);
     if (!user || !(await this.passwords.verify(user.passwordHash, current))) {
-      throw new UnauthorizedException('Current password is incorrect');
+      throw this.errors.create(ErrorCode.AUTH_INVALID_CREDENTIALS, {
+        message: 'Current password is incorrect',
+      });
     }
     await this.users.update(userId, {
       passwordHash: await this.passwords.hash(next),

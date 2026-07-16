@@ -1,6 +1,7 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { AuthConfig } from '../../config/configurations/auth.config';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { UserRepository } from '../users/user.repository';
 import { PasswordResetRepository } from './password-reset.repository';
 import { PasswordService } from './password.service';
@@ -25,6 +26,7 @@ export class PasswordResetService {
     private readonly hasher: ResetCodeHasher,
     private readonly mailer: ResetMailer,
     config: ConfigService,
+    private readonly errors: ExceptionService,
   ) {
     const cfg = config.getOrThrow<AuthConfig>('auth');
     this.ttlMs = cfg.passwordReset.codeTtlSeconds * 1000;
@@ -65,8 +67,7 @@ export class PasswordResetService {
    * attempts exhausted) — never revealing which factor failed.
    */
   async reset(email: string, code: string, newPassword: string): Promise<void> {
-    const fail = () =>
-      new UnauthorizedException('Invalid or expired reset code');
+    const fail = () => this.errors.create(ErrorCode.AUTH_RESET_CODE_INVALID);
 
     const user = await this.users.findByEmail(email.toLowerCase());
     if (!user) {
