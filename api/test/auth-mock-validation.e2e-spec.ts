@@ -14,12 +14,17 @@ import { UsersModule } from '../src/features/users/users.module';
 import { UsersService } from '../src/features/users/users.service';
 import { DatabaseModule } from '../src/infrastructure/database/database.module';
 import { PG_POOL } from '../src/infrastructure/database/drizzle.constants';
+import { ExceptionsModule } from '../src/infrastructure/exceptions';
+import { LoggerModule } from '../src/infrastructure/logger/logger.module';
 
 /**
  * Mock-account validation harness. Provisions several distinct accounts and
  * drives the full auth/authz lifecycle against the live DB (Postgres + Redis
  * per .env). Every account/credential created here is prefixed with the run
  * stamp and hard-deleted in afterAll, so the harness leaves no residue.
+ * Includes ExceptionsModule so UsersService/AuthService (which throw via
+ * ExceptionService) can resolve their dependency, and LoggerModule since
+ * GlobalExceptionFilter injects nestjs-pino's PinoLogger.
  *
  * Run: pnpm test:e2e -- auth-mock-validation
  */
@@ -38,6 +43,8 @@ async function boot(withThrottler: boolean): Promise<INestApplication> {
     imports: [
       ConfigModule,
       DatabaseModule,
+      ExceptionsModule,
+      LoggerModule,
       ThrottlerModule.forRootAsync({
         inject: [ConfigService],
         useFactory: (c: ConfigService) => {

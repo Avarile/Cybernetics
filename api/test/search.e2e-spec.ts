@@ -13,6 +13,8 @@ import { SearchServiceModule } from '../src/features/search-service/search-servi
 import { UsersModule } from '../src/features/users/users.module';
 import { UsersService } from '../src/features/users/users.service';
 import { DatabaseModule } from '../src/infrastructure/database/database.module';
+import { ExceptionsModule } from '../src/infrastructure/exceptions';
+import { LoggerModule } from '../src/infrastructure/logger/logger.module';
 import { QueueModule } from '../src/infrastructure/queue/queue.module';
 import { SearchEngineModule } from '../src/infrastructure/search-engine/search-engine.module';
 
@@ -36,6 +38,8 @@ describe('Search Management API (e2e)', () => {
       imports: [
         ConfigModule,
         DatabaseModule,
+        ExceptionsModule,
+        LoggerModule,
         QueueModule,
         SearchEngineModule,
         ThrottlerModule.forRootAsync({

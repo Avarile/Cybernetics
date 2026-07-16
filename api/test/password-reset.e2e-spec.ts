@@ -13,6 +13,8 @@ import { UsersModule } from '../src/features/users/users.module';
 import { UsersService } from '../src/features/users/users.service';
 import { DatabaseModule } from '../src/infrastructure/database/database.module';
 import { MailerService } from '../src/infrastructure/email/mailer.service';
+import { ExceptionsModule } from '../src/infrastructure/exceptions';
+import { LoggerModule } from '../src/infrastructure/logger/logger.module';
 
 /** In-memory MailerService replacement that records every message. */
 class FakeMailer {
@@ -49,6 +51,8 @@ function buildModule(mailer: FakeMailer) {
     imports: [
       ConfigModule,
       DatabaseModule,
+      ExceptionsModule,
+      LoggerModule,
       ThrottlerModule.forRootAsync({
         inject: [ConfigService],
         useFactory: (c: ConfigService) => {

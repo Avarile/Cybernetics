@@ -13,9 +13,14 @@ import { SystemModule } from '../src/features/system/system.module';
 import { UsersModule } from '../src/features/users/users.module';
 import { UsersService } from '../src/features/users/users.service';
 import { DatabaseModule } from '../src/infrastructure/database/database.module';
+import { ExceptionsModule } from '../src/infrastructure/exceptions';
+import { LoggerModule } from '../src/infrastructure/logger/logger.module';
 
 /**
  * System-records HTTP contract e2e. Requires Postgres (migrated) + Redis.
+ * Includes ExceptionsModule so UsersService/AuthService/SystemModule services
+ * (which throw via ExceptionService) can resolve their dependency, and
+ * LoggerModule since GlobalExceptionFilter injects nestjs-pino's PinoLogger.
  * Run with `pnpm test:e2e -- system.e2e`.
  */
 describe('System Records API (e2e)', () => {
@@ -33,6 +38,8 @@ describe('System Records API (e2e)', () => {
       imports: [
         ConfigModule,
         DatabaseModule,
+        ExceptionsModule,
+        LoggerModule,
         ThrottlerModule.forRootAsync({
           inject: [ConfigService],
           useFactory: (c: ConfigService) => {

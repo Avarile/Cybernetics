@@ -12,12 +12,19 @@ import { AuthModule } from '../src/features/auth/auth.module';
 import { UsersModule } from '../src/features/users/users.module';
 import { UsersService } from '../src/features/users/users.service';
 import { DatabaseModule } from '../src/infrastructure/database/database.module';
+import { ExceptionsModule } from '../src/infrastructure/exceptions';
+import { LoggerModule } from '../src/infrastructure/logger/logger.module';
 
 /**
- * Auth HTTP contract e2e. Boots ConfigModule + DatabaseModule + AuthModule +
- * UsersModule + ThrottlerModule and registers the global guards, so this avoids
- * MastraModule's ESM-only dependency. Requires Postgres (schema migrated) +
- * Redis. Run with `pnpm test:e2e -- auth.e2e`.
+ * Auth HTTP contract e2e. Boots ConfigModule + DatabaseModule + ExceptionsModule
+ * + LoggerModule + AuthModule + UsersModule + ThrottlerModule and registers the
+ * global guards, so this avoids MastraModule's ESM-only dependency.
+ * ExceptionsModule is required so UsersService/AuthService (which now throw via
+ * ExceptionService) can resolve their dependency, and so thrown AppExceptions
+ * render through the real GlobalExceptionFilter envelope; LoggerModule is
+ * required because GlobalExceptionFilter injects nestjs-pino's PinoLogger.
+ * Requires Postgres (schema migrated) + Redis. Run with
+ * `pnpm test:e2e -- auth.e2e`.
  */
 describe('Auth API (e2e)', () => {
   let app: INestApplication;
@@ -34,6 +41,8 @@ describe('Auth API (e2e)', () => {
       imports: [
         ConfigModule,
         DatabaseModule,
+        ExceptionsModule,
+        LoggerModule,
         ThrottlerModule.forRootAsync({
           inject: [ConfigService],
           useFactory: (c: ConfigService) => {

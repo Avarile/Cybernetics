@@ -14,6 +14,8 @@ import {
 } from '../src/infrastructure/database/schema/mailbox.schema';
 import { FileManageModule } from '../src/infrastructure/file-manage/file-manage.module';
 import { InboxService } from '../src/infrastructure/email/inbox.service';
+import { ExceptionsModule } from '../src/infrastructure/exceptions';
+import { LoggerModule } from '../src/infrastructure/logger/logger.module';
 import { QueueModule } from '../src/infrastructure/queue/queue.module';
 import { SearchEngineModule } from '../src/infrastructure/search-engine/search-engine.module';
 import { MailboxIngestService } from '../src/features/mailbox/mailbox-ingest.service';
@@ -57,8 +59,12 @@ const fakeInbox = {
 /**
  * Mailbox-ingestion persistence e2e. Boots a focused module subset (never
  * AppModule, to avoid the Mastra ESM/Jest break) — ConfigModule + DatabaseModule
- * + FileManageModule + SearchEngineModule + QueueModule + MailboxModule — and
- * overrides `InboxService` with a fake IMAP source (one message, one small
+ * + ExceptionsModule + LoggerModule + FileManageModule + SearchEngineModule +
+ * QueueModule + MailboxModule (ExceptionsModule is required so
+ * FileService/MailboxService, which throw via ExceptionService, can resolve
+ * their dependency; LoggerModule because GlobalExceptionFilter injects
+ * nestjs-pino's PinoLogger) — and overrides `InboxService` with a fake IMAP
+ * source (one message, one small
  * attachment), so the test proves the real persistence path (Postgres + MinIO +
  * MeiliSearch) without a live mailbox. Mirrors password-reset.e2e-spec.ts
  * (module-subset boot + `.overrideProvider(...).useValue(...)`) and
@@ -79,6 +85,8 @@ describe('Mailbox ingestion (e2e)', () => {
       imports: [
         ConfigModule,
         DatabaseModule,
+        ExceptionsModule,
+        LoggerModule,
         FileManageModule,
         SearchEngineModule,
         QueueModule,
