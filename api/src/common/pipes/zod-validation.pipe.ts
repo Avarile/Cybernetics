@@ -1,14 +1,12 @@
-import {
-  BadRequestException,
-  Injectable,
-  type PipeTransform,
-} from '@nestjs/common';
+import { Injectable, type PipeTransform } from '@nestjs/common';
 import { z, ZodError, type ZodType } from 'zod';
+import { AppException, ErrorCode } from '../../infrastructure/exceptions';
 
 /**
  * Validates a payload against a Zod schema. Mirrors the app's env-validation
- * style: on failure, responds 400 with the list of issues. Generic over the
- * schema so the output type is inferred (handles coercion / defaults).
+ * style: on failure, throws AppException(VALIDATION_FAILED) with the list of
+ * issues. Generic over the schema so the output type is inferred (handles
+ * coercion / defaults).
  */
 @Injectable()
 export class ZodValidationPipe<S extends ZodType> implements PipeTransform<
@@ -22,12 +20,13 @@ export class ZodValidationPipe<S extends ZodType> implements PipeTransform<
       return this.schema.parse(value) as z.infer<S>;
     } catch (error) {
       if (error instanceof ZodError) {
-        throw new BadRequestException({
-          message: 'Validation failed',
-          issues: error.issues.map((issue) => ({
-            path: issue.path.join('.') || '(root)',
-            message: issue.message,
-          })),
+        throw new AppException(ErrorCode.VALIDATION_FAILED, {
+          details: {
+            issues: error.issues.map((issue) => ({
+              path: issue.path.join('.') || '(root)',
+              message: issue.message,
+            })),
+          },
         });
       }
       throw error;
