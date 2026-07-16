@@ -72,10 +72,10 @@ export class SearchRecordService {
 
     // Validate every document first — no partial writes on a bad record.
     for (const [i, input] of inputs.entries()) {
-      const errors = validateDocument(def.fields, input.document);
-      if (errors.length) {
+      const validationErrors = validateDocument(def.fields, input.document);
+      if (validationErrors.length) {
         throw this.errors.validation(
-          errors.map((m) => ({ path: `records[${i}]`, message: m })),
+          validationErrors.map((m) => ({ path: `records[${i}]`, message: m })),
           { message: `Record ${i} failed validation` },
         );
       }

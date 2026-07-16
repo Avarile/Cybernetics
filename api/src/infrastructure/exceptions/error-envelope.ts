@@ -31,7 +31,7 @@ export function buildEnvelope(
       code: err.code,
       message,
       statusCode: spec.status,
-      details: err.details ?? null,
+      details: err.kind === ErrorKind.INTERNAL ? null : (err.details ?? null),
       correlationId,
       timestamp: new Date().toISOString(),
       path,

@@ -37,6 +37,13 @@ describe('mapInfraError', () => {
     ).toBe(ErrorCode.CRYPTO_DECRYPT_FAILED);
   });
 
+  it('maps a Redis MaxRetriesPerRequestError to CACHE_UNAVAILABLE', () => {
+    const err = Object.assign(new Error('redis down'), {
+      name: 'MaxRetriesPerRequestError',
+    });
+    expect(mapInfraError(err)?.code).toBe(ErrorCode.CACHE_UNAVAILABLE);
+  });
+
   it('maps object-not-found and network errors', () => {
     expect(
       mapInfraError(Object.assign(new Error(), { code: 'NoSuchKey' }))?.code,

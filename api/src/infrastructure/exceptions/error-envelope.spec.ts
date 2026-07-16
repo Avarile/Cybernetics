@@ -25,4 +25,23 @@ describe('buildEnvelope', () => {
     expect(env.error.message).toBe('The agent run failed');
     expect(env.error.message).not.toContain('secret');
   });
+
+  it('never leaks details for INTERNAL errors, even when the exception carries them', () => {
+    const err = new AppException(ErrorCode.AGENT_RUN_FAILED, {
+      details: { runId: 'r1' },
+    });
+    const env = buildEnvelope(err, 'req-3', '/chat');
+    expect(env.error.details).toBeNull();
+    expect(env.error.message).toBe('The agent run failed');
+  });
+
+  it('preserves details for CLIENT errors (gate only affects INTERNAL)', () => {
+    const err = new AppException(ErrorCode.VALIDATION_FAILED, {
+      details: { issues: [{ path: 'a', message: 'b' }] },
+    });
+    const env = buildEnvelope(err, 'req-4', '/records');
+    expect(env.error.details).toEqual({
+      issues: [{ path: 'a', message: 'b' }],
+    });
+  });
 });
