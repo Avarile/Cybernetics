@@ -108,6 +108,12 @@ export const envSchema = z
     SEED_ADMIN_EMAIL: z.string().email().default('admin@cybernetics.local'),
     SEED_ADMIN_PASSWORD: z.string().default(''),
 
+    // Password reset (forgot-password OTP)
+    PASSWORD_RESET_PEPPER: z
+      .string()
+      .min(1)
+      .default('dev-insecure-reset-pepper-change-me'),
+
     // System module (secret encryption at rest)
     SYSTEM_ENCRYPTION_KEY: z
       .string()
@@ -155,6 +161,19 @@ export const envSchema = z
         path: ['JWT_ACCESS_SECRET'],
         message:
           'JWT_ACCESS_SECRET must be a strong non-default value (>= 32 chars) when NODE_ENV=production.',
+      });
+    }
+
+    if (
+      env.NODE_ENV === 'production' &&
+      (env.PASSWORD_RESET_PEPPER === 'dev-insecure-reset-pepper-change-me' ||
+        env.PASSWORD_RESET_PEPPER.length < 16)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['PASSWORD_RESET_PEPPER'],
+        message:
+          'PASSWORD_RESET_PEPPER must be a strong non-default value (>= 16 chars) when NODE_ENV=production.',
       });
     }
 

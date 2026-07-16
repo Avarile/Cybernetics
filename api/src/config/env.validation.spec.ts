@@ -67,6 +67,21 @@ describe('auth env', () => {
       validateEnv({ NODE_ENV: 'production', SEED_ADMIN_PASSWORD: '' }),
     ).toThrow(/SEED_ADMIN_PASSWORD/);
   });
+
+  it('rejects the placeholder password reset pepper in production', () => {
+    expect(() =>
+      validateEnv({
+        NODE_ENV: 'production',
+        PASSWORD_RESET_PEPPER: 'dev-insecure-reset-pepper-change-me',
+      }),
+    ).toThrow(/PASSWORD_RESET_PEPPER/);
+  });
+
+  it('rejects a too-short password reset pepper in production', () => {
+    expect(() =>
+      validateEnv({ NODE_ENV: 'production', PASSWORD_RESET_PEPPER: 'short' }),
+    ).toThrow(/PASSWORD_RESET_PEPPER/);
+  });
 });
 
 describe('system encryption key', () => {
@@ -77,6 +92,7 @@ describe('system encryption key', () => {
     MINIO_ROOT_USER: 'not-minioadmin',
     MINIO_ROOT_PASSWORD: 'not-minioadmin',
     AI_GATEWAY_API_KEY: 'a-real-gateway-api-key',
+    PASSWORD_RESET_PEPPER: 'a-real-reset-pepper-value',
   };
 
   it('rejects the all-zero dev default key in production', () => {

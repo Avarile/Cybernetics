@@ -20,6 +20,12 @@ export const authConfig = registerAs('auth', () => {
     throttleLimit: env.THROTTLE_LIMIT,
     seedAdminEmail: env.SEED_ADMIN_EMAIL,
     seedAdminPassword: env.SEED_ADMIN_PASSWORD,
+    passwordReset: {
+      pepper: env.PASSWORD_RESET_PEPPER,
+      codeTtlSeconds: 900, // 15 minutes
+      maxAttempts: 5,
+      codeLength: 6,
+    },
   };
 });
 
