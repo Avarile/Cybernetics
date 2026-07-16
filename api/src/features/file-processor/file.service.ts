@@ -45,6 +45,8 @@ export interface DirectPutMeta {
   size?: number;
   sha256?: string;
   metadata?: Record<string, unknown>;
+  /** Trusted internal callers only: skips the MIME-allowlist check (size limit still applies). */
+  allowAnyMime?: boolean;
 }
 
 export interface Paginated<T> {
@@ -229,7 +231,7 @@ export class FileService {
     meta: DirectPutMeta,
     owner: FilePrincipal,
   ): Promise<FileMetadata> {
-    this.assertPolicy(meta.mimeType, meta.size);
+    this.assertPolicy(meta.mimeType, meta.size, meta.allowAnyMime);
 
     let checksum = meta.sha256?.toLowerCase();
     if (!checksum && Buffer.isBuffer(body)) {
@@ -283,8 +285,12 @@ export class FileService {
 
   // ── Internals ───────────────────────────────────────────────────────────
 
-  private assertPolicy(mimeType: string, size?: number): void {
-    if (!isMimeAllowed(mimeType, this.allowedMimeTypes)) {
+  private assertPolicy(
+    mimeType: string,
+    size?: number,
+    allowAnyMime = false,
+  ): void {
+    if (!allowAnyMime && !isMimeAllowed(mimeType, this.allowedMimeTypes)) {
       throw new BadRequestException(`MIME type "${mimeType}" is not allowed`);
     }
     if (size !== undefined && size > this.maxFileSize) {
