@@ -1,10 +1,10 @@
 import { NotFoundException } from '@nestjs/common';
 import { ImapConfigService } from './imap-config.service';
 
-jest.mock('./connection/imap-tester', () => ({
-  testImapConnection: jest.fn(async () => undefined),
+jest.mock('../../infrastructure/email/transport/imap.transport', () => ({
+  verifyImap: jest.fn(async () => undefined),
 }));
-import { testImapConnection } from './connection/imap-tester';
+import { verifyImap } from '../../infrastructure/email/transport/imap.transport';
 
 function makeRow(overrides: Record<string, any> = {}) {
   return {
@@ -35,7 +35,7 @@ describe('ImapConfigService', () => {
   let service: ImapConfigService;
 
   beforeEach(() => {
-    (testImapConnection as jest.Mock).mockClear();
+    (verifyImap as jest.Mock).mockClear();
     repo = {
       create: jest.fn(async (v: any) => makeRow(v)),
       findActiveById: jest.fn(async () => makeRow()),
@@ -103,7 +103,7 @@ describe('ImapConfigService', () => {
   });
 
   it('reports a failed connection test without throwing', async () => {
-    (testImapConnection as jest.Mock).mockRejectedValueOnce(
+    (verifyImap as jest.Mock).mockRejectedValueOnce(
       new Error('login rejected'),
     );
     const res = await service.test('i1', ctx);

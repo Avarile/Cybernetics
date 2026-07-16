@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { EncryptionService } from '../../infrastructure/crypto/encryption.service';
 import type { ImapConfigRow } from '../../infrastructure/database/schema/system.schema';
-import { testImapConnection } from './connection/imap-tester';
+import { verifyImap } from '../../infrastructure/email/transport/imap.transport';
 import type { CreateImapDto } from './dto/create-imap.dto';
 import type { UpdateImapDto } from './dto/update-imap.dto';
 import { ImapConfigRepository } from './imap-config.repository';
@@ -146,7 +146,7 @@ export class ImapConfigService {
   ): Promise<{ ok: boolean; error?: string }> {
     const row = await this.getRow(id);
     try {
-      await testImapConnection({
+      await verifyImap({
         host: row.host,
         port: row.port,
         secure: row.secure,

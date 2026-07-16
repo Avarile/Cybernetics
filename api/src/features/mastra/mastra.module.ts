@@ -7,8 +7,8 @@ import { PG_POOL } from '../../infrastructure/database/drizzle.constants';
 import type { MastraConfig } from '../../config/configurations/mastra.config';
 import { SearchServiceModule } from '../search-service/search-service.module';
 import { SearchRecordService } from '../search-service/search-record.service';
-import { SystemModule } from '../system/system.module';
-import { SmtpConfigService } from '../system/smtp-config.service';
+import { MailerService } from '../../infrastructure/email/mailer.service';
+import { EmailModule } from '../../infrastructure/email/email.module';
 import { buildMastra } from './index';
 import { AGENT_RUN_QUEUE } from './mastra.constants';
 import type { ToolServices } from './mastra.types';
@@ -45,29 +45,29 @@ import { AgentScheduleScheduler } from './schedulers/agent-schedule.scheduler';
 @Module({
   imports: [
     SearchServiceModule,
-    SystemModule,
+    EmailModule,
     MastraRepositoriesModule,
     BullModule.registerQueue({ name: AGENT_RUN_QUEUE }),
     MastraCoreModule.registerAsync({
-      imports: [SearchServiceModule, SystemModule, MastraRepositoriesModule],
+      imports: [SearchServiceModule, EmailModule, MastraRepositoriesModule],
       inject: [
         ConfigService,
         SearchRecordService,
-        SmtpConfigService,
+        MailerService,
         ActionLogRepository,
         PG_POOL,
       ],
       useFactory: (
         config: ConfigService,
         search: SearchRecordService,
-        smtp: SmtpConfigService,
+        mailer: MailerService,
         actionLog: ActionLogRepository,
         pool: Pool,
       ) => {
         const cfg = config.getOrThrow<MastraConfig>('mastra');
         const services: ToolServices = {
           searchRecords: search,
-          sendEmail: (m) => smtp.sendActive(m),
+          sendEmail: (m) => mailer.send(m),
           recordAction: (e) => actionLog.record(e),
         };
         return {

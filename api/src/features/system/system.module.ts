@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { CacheModule } from '../../infrastructure/cache/cache.module';
 import { CryptoModule } from '../../infrastructure/crypto/crypto.module';
+import { EmailModule } from '../../infrastructure/email/email.module';
 import { ImapConfigController } from './imap-config.controller';
 import { ImapConfigRepository } from './imap-config.repository';
 import { ImapConfigService } from './imap-config.service';
@@ -26,7 +27,7 @@ import { SystemSettingsService } from './system-settings.service';
  * this module imports CacheModule directly to stay self-sufficient.
  */
 @Module({
-  imports: [CryptoModule, CacheModule],
+  imports: [CryptoModule, CacheModule, EmailModule],
   controllers: [
     SystemAuditController,
     SmtpConfigController,

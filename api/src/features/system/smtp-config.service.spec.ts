@@ -1,10 +1,10 @@
 import { NotFoundException } from '@nestjs/common';
 import { SmtpConfigService } from './smtp-config.service';
 
-jest.mock('./connection/smtp-tester', () => ({
-  testSmtpConnection: jest.fn(async () => undefined),
+jest.mock('../../infrastructure/email/transport/smtp.transport', () => ({
+  verifySmtp: jest.fn(async () => undefined),
 }));
-import { testSmtpConnection } from './connection/smtp-tester';
+import { verifySmtp } from '../../infrastructure/email/transport/smtp.transport';
 
 function makeRow(overrides: Record<string, any> = {}) {
   return {
@@ -37,7 +37,7 @@ describe('SmtpConfigService', () => {
   let service: SmtpConfigService;
 
   beforeEach(() => {
-    (testSmtpConnection as jest.Mock).mockClear();
+    (verifySmtp as jest.Mock).mockClear();
     repo = {
       create: jest.fn(async (v: any) => makeRow(v)),
       findActiveById: jest.fn(async () => makeRow()),
@@ -129,10 +129,12 @@ describe('SmtpConfigService', () => {
 
   it('tests the connection, stamps status, and reports ok', async () => {
     const res = await service.test('s1', ctx);
-    expect(testSmtpConnection).toHaveBeenCalledWith(
+    expect(verifySmtp).toHaveBeenCalledWith(
       expect.objectContaining({
         host: 'smtp.example.com',
         password: 'plaintext-pass',
+        fromAddress: 'no-reply@example.com',
+        fromName: null,
       }),
     );
     expect(repo.stampTest).toHaveBeenCalledWith('s1', 'ok');
@@ -140,7 +142,7 @@ describe('SmtpConfigService', () => {
   });
 
   it('reports a failed connection test without throwing', async () => {
-    (testSmtpConnection as jest.Mock).mockRejectedValueOnce(new Error('EAUTH'));
+    (verifySmtp as jest.Mock).mockRejectedValueOnce(new Error('EAUTH'));
     const res = await service.test('s1', ctx);
     expect(repo.stampTest).toHaveBeenCalledWith('s1', 'failed');
     expect(res.ok).toBe(false);
