@@ -33,7 +33,7 @@ function makeClient(overrides: Record<string, any> = {}) {
     logout: jest.fn(async () => undefined),
     close: jest.fn(),
     getMailboxLock: jest.fn(async () => new FakeLock()),
-    fetch: jest.fn(),
+    fetch: jest.fn(() => iter([])),
     fetchOne: jest.fn(),
     search: jest.fn(async () => [] as number[]),
     status: jest.fn(),
@@ -80,50 +80,90 @@ describe('imap.transport', () => {
     expect(currentClient.logout).toHaveBeenCalled();
   });
 
-  it('listMessages maps envelopes to summaries (newest first, limited)', async () => {
+  it('listMessages fetches only the newest `limit` by sequence (no 1:* scan) and maps newest-first', async () => {
     const d1 = new Date('2020-01-01');
     const d2 = new Date('2020-01-02');
+    currentClient.mailbox = { exists: 100 };
     currentClient.fetch.mockReturnValue(
       iter([
         {
-          uid: 1,
-          envelope: {
-            subject: 'one',
-            date: d1,
-            from: [{ address: 'a@x.com' }],
-          },
+          uid: 41,
+          envelope: { subject: 'one', date: d1, from: [{ address: 'a@x.com' }] },
           flags: new Set(['\\Seen']),
         },
         {
-          uid: 2,
-          envelope: {
-            subject: 'two',
-            date: d2,
-            from: [{ address: 'b@x.com' }],
-          },
+          uid: 42,
+          envelope: { subject: 'two', date: d2, from: [{ address: 'b@x.com' }] },
           flags: new Set(),
         },
       ]),
     );
-    const res = await listMessages(conn, { limit: 1 });
+    const res = await listMessages(conn, { limit: 2 });
     expect(currentClient.getMailboxLock).toHaveBeenCalledWith('INBOX');
+    // Bounded, server-side sequence range for the newest 2 of 100 — never '1:*'.
+    expect(currentClient.fetch).toHaveBeenCalledWith(
+      '99:100',
+      expect.objectContaining({ uid: true, envelope: true, flags: true }),
+      undefined,
+    );
     expect(res).toEqual([
-      { uid: 2, from: 'b@x.com', subject: 'two', date: d2, seen: false },
+      { uid: 42, from: 'b@x.com', subject: 'two', date: d2, seen: false },
+      { uid: 41, from: 'a@x.com', subject: 'one', date: d1, seen: true },
     ]);
   });
 
-  it('listMessages returns an empty array when limit is 0', async () => {
+  it('listMessages(unseenOnly) SEARCHes server-side then fetches only the newest matching UIDs', async () => {
+    const d1 = new Date('2020-03-01');
+    const d2 = new Date('2020-03-02');
+    currentClient.search = jest.fn(async () => [10, 12, 11]); // unseen UIDs, unsorted
     currentClient.fetch.mockReturnValue(
       iter([
         {
-          uid: 1,
-          envelope: { subject: 'one', date: new Date('2020-01-01'), from: [] },
+          uid: 11,
+          envelope: { subject: 'x', date: d1, from: [{ address: 'x@x.com' }] },
+          flags: new Set(),
+        },
+        {
+          uid: 12,
+          envelope: { subject: 'y', date: d2, from: [{ address: 'y@x.com' }] },
           flags: new Set(),
         },
       ]),
     );
+    const res = await listMessages(conn, { unseenOnly: true, limit: 2 });
+    expect(currentClient.search).toHaveBeenCalledWith(
+      { seen: false },
+      { uid: true },
+    );
+    // Newest 2 of [10,11,12] => [11,12], fetched BY UID (not a whole-mailbox scan).
+    expect(currentClient.fetch).toHaveBeenCalledWith(
+      [11, 12],
+      expect.objectContaining({ uid: true, envelope: true, flags: true }),
+      { uid: true },
+    );
+    expect(res.map((r) => r.uid)).toEqual([12, 11]); // newest first
+  });
+
+  it('listMessages returns [] for an empty mailbox without fetching', async () => {
+    currentClient.mailbox = { exists: 0 };
+    const res = await listMessages(conn, { limit: 10 });
+    expect(res).toEqual([]);
+    expect(currentClient.fetch).not.toHaveBeenCalled();
+  });
+
+  it('listMessages(unseenOnly) returns [] when the search finds nothing, without fetching', async () => {
+    currentClient.search = jest.fn(async () => []);
+    const res = await listMessages(conn, { unseenOnly: true, limit: 10 });
+    expect(res).toEqual([]);
+    expect(currentClient.fetch).not.toHaveBeenCalled();
+  });
+
+  it('listMessages returns an empty array when limit is 0, without touching the server', async () => {
+    currentClient.mailbox = { exists: 5 };
     const res = await listMessages(conn, { limit: 0 });
     expect(res).toEqual([]);
+    expect(currentClient.fetch).not.toHaveBeenCalled();
+    expect(currentClient.search).not.toHaveBeenCalled();
   });
 
   it('fetchMessage parses the raw source into a ParsedMessage', async () => {

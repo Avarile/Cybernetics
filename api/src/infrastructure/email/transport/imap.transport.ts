@@ -45,16 +45,35 @@ export async function listMessages(
 ): Promise<MailboxSummary[]> {
   const mailbox = opts?.mailbox ?? 'INBOX';
   const limit = opts?.limit ?? 50;
+  if (limit <= 0) return [];
   return withClient(conn, async (client) => {
     const lock = await client.getMailboxLock(mailbox);
     try {
-      const range = opts?.unseenOnly ? { seen: false } : '1:*';
+      // Resolve at most `limit` messages WITHOUT scanning the whole mailbox:
+      // unseen via a server-side SEARCH, otherwise the newest `limit` by
+      // sequence number. Both fetch only the messages we return — O(limit),
+      // not O(mailbox) as a `1:*` / `{seen:false}` full fetch would be.
+      let range: number[] | string;
+      let byUid = false;
+      if (opts?.unseenOnly) {
+        const found = await client.search({ seen: false }, { uid: true });
+        // `search` resolves to `number[] | false`; `||` normalizes the falsy
+        // failure case. UIDs ascend, so the newest `limit` are the tail.
+        const uids = (found || []).sort((a, b) => a - b).slice(-limit);
+        if (uids.length === 0) return [];
+        range = uids;
+        byUid = true;
+      } else {
+        const exists = client.mailbox ? client.mailbox.exists : 0;
+        if (exists === 0) return [];
+        range = `${Math.max(1, exists - limit + 1)}:${exists}`;
+      }
       const out: MailboxSummary[] = [];
-      for await (const msg of client.fetch(range, {
-        uid: true,
-        envelope: true,
-        flags: true,
-      })) {
+      for await (const msg of client.fetch(
+        range,
+        { uid: true, envelope: true, flags: true },
+        byUid ? { uid: true } : undefined,
+      )) {
         out.push({
           uid: msg.uid,
           from: msg.envelope?.from?.[0]?.address ?? '',
@@ -63,9 +82,8 @@ export async function listMessages(
           seen: msg.flags?.has('\\Seen') ?? false,
         });
       }
-      // Newest last from the server; return newest first, capped at `limit`.
-      if (limit <= 0) return [];
-      return out.slice(-limit).reverse();
+      // Newest first, by UID (monotonic with arrival).
+      return out.sort((a, b) => b.uid - a.uid);
     } finally {
       lock.release();
     }
