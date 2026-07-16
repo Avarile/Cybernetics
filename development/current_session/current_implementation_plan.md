@@ -1,2648 +1,1509 @@
-# Email Infrastructure Module + Forgot-Password — Implementation Plan
+# Centralized Exception Handling Module — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a reusable `infrastructure/email` module (outbound SMTP via `MailerService`, full inbound IMAP via `InboxService`), then add an emailed 6-digit OTP forgot-password flow to the `auth` feature built on top of it.
+**Goal:** Build one global exception module that all code throws through and that normalizes every error (ours, NestJS, Mastra, raw driver errors) into a single machine-readable HTTP envelope, then migrate every existing throw site onto it.
 
-**Architecture:** `infrastructure/email` owns the mail transport layer (pure `nodemailer` / `imapflow`+`mailparser` functions) plus two services that resolve the *active* SMTP/IMAP config (read directly from the shared `smtp_configs`/`imap_configs` tables, decrypted via `EncryptionService`) and delegate to transport. It depends only on `infrastructure/database` + `infrastructure/crypto` — never on the `system` feature module. `system` and `mastra` are refactored to consume it. Forgot-password lives in `features/auth`: a `password_reset_codes` table, an HMAC-peppered single-use 6-digit code, and two `@Public()` throttled endpoints, with all mail going through `MailerService`.
+**Architecture:** A single `ERROR_REGISTRY` (code → status/kind/message) is the source of truth. `AppException` is a plain `HttpException` subclass built from a code. The `@Global` injectable `ExceptionService` is the throw API (`create`/`validation`) and the single normalizer (`from`). One `GlobalExceptionFilter` (`@Catch()`) calls `from()`, logs by kind via Pino, reports DEPENDENCY/INTERNAL to Sentry, and writes the envelope. Two mappers translate `MastraError` and raw infra errors.
 
-**Tech Stack:** NestJS 11, Drizzle ORM (node-postgres), Zod (`ZodValidationPipe`), `node:crypto` (HMAC-SHA256, `randomInt`, `timingSafeEqual`), argon2id (`PasswordService`), `nodemailer` (SMTP), `imapflow` + `mailparser` (IMAP, CommonJS). Tests: Jest + `@swc/jest` (unit, colocated `*.spec.ts`), Supertest (e2e, module-subset boot).
+**Tech Stack:** NestJS (Express), TypeScript, `nestjs-pino`, `@sentry/nestjs`, `zod`, Jest. Design source: `development/current_session/current_design.md`.
 
 ## Global Constraints
 
-- Files stay under 500 lines; one responsibility each.
-- Validate all input at the HTTP boundary with Zod DTOs (`ZodValidationPipe`).
-- Never commit secrets/credentials/.env. **No `Co-Authored-By` trailer** on commits (`.claude/settings.json` has no `attribution.commit`).
-- Dependency direction is strict: `infrastructure/email` imports only `infrastructure/*` (never `features/*`). Feature modules import `EmailModule`.
-- Mail secrets are only ever held decrypted in-memory at point of use; never logged, never returned in a response.
-- Forgot-password is enumeration-safe: `POST /auth/forgot-password` always returns `204`; `POST /auth/reset-password` returns a uniform `401 "Invalid or expired reset code"` for every business failure (validation `400`s from the Zod pipe are pre-lookup and account-agnostic). Never log plaintext codes, HMACs, or passwords.
-- DI tokens: `DRIZZLE` (typed `DrizzleDB`) from the `@Global` `DatabaseModule`; `EncryptionService` from `CryptoModule`.
-- `imapflow`/`mailparser` are CommonJS (verified: `imapflow@1.4.7` `main: lib/imap-flow.js`, `mailparser@3.9.14` `main: index.js`). Do NOT upgrade across an ESM-only major without an ESM migration (same rule as the meilisearch CJS pin). Unit specs mock `imapflow`/`mailparser` so their transitive deps never load under `@swc/jest`.
-- Unit tests: `pnpm test -- <name>` (rootDir `src`, regex `.*\.spec\.ts$`). Typecheck: `pnpm typecheck`. e2e: `pnpm test:e2e` (needs Postgres + Redis on the `.env` ports and a migrated schema). Migrations: `pnpm db:generate` (reads the schema barrel `src/infrastructure/database/schema/index.ts`) then `pnpm db:migrate`.
-- Follow existing patterns: `Public*` projections, `ParseUUIDPipe`, `@HttpCode(204)`, `@Public()` + `@Throttle(...)` on public routes, `registerAs` config namespaces validated by the central `envSchema`.
+- Keep every file under 500 lines (repo rule, `api/CLAUDE.md`).
+- Read a file before editing it; prefer editing existing files over new ones.
+- Never add a `Co-Authored-By` trailer to commits (repo rule).
+- Co-locate tests as `*.spec.ts` next to the file under test (repo convention).
+- Run from `api/`: build = `npm run build`, tests = `npm test` (Jest). Single spec: `npx jest <path>`.
+- All new module files live in `api/src/infrastructure/exceptions/`.
+- Preserve existing HTTP **statuses** during migration; preserve **messages** by passing `{ message }` overrides where a call site's message differs from the registry default.
+- `ExceptionService` must stay **dependency-free** (no injected providers) so nothing forms a DI cycle.
 
 ---
 
-## Task Overview
+## File Structure
 
-**Phase 1 — `infrastructure/email` module + system/mastra refactor**
+```
+api/src/infrastructure/exceptions/
+  error-codes.ts                    ErrorKind enum + ErrorCode enum
+  error-registry.ts                 ErrorSpec, ERROR_REGISTRY, STATUS_TO_CODE
+  error-registry.spec.ts            registry completeness invariant
+  app-exception.ts                  AppException class
+  app-exception.spec.ts
+  error-envelope.ts                 ErrorEnvelope type + buildEnvelope()
+  error-envelope.spec.ts
+  mappers/mastra-error.mapper.ts    isMastraError() + mapMastraError()
+  mappers/mastra-error.mapper.spec.ts
+  mappers/infra-error.mapper.ts     mapInfraError()
+  mappers/infra-error.mapper.spec.ts
+  exception.service.ts              ExceptionService (create/validation/from)
+  exception.service.spec.ts
+  global-exception.filter.ts        GlobalExceptionFilter
+  global-exception.filter.spec.ts
+  exceptions.module.ts              @Global module (ExceptionService + APP_FILTER)
+  index.ts                          barrel export
+```
 
-1. **Dependencies + email types + module skeleton** — add `imapflow`/`mailparser`, `email.types.ts`, empty `EmailModule`.
-2. **SMTP transport** — `transport/smtp.transport.ts` (`sendMail`, `verifySmtp`) via `nodemailer`.
-3. **IMAP transport** — `transport/imap.transport.ts` (`verifyImap`, `listMessages`, `fetchMessage`, `setSeen`) via `imapflow`+`mailparser`.
-4. **EmailConfigRepository** — read active SMTP/IMAP row, decrypt secret.
-5. **MailerService + InboxService** — resolve active config → transport; wire `EmailModule` exports.
-6. **Refactor `system` + `mastra`** — delegate `test()` to transport, drop `sendActive`, repoint mastra `sendEmail`, delete `connection/` testers.
-
-**Phase 2 — Forgot-password (`auth`)**
-
-7. **`password_reset_codes` schema + migration.**
-8. **Config/env** — `PASSWORD_RESET_PEPPER` + `auth.config` `passwordReset` block.
-9. **ResetCodeHasher** — generate / HMAC-hash / timing-safe verify.
-10. **PasswordResetRepository** — the reset-codes table.
-11. **ResetMailer** — reset-code + confirmation templates → `MailerService`.
-12. **PasswordResetService** — request + reset orchestration (the core logic).
-13. **DTOs + controller routes + AuthModule wiring.**
-14. **Build + typecheck + full unit verification.**
-15. **e2e** — forgot→reset happy path, unknown email, lockout, expired, throttle.
+Modified outside the module: `app.module.ts` (import module), `infrastructure/observability/sentry.module.ts` (drop `SentryGlobalFilter`), `common/pipes/zod-validation.pipe.ts`, and the 7 feature modules' service + spec files.
 
 ---
 
-## Task 1: Dependencies + email types + module skeleton
+## PHASE 1 — Core module
+
+### Task 1: Error codes, kinds, and registry
 
 **Files:**
-- Modify: `package.json` (add `imapflow`, `mailparser`, `@types/mailparser`)
-- Create: `src/infrastructure/email/email.types.ts`
-- Create: `src/infrastructure/email/email.module.ts`
-- Test: `src/infrastructure/email/email.types.spec.ts`
+- Create: `api/src/infrastructure/exceptions/error-codes.ts`
+- Create: `api/src/infrastructure/exceptions/error-registry.ts`
+- Test: `api/src/infrastructure/exceptions/error-registry.spec.ts`
 
 **Interfaces:**
-- Produces:
-  - `interface SmtpConn { host: string; port: number; secure: boolean; username: string | null; password: string | null; fromAddress: string; fromName: string | null }`
-  - `interface ImapConn { host: string; port: number; secure: boolean; username: string | null; password: string | null }`
-  - `interface EmailMessage { to: string; subject: string; text: string; html?: string; cc?: string }`
-  - `interface MailboxSummary { uid: number; from: string; subject: string; date: Date; seen: boolean }`
-  - `interface ParsedMessage extends MailboxSummary { to: string; text: string; html: string | null; attachments: { filename: string | null; contentType: string; size: number }[] }`
-  - `class NoActiveEmailConfigError extends Error` (constructed with `'SMTP' | 'IMAP'`)
-  - `EmailModule` (empty for now; providers added in later tasks)
-
-- [ ] **Step 1: Add the dependencies**
-
-Run: `pnpm add imapflow mailparser && pnpm add -D @types/mailparser`
-Expected: `imapflow`, `mailparser` in `dependencies`; `@types/mailparser` in `devDependencies`. No native build (`pnpm.onlyBuiltDependencies` unaffected). Confirm `imapflow` resolves to `1.x` and `mailparser` to `3.x` in `pnpm-lock.yaml`.
-
-- [ ] **Step 2: Write the failing test**
-
-Create `src/infrastructure/email/email.types.spec.ts`:
-
-```ts
-import { NoActiveEmailConfigError } from './email.types';
-
-describe('email.types', () => {
-  it('NoActiveEmailConfigError names the missing config kind', () => {
-    const err = new NoActiveEmailConfigError('SMTP');
-    expect(err).toBeInstanceOf(Error);
-    expect(err.name).toBe('NoActiveEmailConfigError');
-    expect(err.message).toContain('SMTP');
-  });
-});
-```
-
-- [ ] **Step 3: Run test to verify it fails**
-
-Run: `pnpm test -- email.types`
-Expected: FAIL — `Cannot find module './email.types'`.
-
-- [ ] **Step 4: Create the types**
-
-Create `src/infrastructure/email/email.types.ts`:
-
-```ts
-/** Resolved SMTP connection + sender identity (secret already decrypted). */
-export interface SmtpConn {
-  host: string;
-  port: number;
-  secure: boolean;
-  username: string | null;
-  password: string | null;
-  fromAddress: string;
-  fromName: string | null;
-}
-
-/** Resolved IMAP connection (secret already decrypted). */
-export interface ImapConn {
-  host: string;
-  port: number;
-  secure: boolean;
-  username: string | null;
-  password: string | null;
-}
-
-/** An outbound message. `html` is optional; `text` is always sent. */
-export interface EmailMessage {
-  to: string;
-  subject: string;
-  text: string;
-  html?: string;
-  cc?: string;
-}
-
-/** Envelope-level summary of a mailbox message. */
-export interface MailboxSummary {
-  uid: number;
-  from: string;
-  subject: string;
-  date: Date;
-  seen: boolean;
-}
-
-/** A fully fetched + MIME-parsed message. */
-export interface ParsedMessage extends MailboxSummary {
-  to: string;
-  text: string;
-  html: string | null;
-  attachments: {
-    filename: string | null;
-    contentType: string;
-    size: number;
-  }[];
-}
-
-/** Thrown when no active SMTP/IMAP profile exists. A domain error, not HTTP. */
-export class NoActiveEmailConfigError extends Error {
-  constructor(kind: 'SMTP' | 'IMAP') {
-    super(`No active ${kind} configuration is set`);
-    this.name = 'NoActiveEmailConfigError';
-  }
-}
-```
-
-- [ ] **Step 5: Create the empty module**
-
-Create `src/infrastructure/email/email.module.ts`:
-
-```ts
-import { Module } from '@nestjs/common';
-import { CryptoModule } from '../crypto/crypto.module';
-
-/**
- * Email infrastructure: outbound SMTP (MailerService) and inbound IMAP
- * (InboxService). Depends only on infrastructure (DatabaseModule is @Global;
- * CryptoModule provides EncryptionService). Providers/exports are added in
- * Tasks 4–5.
- */
-@Module({
-  imports: [CryptoModule],
-  providers: [],
-  exports: [],
-})
-export class EmailModule {}
-```
-
-- [ ] **Step 6: Run test + typecheck to verify they pass**
-
-Run: `pnpm test -- email.types && pnpm typecheck`
-Expected: PASS (1 test) and no type errors.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add package.json pnpm-lock.yaml src/infrastructure/email
-git commit -m "feat(email): add email module skeleton, types, and imapflow/mailparser deps"
-```
-
----
-
-## Task 2: SMTP transport
-
-Relocate the existing send/verify logic (`system/connection/smtp-tester.ts`) into the email module and generalize `send` to take an `EmailMessage` (adds `html`). The system module keeps working until Task 6 repoints it.
-
-**Files:**
-- Create: `src/infrastructure/email/transport/smtp.transport.ts`
-- Test: `src/infrastructure/email/transport/smtp.transport.spec.ts`
-
-**Interfaces:**
-- Consumes: `SmtpConn`, `EmailMessage` (Task 1).
-- Produces:
-  - `verifySmtp(conn: SmtpConn): Promise<void>` — throws on connectivity/auth failure.
-  - `sendMail(conn: SmtpConn, msg: EmailMessage): Promise<void>` — sends `text` (+`html`).
+- Produces: `enum ErrorKind { CLIENT, DEPENDENCY, INTERNAL }`; `enum ErrorCode` (string members); `interface ErrorSpec { status: HttpStatus; kind: ErrorKind; message: string }`; `const ERROR_REGISTRY: Record<ErrorCode, ErrorSpec>`; `const STATUS_TO_CODE: Partial<Record<number, ErrorCode>>`.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `src/infrastructure/email/transport/smtp.transport.spec.ts`:
-
+`error-registry.spec.ts`:
 ```ts
-const verify = jest.fn(async () => true);
-const sendMailFn = jest.fn(async () => ({ messageId: 'x' }));
-const close = jest.fn();
-const createTransport = jest.fn(() => ({ verify, sendMail: sendMailFn, close }));
+import { HttpStatus } from '@nestjs/common';
+import { ErrorCode, ErrorKind } from './error-codes';
+import { ERROR_REGISTRY } from './error-registry';
 
-jest.mock('nodemailer', () => ({ createTransport }));
-
-import { sendMail, verifySmtp } from './smtp.transport';
-import type { SmtpConn } from '../email.types';
-
-const conn: SmtpConn = {
-  host: 'smtp.example.com',
-  port: 587,
-  secure: true,
-  username: 'mailer',
-  password: 'pass',
-  fromAddress: 'no-reply@example.com',
-  fromName: 'Cybernetics',
-};
-
-describe('smtp.transport', () => {
-  beforeEach(() => {
-    createTransport.mockClear();
-    verify.mockClear();
-    sendMailFn.mockClear();
-    close.mockClear();
-  });
-
-  it('verifySmtp builds a transport with auth and calls verify', async () => {
-    await verifySmtp(conn);
-    expect(createTransport).toHaveBeenCalledWith(
-      expect.objectContaining({
-        host: 'smtp.example.com',
-        port: 587,
-        secure: true,
-        auth: { user: 'mailer', pass: 'pass' },
-      }),
-    );
-    expect(verify).toHaveBeenCalled();
-    expect(close).toHaveBeenCalled();
-  });
-
-  it('verifySmtp omits auth when there is no username', async () => {
-    await verifySmtp({ ...conn, username: null, password: null });
-    expect(createTransport).toHaveBeenCalledWith(
-      expect.objectContaining({ auth: undefined }),
+describe('ERROR_REGISTRY', () => {
+  it('has exactly one spec for every ErrorCode', () => {
+    for (const code of Object.values(ErrorCode)) {
+      expect(ERROR_REGISTRY[code]).toBeDefined();
+    }
+    expect(Object.keys(ERROR_REGISTRY).sort()).toEqual(
+      Object.values(ErrorCode).sort(),
     );
   });
 
-  it('sendMail formats the from header and passes text + html + cc', async () => {
-    await sendMail(conn, {
-      to: 'user@example.com',
-      subject: 'Hi',
-      text: 'body',
-      html: '<p>body</p>',
-      cc: 'cc@example.com',
-    });
-    expect(sendMailFn).toHaveBeenCalledWith(
-      expect.objectContaining({
-        from: 'Cybernetics <no-reply@example.com>',
-        to: 'user@example.com',
-        cc: 'cc@example.com',
-        subject: 'Hi',
-        text: 'body',
-        html: '<p>body</p>',
-      }),
-    );
-    expect(close).toHaveBeenCalled();
+  it('every spec has a valid status, a known kind, and a non-empty message', () => {
+    for (const spec of Object.values(ERROR_REGISTRY)) {
+      expect(Object.values(HttpStatus)).toContain(spec.status);
+      expect(Object.values(ErrorKind)).toContain(spec.kind);
+      expect(spec.message.length).toBeGreaterThan(0);
+    }
   });
 
-  it('sendMail uses a bare from address when fromName is null', async () => {
-    await sendMail({ ...conn, fromName: null }, {
-      to: 'user@example.com',
-      subject: 'Hi',
-      text: 'body',
-    });
-    expect(sendMailFn).toHaveBeenCalledWith(
-      expect.objectContaining({ from: 'no-reply@example.com' }),
-    );
+  it('CLIENT specs are 4xx; DEPENDENCY/INTERNAL are 5xx', () => {
+    for (const spec of Object.values(ERROR_REGISTRY)) {
+      if (spec.kind === ErrorKind.CLIENT) {
+        expect(spec.status).toBeGreaterThanOrEqual(400);
+        expect(spec.status).toBeLessThan(500);
+      } else {
+        expect(spec.status).toBeGreaterThanOrEqual(500);
+      }
+    }
   });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pnpm test -- smtp.transport`
-Expected: FAIL — `Cannot find module './smtp.transport'`.
+Run: `cd api && npx jest src/infrastructure/exceptions/error-registry.spec.ts`
+Expected: FAIL — cannot find module `./error-codes`.
 
-- [ ] **Step 3: Implement the transport**
-
-Create `src/infrastructure/email/transport/smtp.transport.ts`:
+- [ ] **Step 3: Write `error-codes.ts`**
 
 ```ts
-import { createTransport } from 'nodemailer';
-import type { EmailMessage, SmtpConn } from '../email.types';
+export enum ErrorKind {
+  CLIENT = 'CLIENT',
+  DEPENDENCY = 'DEPENDENCY',
+  INTERNAL = 'INTERNAL',
+}
 
-function buildTransport(conn: SmtpConn) {
-  return createTransport({
-    host: conn.host,
-    port: conn.port,
-    secure: conn.secure,
-    auth: conn.username
-      ? { user: conn.username, pass: conn.password ?? '' }
-      : undefined,
-    connectionTimeout: 10_000,
-    greetingTimeout: 10_000,
-    socketTimeout: 10_000,
+export enum ErrorCode {
+  // common
+  VALIDATION_FAILED = 'VALIDATION_FAILED',
+  NOT_FOUND = 'NOT_FOUND',
+  CONFLICT = 'CONFLICT',
+  UNAUTHORIZED = 'UNAUTHORIZED',
+  FORBIDDEN = 'FORBIDDEN',
+  RATE_LIMITED = 'RATE_LIMITED',
+  DEPENDENCY_UNAVAILABLE = 'DEPENDENCY_UNAVAILABLE',
+  INTERNAL_ERROR = 'INTERNAL_ERROR',
+  // auth
+  AUTH_INVALID_CREDENTIALS = 'AUTH_INVALID_CREDENTIALS',
+  AUTH_TOKEN_INVALID = 'AUTH_TOKEN_INVALID',
+  AUTH_TOKEN_EXPIRED = 'AUTH_TOKEN_EXPIRED',
+  AUTH_TOKEN_REUSE = 'AUTH_TOKEN_REUSE',
+  AUTH_RESET_CODE_INVALID = 'AUTH_RESET_CODE_INVALID',
+  AUTH_SERVICE_CREDENTIAL_INVALID = 'AUTH_SERVICE_CREDENTIAL_INVALID',
+  // user
+  USER_NOT_FOUND = 'USER_NOT_FOUND',
+  USER_EMAIL_TAKEN = 'USER_EMAIL_TAKEN',
+  // file
+  FILE_NOT_FOUND = 'FILE_NOT_FOUND',
+  FILE_INVALID_STATE = 'FILE_INVALID_STATE',
+  FILE_TOO_LARGE = 'FILE_TOO_LARGE',
+  FILE_MIME_NOT_ALLOWED = 'FILE_MIME_NOT_ALLOWED',
+  FILE_UPLOAD_MISSING = 'FILE_UPLOAD_MISSING',
+  // search
+  SEARCH_COLLECTION_NOT_FOUND = 'SEARCH_COLLECTION_NOT_FOUND',
+  SEARCH_COLLECTION_EXISTS = 'SEARCH_COLLECTION_EXISTS',
+  SEARCH_QUERY_INVALID = 'SEARCH_QUERY_INVALID',
+  SEARCH_RECORD_NOT_FOUND = 'SEARCH_RECORD_NOT_FOUND',
+  SEARCH_UNAVAILABLE = 'SEARCH_UNAVAILABLE',
+  // config / crypto
+  CONFIG_NOT_FOUND = 'CONFIG_NOT_FOUND',
+  MAIL_CONFIG_MISSING = 'MAIL_CONFIG_MISSING',
+  CRYPTO_DECRYPT_FAILED = 'CRYPTO_DECRYPT_FAILED',
+  CRYPTO_MISCONFIGURED = 'CRYPTO_MISCONFIGURED',
+  // mailbox
+  MAILBOX_MESSAGE_NOT_FOUND = 'MAILBOX_MESSAGE_NOT_FOUND',
+  MAILBOX_ATTACHMENT_NOT_FOUND = 'MAILBOX_ATTACHMENT_NOT_FOUND',
+  MAILBOX_ACCOUNT_UNRESOLVED = 'MAILBOX_ACCOUNT_UNRESOLVED',
+  MAILBOX_SYNC_FAILED = 'MAILBOX_SYNC_FAILED',
+  // agent / llm
+  AGENT_CONVERSATION_NOT_FOUND = 'AGENT_CONVERSATION_NOT_FOUND',
+  AGENT_APPROVAL_NOT_FOUND = 'AGENT_APPROVAL_NOT_FOUND',
+  AGENT_APPROVAL_CONFLICT = 'AGENT_APPROVAL_CONFLICT',
+  AGENT_APPROVAL_FORBIDDEN = 'AGENT_APPROVAL_FORBIDDEN',
+  AGENT_REQUEST_INVALID = 'AGENT_REQUEST_INVALID',
+  AGENT_RUN_FAILED = 'AGENT_RUN_FAILED',
+  TOOL_EXECUTION_FAILED = 'TOOL_EXECUTION_FAILED',
+  LLM_RATE_LIMITED = 'LLM_RATE_LIMITED',
+  LLM_TIMEOUT = 'LLM_TIMEOUT',
+  LLM_PROVIDER_ERROR = 'LLM_PROVIDER_ERROR',
+  // infra
+  DB_UNAVAILABLE = 'DB_UNAVAILABLE',
+  CACHE_UNAVAILABLE = 'CACHE_UNAVAILABLE',
+  QUEUE_UNAVAILABLE = 'QUEUE_UNAVAILABLE',
+  STORAGE_UNAVAILABLE = 'STORAGE_UNAVAILABLE',
+  STORAGE_OBJECT_NOT_FOUND = 'STORAGE_OBJECT_NOT_FOUND',
+  EMAIL_SEND_FAILED = 'EMAIL_SEND_FAILED',
+}
+```
+
+- [ ] **Step 4: Write `error-registry.ts`**
+
+```ts
+import { HttpStatus } from '@nestjs/common';
+import { ErrorCode, ErrorKind } from './error-codes';
+
+export interface ErrorSpec {
+  status: HttpStatus;
+  kind: ErrorKind;
+  message: string;
+}
+
+const C = ErrorKind.CLIENT;
+const D = ErrorKind.DEPENDENCY;
+const I = ErrorKind.INTERNAL;
+const S = HttpStatus;
+
+export const ERROR_REGISTRY: Record<ErrorCode, ErrorSpec> = {
+  [ErrorCode.VALIDATION_FAILED]: { status: S.BAD_REQUEST, kind: C, message: 'Validation failed' },
+  [ErrorCode.NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Resource not found' },
+  [ErrorCode.CONFLICT]: { status: S.CONFLICT, kind: C, message: 'Resource conflict' },
+  [ErrorCode.UNAUTHORIZED]: { status: S.UNAUTHORIZED, kind: C, message: 'Unauthorized' },
+  [ErrorCode.FORBIDDEN]: { status: S.FORBIDDEN, kind: C, message: 'Forbidden' },
+  [ErrorCode.RATE_LIMITED]: { status: S.TOO_MANY_REQUESTS, kind: C, message: 'Too many requests' },
+  [ErrorCode.DEPENDENCY_UNAVAILABLE]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'A dependency is temporarily unavailable' },
+  [ErrorCode.INTERNAL_ERROR]: { status: S.INTERNAL_SERVER_ERROR, kind: I, message: 'Internal server error' },
+
+  [ErrorCode.AUTH_INVALID_CREDENTIALS]: { status: S.UNAUTHORIZED, kind: C, message: 'Invalid credentials' },
+  [ErrorCode.AUTH_TOKEN_INVALID]: { status: S.UNAUTHORIZED, kind: C, message: 'Invalid refresh token' },
+  [ErrorCode.AUTH_TOKEN_EXPIRED]: { status: S.UNAUTHORIZED, kind: C, message: 'Refresh token expired' },
+  [ErrorCode.AUTH_TOKEN_REUSE]: { status: S.UNAUTHORIZED, kind: C, message: 'Refresh token reuse detected' },
+  [ErrorCode.AUTH_RESET_CODE_INVALID]: { status: S.UNAUTHORIZED, kind: C, message: 'Invalid or expired reset code' },
+  [ErrorCode.AUTH_SERVICE_CREDENTIAL_INVALID]: { status: S.UNAUTHORIZED, kind: C, message: 'Invalid service credential' },
+
+  [ErrorCode.USER_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'User not found' },
+  [ErrorCode.USER_EMAIL_TAKEN]: { status: S.CONFLICT, kind: C, message: 'Email already registered' },
+
+  [ErrorCode.FILE_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'File not found' },
+  [ErrorCode.FILE_INVALID_STATE]: { status: S.CONFLICT, kind: C, message: 'File is not in a valid state for this operation' },
+  [ErrorCode.FILE_TOO_LARGE]: { status: S.BAD_REQUEST, kind: C, message: 'File exceeds the maximum allowed size' },
+  [ErrorCode.FILE_MIME_NOT_ALLOWED]: { status: S.BAD_REQUEST, kind: C, message: 'File type is not allowed' },
+  [ErrorCode.FILE_UPLOAD_MISSING]: { status: S.BAD_REQUEST, kind: C, message: 'Upload not found in storage; upload the file before completing' },
+
+  [ErrorCode.SEARCH_COLLECTION_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Collection not found' },
+  [ErrorCode.SEARCH_COLLECTION_EXISTS]: { status: S.CONFLICT, kind: C, message: 'Collection already exists' },
+  [ErrorCode.SEARCH_QUERY_INVALID]: { status: S.BAD_REQUEST, kind: C, message: 'Invalid search query' },
+  [ErrorCode.SEARCH_RECORD_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Record not found' },
+  [ErrorCode.SEARCH_UNAVAILABLE]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'Search is temporarily unavailable' },
+
+  [ErrorCode.CONFIG_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Configuration not found' },
+  [ErrorCode.MAIL_CONFIG_MISSING]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'No active email configuration is set' },
+  [ErrorCode.CRYPTO_DECRYPT_FAILED]: { status: S.INTERNAL_SERVER_ERROR, kind: I, message: 'Internal server error' },
+  [ErrorCode.CRYPTO_MISCONFIGURED]: { status: S.INTERNAL_SERVER_ERROR, kind: I, message: 'Internal server error' },
+
+  [ErrorCode.MAILBOX_MESSAGE_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Message not found' },
+  [ErrorCode.MAILBOX_ATTACHMENT_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Attachment not found' },
+  [ErrorCode.MAILBOX_ACCOUNT_UNRESOLVED]: { status: S.BAD_REQUEST, kind: C, message: 'No mailbox account specified and no default is configured' },
+  [ErrorCode.MAILBOX_SYNC_FAILED]: { status: S.BAD_GATEWAY, kind: D, message: 'Mailbox sync failed' },
+
+  [ErrorCode.AGENT_CONVERSATION_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Conversation not found' },
+  [ErrorCode.AGENT_APPROVAL_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Approval not found' },
+  [ErrorCode.AGENT_APPROVAL_CONFLICT]: { status: S.CONFLICT, kind: C, message: 'Approval already decided' },
+  [ErrorCode.AGENT_APPROVAL_FORBIDDEN]: { status: S.FORBIDDEN, kind: C, message: 'Not your approval' },
+  [ErrorCode.AGENT_REQUEST_INVALID]: { status: S.BAD_REQUEST, kind: C, message: 'Invalid agent request' },
+  [ErrorCode.AGENT_RUN_FAILED]: { status: S.INTERNAL_SERVER_ERROR, kind: I, message: 'The agent run failed' },
+  [ErrorCode.TOOL_EXECUTION_FAILED]: { status: S.INTERNAL_SERVER_ERROR, kind: I, message: 'A tool failed to execute' },
+  [ErrorCode.LLM_RATE_LIMITED]: { status: S.TOO_MANY_REQUESTS, kind: C, message: 'The model is rate limited; try again shortly' },
+  [ErrorCode.LLM_TIMEOUT]: { status: S.GATEWAY_TIMEOUT, kind: D, message: 'The model request timed out' },
+  [ErrorCode.LLM_PROVIDER_ERROR]: { status: S.BAD_GATEWAY, kind: D, message: 'The model provider returned an error' },
+
+  [ErrorCode.DB_UNAVAILABLE]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'A dependency is temporarily unavailable' },
+  [ErrorCode.CACHE_UNAVAILABLE]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'A dependency is temporarily unavailable' },
+  [ErrorCode.QUEUE_UNAVAILABLE]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'A dependency is temporarily unavailable' },
+  [ErrorCode.STORAGE_UNAVAILABLE]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'Object storage is temporarily unavailable' },
+  [ErrorCode.STORAGE_OBJECT_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Object not found' },
+  [ErrorCode.EMAIL_SEND_FAILED]: { status: S.BAD_GATEWAY, kind: D, message: 'Failed to send email' },
+};
+
+/** Maps a raw HTTP status (from framework-thrown HttpExceptions) to a generic code. */
+export const STATUS_TO_CODE: Partial<Record<number, ErrorCode>> = {
+  [S.BAD_REQUEST]: ErrorCode.VALIDATION_FAILED,
+  [S.UNAUTHORIZED]: ErrorCode.UNAUTHORIZED,
+  [S.FORBIDDEN]: ErrorCode.FORBIDDEN,
+  [S.NOT_FOUND]: ErrorCode.NOT_FOUND,
+  [S.CONFLICT]: ErrorCode.CONFLICT,
+  [S.TOO_MANY_REQUESTS]: ErrorCode.RATE_LIMITED,
+  [S.SERVICE_UNAVAILABLE]: ErrorCode.DEPENDENCY_UNAVAILABLE,
+};
+```
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `cd api && npx jest src/infrastructure/exceptions/error-registry.spec.ts`
+Expected: PASS (3 tests).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add api/src/infrastructure/exceptions/error-codes.ts api/src/infrastructure/exceptions/error-registry.ts api/src/infrastructure/exceptions/error-registry.spec.ts
+git commit -m "feat(exceptions): add error-code taxonomy and registry"
+```
+
+---
+
+### Task 2: `AppException`
+
+**Files:**
+- Create: `api/src/infrastructure/exceptions/app-exception.ts`
+- Test: `api/src/infrastructure/exceptions/app-exception.spec.ts`
+
+**Interfaces:**
+- Consumes: `ErrorCode`, `ErrorKind` (Task 1), `ERROR_REGISTRY` (Task 1).
+- Produces: `class AppException extends HttpException` with readonly `code: ErrorCode`, `kind: ErrorKind`, `details?: unknown`, and constructor `(code: ErrorCode, opts?: { message?: string; details?: unknown; cause?: unknown })`.
+
+- [ ] **Step 1: Write the failing test**
+
+`app-exception.spec.ts`:
+```ts
+import { HttpException } from '@nestjs/common';
+import { AppException } from './app-exception';
+import { ErrorCode, ErrorKind } from './error-codes';
+
+describe('AppException', () => {
+  it('derives status, kind, and default message from the registry', () => {
+    const err = new AppException(ErrorCode.USER_NOT_FOUND);
+    expect(err).toBeInstanceOf(HttpException);
+    expect(err.getStatus()).toBe(404);
+    expect(err.code).toBe(ErrorCode.USER_NOT_FOUND);
+    expect(err.kind).toBe(ErrorKind.CLIENT);
+    expect(err.message).toBe('User not found');
   });
-}
 
-/** Connect + EHLO/AUTH check. Throws on any failure. No mail is sent. */
-export async function verifySmtp(conn: SmtpConn): Promise<void> {
-  const transport = buildTransport(conn);
-  try {
-    await transport.verify();
-  } finally {
-    transport.close();
-  }
-}
-
-/** Send one message through the given connection. Throws on send failure. */
-export async function sendMail(
-  conn: SmtpConn,
-  msg: EmailMessage,
-): Promise<void> {
-  const transport = buildTransport(conn);
-  try {
-    await transport.sendMail({
-      from: conn.fromName
-        ? `${conn.fromName} <${conn.fromAddress}>`
-        : conn.fromAddress,
-      to: msg.to,
-      cc: msg.cc,
-      subject: msg.subject,
-      text: msg.text,
-      html: msg.html,
+  it('honours a message override and stores details + cause', () => {
+    const cause = new Error('root');
+    const err = new AppException(ErrorCode.FILE_INVALID_STATE, {
+      message: 'File is not awaiting upload (status=AVAILABLE)',
+      details: { status: 'AVAILABLE' },
+      cause,
     });
-  } finally {
-    transport.close();
+    expect(err.message).toBe('File is not awaiting upload (status=AVAILABLE)');
+    expect(err.details).toEqual({ status: 'AVAILABLE' });
+    expect(err.cause).toBe(cause);
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd api && npx jest src/infrastructure/exceptions/app-exception.spec.ts`
+Expected: FAIL — cannot find module `./app-exception`.
+
+- [ ] **Step 3: Write `app-exception.ts`**
+
+```ts
+import { HttpException } from '@nestjs/common';
+import { ErrorCode, ErrorKind } from './error-codes';
+import { ERROR_REGISTRY } from './error-registry';
+
+export interface AppExceptionOptions {
+  message?: string;
+  details?: unknown;
+  cause?: unknown;
+}
+
+/**
+ * The single exception type the application throws. A plain class (constructable
+ * without DI), so it works in non-DI contexts (pipes, standalone functions) as
+ * well as via `ExceptionService`.
+ */
+export class AppException extends HttpException {
+  readonly code: ErrorCode;
+  readonly kind: ErrorKind;
+  readonly details?: unknown;
+
+  constructor(code: ErrorCode, opts: AppExceptionOptions = {}) {
+    const spec = ERROR_REGISTRY[code];
+    super(
+      { code, message: opts.message ?? spec.message, details: opts.details },
+      spec.status,
+      { cause: opts.cause },
+    );
+    this.code = code;
+    this.kind = spec.kind;
+    this.details = opts.details;
   }
 }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pnpm test -- smtp.transport`
-Expected: PASS (4 tests).
+Run: `cd api && npx jest src/infrastructure/exceptions/app-exception.spec.ts`
+Expected: PASS (2 tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/infrastructure/email/transport/smtp.transport.ts src/infrastructure/email/transport/smtp.transport.spec.ts
-git commit -m "feat(email): add SMTP transport (send + verify)"
+git add api/src/infrastructure/exceptions/app-exception.ts api/src/infrastructure/exceptions/app-exception.spec.ts
+git commit -m "feat(exceptions): add AppException base class"
 ```
 
 ---
 
-## Task 3: IMAP transport
-
-New `imapflow`-based client with `mailparser` for MIME parsing. Each function opens a short-lived connection (connect → act → logout).
-
-> **imapflow API reference (v1.4.x):** `const { ImapFlow } = require('imapflow')`; `new ImapFlow({host,port,secure,auth:{user,pass},logger})`; `await client.connect()`; `await client.logout()`; `const lock = await client.getMailboxLock('INBOX')` / `lock.release()`; async-iterate `client.fetch(range, query)` where query is `{ envelope, flags, source, uid }` and each message has `.uid`, `.envelope` (`{subject, date, from:[{address,name}], to:[...]}`), `.flags` (a `Set`), `.source` (Buffer); `client.fetchOne(seq, query, options)`; `client.search(query, options)` → number[]; `client.messageFlagsAdd(range, flags, options)` / `client.messageFlagsRemove(...)`; UID addressing via the `{ uid: true }` options arg. `mailparser`'s `simpleParser(source)` → `{ subject, from:{value:[{address,name}]}, to:{text}, date, text, html:(string|false), attachments:[{filename, contentType, size}] }`. **During implementation, confirm these shapes against the installed typings; the unit test mocks both libraries.**
+### Task 3: Error envelope + builder
 
 **Files:**
-- Create: `src/infrastructure/email/transport/imap.transport.ts`
-- Test: `src/infrastructure/email/transport/imap.transport.spec.ts`
+- Create: `api/src/infrastructure/exceptions/error-envelope.ts`
+- Test: `api/src/infrastructure/exceptions/error-envelope.spec.ts`
 
 **Interfaces:**
-- Consumes: `ImapConn`, `MailboxSummary`, `ParsedMessage` (Task 1).
-- Produces:
-  - `verifyImap(conn: ImapConn): Promise<void>`
-  - `listMessages(conn: ImapConn, opts?: { mailbox?: string; limit?: number; unseenOnly?: boolean }): Promise<MailboxSummary[]>`
-  - `fetchMessage(conn: ImapConn, uid: number, mailbox?: string): Promise<ParsedMessage | null>`
-  - `setSeen(conn: ImapConn, uid: number, value: boolean, mailbox?: string): Promise<void>`
+- Consumes: `AppException` (Task 2), `ErrorKind` (Task 1), `ERROR_REGISTRY` (Task 1).
+- Produces: `interface ErrorEnvelope { error: { code, message, statusCode, details, correlationId, timestamp, path } }`; `function buildEnvelope(err: AppException, correlationId: string, path: string): ErrorEnvelope`.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `src/infrastructure/email/transport/imap.transport.spec.ts`:
-
+`error-envelope.spec.ts`:
 ```ts
-class FakeLock {
-  release = jest.fn();
-}
+import { AppException } from './app-exception';
+import { ErrorCode } from './error-codes';
+import { buildEnvelope } from './error-envelope';
 
-function makeClient(overrides: Record<string, any> = {}) {
-  return {
-    connect: jest.fn(async () => undefined),
-    logout: jest.fn(async () => undefined),
-    close: jest.fn(),
-    getMailboxLock: jest.fn(async () => new FakeLock()),
-    fetch: jest.fn(),
-    fetchOne: jest.fn(),
-    search: jest.fn(async () => [] as number[]),
-    messageFlagsAdd: jest.fn(async () => true),
-    messageFlagsRemove: jest.fn(async () => true),
-    ...overrides,
-  };
-}
-
-let currentClient: any;
-const ImapFlow = jest.fn(() => currentClient);
-jest.mock('imapflow', () => ({ ImapFlow }));
-
-const simpleParser = jest.fn();
-jest.mock('mailparser', () => ({ simpleParser }));
-
-import {
-  fetchMessage,
-  listMessages,
-  setSeen,
-  verifyImap,
-} from './imap.transport';
-import type { ImapConn } from '../email.types';
-
-const conn: ImapConn = {
-  host: 'imap.example.com',
-  port: 993,
-  secure: true,
-  username: 'user',
-  password: 'pass',
-};
-
-/** Build an async iterator over the given messages for client.fetch. */
-async function* iter(messages: any[]) {
-  for (const m of messages) yield m;
-}
-
-describe('imap.transport', () => {
-  beforeEach(() => {
-    ImapFlow.mockClear();
-    simpleParser.mockReset();
-    currentClient = makeClient();
-  });
-
-  it('verifyImap connects then logs out', async () => {
-    await verifyImap(conn);
-    expect(ImapFlow).toHaveBeenCalledWith(
-      expect.objectContaining({
-        host: 'imap.example.com',
-        port: 993,
-        secure: true,
-        auth: { user: 'user', pass: 'pass' },
-      }),
-    );
-    expect(currentClient.connect).toHaveBeenCalled();
-    expect(currentClient.logout).toHaveBeenCalled();
-  });
-
-  it('listMessages maps envelopes to summaries (newest first, limited)', async () => {
-    const d1 = new Date('2020-01-01');
-    const d2 = new Date('2020-01-02');
-    currentClient.fetch.mockReturnValue(
-      iter([
-        {
-          uid: 1,
-          envelope: { subject: 'one', date: d1, from: [{ address: 'a@x.com' }] },
-          flags: new Set(['\\Seen']),
-        },
-        {
-          uid: 2,
-          envelope: { subject: 'two', date: d2, from: [{ address: 'b@x.com' }] },
-          flags: new Set(),
-        },
-      ]),
-    );
-    const res = await listMessages(conn, { limit: 1 });
-    expect(currentClient.getMailboxLock).toHaveBeenCalledWith('INBOX');
-    expect(res).toEqual([
-      { uid: 2, from: 'b@x.com', subject: 'two', date: d2, seen: false },
-    ]);
-  });
-
-  it('fetchMessage parses the raw source into a ParsedMessage', async () => {
-    currentClient.fetchOne.mockResolvedValue({
-      uid: 7,
-      source: Buffer.from('raw'),
-      flags: new Set(['\\Seen']),
+describe('buildEnvelope', () => {
+  it('serializes a CLIENT error with its real message and details', () => {
+    const err = new AppException(ErrorCode.USER_NOT_FOUND);
+    const env = buildEnvelope(err, 'req-1', '/users/1');
+    expect(env.error).toMatchObject({
+      code: ErrorCode.USER_NOT_FOUND,
+      message: 'User not found',
+      statusCode: 404,
+      correlationId: 'req-1',
+      path: '/users/1',
     });
-    simpleParser.mockResolvedValue({
-      subject: 'Hello',
-      from: { value: [{ address: 'a@x.com', name: 'A' }] },
-      to: { text: 'me@x.com' },
-      date: new Date('2020-05-05'),
-      text: 'plain',
-      html: '<p>rich</p>',
-      attachments: [{ filename: 'f.pdf', contentType: 'application/pdf', size: 10 }],
-    });
-    const res = await fetchMessage(conn, 7);
-    expect(currentClient.fetchOne).toHaveBeenCalledWith(
-      7,
-      expect.objectContaining({ source: true }),
-      { uid: true },
-    );
-    expect(res).toEqual({
-      uid: 7,
-      from: 'a@x.com',
-      to: 'me@x.com',
-      subject: 'Hello',
-      date: new Date('2020-05-05'),
-      seen: true,
-      text: 'plain',
-      html: '<p>rich</p>',
-      attachments: [{ filename: 'f.pdf', contentType: 'application/pdf', size: 10 }],
-    });
+    expect(typeof env.error.timestamp).toBe('string');
   });
 
-  it('fetchMessage returns null when the message is missing', async () => {
-    currentClient.fetchOne.mockResolvedValue(false);
-    expect(await fetchMessage(conn, 999)).toBeNull();
-  });
-
-  it('setSeen adds the \\Seen flag by UID', async () => {
-    await setSeen(conn, 3, true);
-    expect(currentClient.messageFlagsAdd).toHaveBeenCalledWith(
-      3,
-      ['\\Seen'],
-      { uid: true },
-    );
-  });
-
-  it('setSeen removes the \\Seen flag when value is false', async () => {
-    await setSeen(conn, 3, false);
-    expect(currentClient.messageFlagsRemove).toHaveBeenCalledWith(
-      3,
-      ['\\Seen'],
-      { uid: true },
-    );
+  it('hides the raw message of INTERNAL errors behind the safe registry message', () => {
+    const err = new AppException(ErrorCode.AGENT_RUN_FAILED, { message: 'stacktrace: secret' });
+    const env = buildEnvelope(err, 'req-2', '/chat');
+    expect(env.error.statusCode).toBe(500);
+    expect(env.error.message).toBe('The agent run failed');
+    expect(env.error.message).not.toContain('secret');
   });
 });
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `pnpm test -- imap.transport`
-Expected: FAIL — `Cannot find module './imap.transport'`.
+Run: `cd api && npx jest src/infrastructure/exceptions/error-envelope.spec.ts`
+Expected: FAIL — cannot find module `./error-envelope`.
 
-- [ ] **Step 3: Implement the transport**
-
-Create `src/infrastructure/email/transport/imap.transport.ts`:
+- [ ] **Step 3: Write `error-envelope.ts`**
 
 ```ts
-import { ImapFlow } from 'imapflow';
-import { simpleParser } from 'mailparser';
-import type { ImapConn, MailboxSummary, ParsedMessage } from '../email.types';
+import { AppException } from './app-exception';
+import { ErrorCode, ErrorKind } from './error-codes';
+import { ERROR_REGISTRY } from './error-registry';
 
-function makeClient(conn: ImapConn): ImapFlow {
-  return new ImapFlow({
-    host: conn.host,
-    port: conn.port,
-    secure: conn.secure,
-    auth: { user: conn.username ?? '', pass: conn.password ?? '' },
-    logger: false,
-  });
+export interface ErrorEnvelope {
+  error: {
+    code: ErrorCode;
+    message: string;
+    statusCode: number;
+    details: unknown;
+    correlationId: string;
+    timestamp: string;
+    path: string;
+  };
 }
 
-/** connect → run fn → always logout. */
-async function withClient<T>(
-  conn: ImapConn,
-  fn: (client: ImapFlow) => Promise<T>,
-): Promise<T> {
-  const client = makeClient(conn);
-  await client.connect();
-  try {
-    return await fn(client);
-  } finally {
-    await client.logout().catch(() => client.close());
+/**
+ * Renders an AppException into the single public error shape. INTERNAL errors
+ * never expose their (possibly sensitive) constructed message — they fall back
+ * to the curated registry message.
+ */
+export function buildEnvelope(
+  err: AppException,
+  correlationId: string,
+  path: string,
+): ErrorEnvelope {
+  const spec = ERROR_REGISTRY[err.code];
+  const message = err.kind === ErrorKind.INTERNAL ? spec.message : err.message;
+  return {
+    error: {
+      code: err.code,
+      message,
+      statusCode: spec.status,
+      details: err.details ?? null,
+      correlationId,
+      timestamp: new Date().toISOString(),
+      path,
+    },
+  };
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd api && npx jest src/infrastructure/exceptions/error-envelope.spec.ts`
+Expected: PASS (2 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add api/src/infrastructure/exceptions/error-envelope.ts api/src/infrastructure/exceptions/error-envelope.spec.ts
+git commit -m "feat(exceptions): add error envelope + builder"
+```
+
+---
+
+### Task 4: Mastra error mapper
+
+**Files:**
+- Create: `api/src/infrastructure/exceptions/mappers/mastra-error.mapper.ts`
+- Test: `api/src/infrastructure/exceptions/mappers/mastra-error.mapper.spec.ts`
+
+**Interfaces:**
+- Consumes: `AppException` (Task 2), `ErrorCode` (Task 1).
+- Produces: `function isMastraError(err: unknown): boolean`; `function mapMastraError(err: unknown): AppException`.
+
+**Note:** detection is **structural** (duck-typed on `id`/`domain`/`category`) — no import from `@mastra/core` — so it can't break if Mastra ships multiple copies of the class or renames the export path.
+
+- [ ] **Step 1: Write the failing test**
+
+`mappers/mastra-error.mapper.spec.ts`:
+```ts
+import { ErrorCode } from '../error-codes';
+import { isMastraError, mapMastraError } from './mastra-error.mapper';
+
+function mastra(domain: string, category: string, id = 'X_FAILED') {
+  return Object.assign(new Error('mastra boom'), { id, domain, category, details: { runId: 'r1' } });
+}
+
+describe('mastra-error.mapper', () => {
+  it('detects Mastra-shaped errors and ignores plain errors', () => {
+    expect(isMastraError(mastra('LLM', 'THIRD_PARTY'))).toBe(true);
+    expect(isMastraError(new Error('plain'))).toBe(false);
+    expect(isMastraError({})).toBe(false);
+  });
+
+  it.each([
+    ['USER', 'TOOL', ErrorCode.AGENT_REQUEST_INVALID],
+    ['USER', 'LLM', ErrorCode.AGENT_REQUEST_INVALID],
+    ['THIRD_PARTY', 'LLM', ErrorCode.LLM_PROVIDER_ERROR],
+    ['THIRD_PARTY', 'MODEL_ROUTER', ErrorCode.LLM_PROVIDER_ERROR],
+    ['THIRD_PARTY', 'STORAGE', ErrorCode.DEPENDENCY_UNAVAILABLE],
+    ['THIRD_PARTY', 'MASTRA_MEMORY', ErrorCode.DEPENDENCY_UNAVAILABLE],
+    ['SYSTEM', 'TOOL', ErrorCode.TOOL_EXECUTION_FAILED],
+    ['SYSTEM', 'MCP', ErrorCode.TOOL_EXECUTION_FAILED],
+    ['SYSTEM', 'AGENT', ErrorCode.AGENT_RUN_FAILED],
+    ['UNKNOWN', 'MASTRA_WORKFLOW', ErrorCode.AGENT_RUN_FAILED],
+  ])('maps category=%s domain=%s to %s', (category, domain, expected) => {
+    const err = mapMastraError(mastra(domain, category, 'BOOM_ID'));
+    expect(err.code).toBe(expected);
+    expect(err.details).toMatchObject({ runId: 'r1', mastraId: 'BOOM_ID' });
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd api && npx jest src/infrastructure/exceptions/mappers/mastra-error.mapper.spec.ts`
+Expected: FAIL — cannot find module `./mastra-error.mapper`.
+
+- [ ] **Step 3: Write `mappers/mastra-error.mapper.ts`**
+
+```ts
+import { AppException } from '../app-exception';
+import { ErrorCode } from '../error-codes';
+
+interface MastraLikeError extends Error {
+  id: string;
+  domain: string;
+  category: string;
+  details?: Record<string, unknown>;
+}
+
+export function isMastraError(err: unknown): err is MastraLikeError {
+  return (
+    err instanceof Error &&
+    typeof (err as Partial<MastraLikeError>).id === 'string' &&
+    typeof (err as Partial<MastraLikeError>).domain === 'string' &&
+    typeof (err as Partial<MastraLikeError>).category === 'string'
+  );
+}
+
+const STORAGE_DOMAINS = new Set(['STORAGE', 'MASTRA_MEMORY', 'MASTRA_VECTOR']);
+const TOOL_DOMAINS = new Set(['TOOL', 'MCP']);
+
+export function mapMastraError(err: unknown): AppException {
+  if (!isMastraError(err)) {
+    return new AppException(ErrorCode.AGENT_RUN_FAILED, { cause: err });
+  }
+  const { category, domain, id, details } = err;
+  let code: ErrorCode;
+  if (category === 'USER') {
+    code = ErrorCode.AGENT_REQUEST_INVALID;
+  } else if (category === 'THIRD_PARTY') {
+    code = STORAGE_DOMAINS.has(domain)
+      ? ErrorCode.DEPENDENCY_UNAVAILABLE
+      : ErrorCode.LLM_PROVIDER_ERROR;
+  } else {
+    code = TOOL_DOMAINS.has(domain)
+      ? ErrorCode.TOOL_EXECUTION_FAILED
+      : ErrorCode.AGENT_RUN_FAILED;
+  }
+  return new AppException(code, { details: { ...(details ?? {}), mastraId: id }, cause: err });
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd api && npx jest src/infrastructure/exceptions/mappers/mastra-error.mapper.spec.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add api/src/infrastructure/exceptions/mappers/mastra-error.mapper.ts api/src/infrastructure/exceptions/mappers/mastra-error.mapper.spec.ts
+git commit -m "feat(exceptions): add Mastra error mapper"
+```
+
+---
+
+### Task 5: Infra error mapper
+
+**Files:**
+- Create: `api/src/infrastructure/exceptions/mappers/infra-error.mapper.ts`
+- Test: `api/src/infrastructure/exceptions/mappers/infra-error.mapper.spec.ts`
+
+**Interfaces:**
+- Consumes: `AppException` (Task 2), `ErrorCode` (Task 1), `SearchEngineError` (`../../search-engine/search-engine.interface`), `NoActiveEmailConfigError` (`../../email/email.types`).
+- Produces: `function mapInfraError(err: unknown): AppException | null` (null = not a recognized infra error → caller falls back to INTERNAL_ERROR).
+
+- [ ] **Step 1: Write the failing test**
+
+`mappers/infra-error.mapper.spec.ts`:
+```ts
+import { ErrorCode } from '../error-codes';
+import { mapInfraError } from './infra-error.mapper';
+import { SearchEngineError } from '../../search-engine/search-engine.interface';
+import { NoActiveEmailConfigError } from '../../email/email.types';
+
+describe('mapInfraError', () => {
+  it('maps a Postgres unique violation to CONFLICT', () => {
+    const err = Object.assign(new Error('dup'), { code: '23505' });
+    expect(mapInfraError(err)?.code).toBe(ErrorCode.CONFLICT);
+  });
+
+  it('maps a Postgres connection-class error to DB_UNAVAILABLE', () => {
+    const err = Object.assign(new Error('down'), { code: '08006' });
+    expect(mapInfraError(err)?.code).toBe(ErrorCode.DB_UNAVAILABLE);
+  });
+
+  it('maps SearchEngineError to SEARCH_UNAVAILABLE', () => {
+    expect(mapInfraError(new SearchEngineError('meili down'))?.code).toBe(ErrorCode.SEARCH_UNAVAILABLE);
+  });
+
+  it('maps NoActiveEmailConfigError to MAIL_CONFIG_MISSING', () => {
+    expect(mapInfraError(new NoActiveEmailConfigError('IMAP'))?.code).toBe(ErrorCode.MAIL_CONFIG_MISSING);
+  });
+
+  it('maps crypto envelope failures to CRYPTO_DECRYPT_FAILED', () => {
+    expect(mapInfraError(new Error('Malformed encryption envelope.'))?.code).toBe(ErrorCode.CRYPTO_DECRYPT_FAILED);
+    expect(mapInfraError(new Error('Unsupported state or unable to authenticate data'))?.code).toBe(ErrorCode.CRYPTO_DECRYPT_FAILED);
+  });
+
+  it('maps object-not-found and network errors', () => {
+    expect(mapInfraError(Object.assign(new Error(), { code: 'NoSuchKey' }))?.code).toBe(ErrorCode.STORAGE_OBJECT_NOT_FOUND);
+    expect(mapInfraError(Object.assign(new Error(), { code: 'ECONNREFUSED' }))?.code).toBe(ErrorCode.DEPENDENCY_UNAVAILABLE);
+  });
+
+  it('returns null for unrecognized errors', () => {
+    expect(mapInfraError(new Error('mystery'))).toBeNull();
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd api && npx jest src/infrastructure/exceptions/mappers/infra-error.mapper.spec.ts`
+Expected: FAIL — cannot find module `./infra-error.mapper`.
+
+- [ ] **Step 3: Write `mappers/infra-error.mapper.ts`**
+
+```ts
+import { AppException } from '../app-exception';
+import { ErrorCode } from '../error-codes';
+import { SearchEngineError } from '../../search-engine/search-engine.interface';
+import { NoActiveEmailConfigError } from '../../email/email.types';
+
+const NETWORK_CODES = new Set(['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNRESET']);
+const REDIS_ERROR_NAMES = new Set(['MaxRetriesPerRequestError', 'ClusterAllFailedError']);
+
+/**
+ * Normalizes raw driver/SDK errors at the boundary. Returns null when the error
+ * is not a recognized infrastructure failure (the caller then falls back to
+ * INTERNAL_ERROR). Detection is deliberately conservative and heuristic; precise
+ * per-dependency attribution is a v2 concern.
+ */
+export function mapInfraError(err: unknown): AppException | null {
+  if (err instanceof SearchEngineError) {
+    return new AppException(ErrorCode.SEARCH_UNAVAILABLE, { cause: err });
+  }
+  if (err instanceof NoActiveEmailConfigError) {
+    return new AppException(ErrorCode.MAIL_CONFIG_MISSING, { cause: err });
+  }
+
+  const anyErr = err as { code?: unknown; name?: unknown };
+  const code = typeof anyErr?.code === 'string' ? anyErr.code : undefined;
+  const name = typeof anyErr?.name === 'string' ? anyErr.name : undefined;
+
+  // Postgres (pg driver SQLSTATE codes)
+  if (code === '23505') return new AppException(ErrorCode.CONFLICT, { cause: err });
+  if (code && (code.startsWith('08') || code.startsWith('53') || code.startsWith('57'))) {
+    return new AppException(ErrorCode.DB_UNAVAILABLE, { cause: err });
+  }
+
+  // Object storage (MinIO / S3)
+  if (code === 'NoSuchKey' || code === 'NotFound') {
+    return new AppException(ErrorCode.STORAGE_OBJECT_NOT_FOUND, { cause: err });
+  }
+
+  // Redis / ioredis
+  if (name && REDIS_ERROR_NAMES.has(name)) {
+    return new AppException(ErrorCode.CACHE_UNAVAILABLE, { cause: err });
+  }
+
+  // Crypto (AES-GCM)
+  if (err instanceof Error &&
+      (/Malformed encryption envelope/i.test(err.message) ||
+       /unable to authenticate data/i.test(err.message))) {
+    return new AppException(ErrorCode.CRYPTO_DECRYPT_FAILED, { cause: err });
+  }
+
+  // Generic network failure to a backing service
+  if (code && NETWORK_CODES.has(code)) {
+    return new AppException(ErrorCode.DEPENDENCY_UNAVAILABLE, { cause: err });
+  }
+
+  return null;
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd api && npx jest src/infrastructure/exceptions/mappers/infra-error.mapper.spec.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add api/src/infrastructure/exceptions/mappers/infra-error.mapper.ts api/src/infrastructure/exceptions/mappers/infra-error.mapper.spec.ts
+git commit -m "feat(exceptions): add infra error mapper"
+```
+
+---
+
+### Task 6: `ExceptionService`
+
+**Files:**
+- Create: `api/src/infrastructure/exceptions/exception.service.ts`
+- Test: `api/src/infrastructure/exceptions/exception.service.spec.ts`
+
+**Interfaces:**
+- Consumes: everything from Tasks 1–5.
+- Produces: `@Injectable() class ExceptionService` with:
+  - `create(code: ErrorCode, opts?: { message?: string; details?: unknown; cause?: unknown }): AppException`
+  - `validation(issues: Array<{ path: string; message: string }>, opts?: { message?: string }): AppException`
+  - `from(err: unknown): AppException`
+
+- [ ] **Step 1: Write the failing test**
+
+`exception.service.spec.ts`:
+```ts
+import { BadRequestException, NotFoundException, HttpException } from '@nestjs/common';
+import { ZodError, z } from 'zod';
+import { AppException } from './app-exception';
+import { ErrorCode } from './error-codes';
+import { ExceptionService } from './exception.service';
+
+describe('ExceptionService', () => {
+  const svc = new ExceptionService();
+
+  it('create() builds an AppException from a code', () => {
+    const err = svc.create(ErrorCode.USER_NOT_FOUND);
+    expect(err).toBeInstanceOf(AppException);
+    expect(err.getStatus()).toBe(404);
+  });
+
+  it('validation() shapes details.issues', () => {
+    const err = svc.validation([{ path: 'email', message: 'required' }]);
+    expect(err.code).toBe(ErrorCode.VALIDATION_FAILED);
+    expect(err.details).toEqual({ issues: [{ path: 'email', message: 'required' }] });
+  });
+
+  describe('from()', () => {
+    it('passes an AppException through unchanged', () => {
+      const orig = svc.create(ErrorCode.USER_NOT_FOUND);
+      expect(svc.from(orig)).toBe(orig);
+    });
+
+    it('maps a Nest HttpException by status', () => {
+      expect(svc.from(new NotFoundException('nope')).code).toBe(ErrorCode.NOT_FOUND);
+    });
+
+    it('maps a zod-pipe validation body to VALIDATION_FAILED with issues', () => {
+      const body = { message: 'Validation failed', issues: [{ path: 'a', message: 'bad' }] };
+      const mapped = svc.from(new BadRequestException(body));
+      expect(mapped.code).toBe(ErrorCode.VALIDATION_FAILED);
+      expect(mapped.details).toEqual({ issues: [{ path: 'a', message: 'bad' }] });
+    });
+
+    it('maps a ZodError to VALIDATION_FAILED', () => {
+      let zerr: ZodError;
+      try { z.object({ a: z.string() }).parse({}); } catch (e) { zerr = e as ZodError; }
+      const mapped = svc.from(zerr!);
+      expect(mapped.code).toBe(ErrorCode.VALIDATION_FAILED);
+      expect(Array.isArray((mapped.details as any).issues)).toBe(true);
+    });
+
+    it('maps a Mastra-shaped error', () => {
+      const m = Object.assign(new Error('x'), { id: 'I', domain: 'LLM', category: 'THIRD_PARTY' });
+      expect(svc.from(m).code).toBe(ErrorCode.LLM_PROVIDER_ERROR);
+    });
+
+    it('maps a pg unique violation to CONFLICT', () => {
+      expect(svc.from(Object.assign(new Error(), { code: '23505' })).code).toBe(ErrorCode.CONFLICT);
+    });
+
+    it('falls back to INTERNAL_ERROR for unknown errors, keeping the cause', () => {
+      const raw = new Error('mystery');
+      const mapped = svc.from(raw);
+      expect(mapped.code).toBe(ErrorCode.INTERNAL_ERROR);
+      expect(mapped.cause).toBe(raw);
+    });
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd api && npx jest src/infrastructure/exceptions/exception.service.spec.ts`
+Expected: FAIL — cannot find module `./exception.service`.
+
+- [ ] **Step 3: Write `exception.service.ts`**
+
+```ts
+import { HttpException, Injectable } from '@nestjs/common';
+import { ZodError } from 'zod';
+import { AppException, AppExceptionOptions } from './app-exception';
+import { ErrorCode } from './error-codes';
+import { STATUS_TO_CODE } from './error-registry';
+import { isMastraError, mapMastraError } from './mappers/mastra-error.mapper';
+import { mapInfraError } from './mappers/infra-error.mapper';
+
+export interface ValidationIssue {
+  path: string;
+  message: string;
+}
+
+@Injectable()
+export class ExceptionService {
+  /** Build an AppException from any registered code. Caller writes `throw`. */
+  create(code: ErrorCode, opts?: AppExceptionOptions): AppException {
+    return new AppException(code, opts);
+  }
+
+  /** Build a VALIDATION_FAILED error with the standard `{ issues }` details shape. */
+  validation(issues: ValidationIssue[], opts?: { message?: string }): AppException {
+    return new AppException(ErrorCode.VALIDATION_FAILED, {
+      message: opts?.message,
+      details: { issues },
+    });
+  }
+
+  /** Normalize ANY thrown value into an AppException. The filter's mapping brain. */
+  from(err: unknown): AppException {
+    if (err instanceof AppException) return err;
+    if (err instanceof HttpException) return this.fromHttpException(err);
+    if (err instanceof ZodError) {
+      return this.validation(
+        err.issues.map((i) => ({
+          path: i.path.join('.') || '(root)',
+          message: i.message,
+        })),
+      );
+    }
+    if (isMastraError(err)) return mapMastraError(err);
+    const infra = mapInfraError(err);
+    if (infra) return infra;
+    return new AppException(ErrorCode.INTERNAL_ERROR, { cause: err });
+  }
+
+  private fromHttpException(err: HttpException): AppException {
+    const status = err.getStatus();
+    const res = err.getResponse();
+    const body: Record<string, unknown> =
+      typeof res === 'object' && res !== null
+        ? (res as Record<string, unknown>)
+        : { message: res };
+
+    // The Zod validation pipe throws BadRequest with an `issues` array.
+    if (status === 400 && Array.isArray(body.issues)) {
+      return new AppException(ErrorCode.VALIDATION_FAILED, {
+        details: { issues: body.issues },
+        cause: err,
+      });
+    }
+
+    const code = STATUS_TO_CODE[status] ?? ErrorCode.INTERNAL_ERROR;
+    const message = typeof body.message === 'string' ? body.message : undefined;
+    return new AppException(code, { message, cause: err });
   }
 }
+```
 
-/** connect + login smoke test. Throws on failure. */
-export async function verifyImap(conn: ImapConn): Promise<void> {
-  await withClient(conn, async () => undefined);
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd api && npx jest src/infrastructure/exceptions/exception.service.spec.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add api/src/infrastructure/exceptions/exception.service.ts api/src/infrastructure/exceptions/exception.service.spec.ts
+git commit -m "feat(exceptions): add ExceptionService (create/validation/from)"
+```
+
+---
+
+### Task 7: `GlobalExceptionFilter`
+
+**Files:**
+- Create: `api/src/infrastructure/exceptions/global-exception.filter.ts`
+- Test: `api/src/infrastructure/exceptions/global-exception.filter.spec.ts`
+
+**Interfaces:**
+- Consumes: `ExceptionService` (Task 6), `buildEnvelope` (Task 3), `ErrorKind` (Task 1), `PinoLogger` (`nestjs-pino`), `Sentry` (`@sentry/nestjs`).
+- Produces: `@Catch() class GlobalExceptionFilter implements ExceptionFilter` with `catch(exception, host)`.
+
+- [ ] **Step 1: Write the failing test**
+
+`global-exception.filter.spec.ts`:
+```ts
+import { ArgumentsHost } from '@nestjs/common';
+import * as Sentry from '@sentry/nestjs';
+import { ExceptionService } from './exception.service';
+import { ErrorCode } from './error-codes';
+import { GlobalExceptionFilter } from './global-exception.filter';
+
+jest.mock('@sentry/nestjs', () => ({ captureException: jest.fn() }));
+
+function hostFor(url = '/x', id = 'req-1') {
+  const json = jest.fn();
+  const status = jest.fn(() => ({ json }));
+  const host = {
+    switchToHttp: () => ({
+      getRequest: () => ({ id, url }),
+      getResponse: () => ({ status }),
+    }),
+  } as unknown as ArgumentsHost;
+  return { host, status, json };
 }
 
-export async function listMessages(
-  conn: ImapConn,
-  opts?: { mailbox?: string; limit?: number; unseenOnly?: boolean },
-): Promise<MailboxSummary[]> {
-  const mailbox = opts?.mailbox ?? 'INBOX';
-  const limit = opts?.limit ?? 50;
-  return withClient(conn, async (client) => {
-    const lock = await client.getMailboxLock(mailbox);
+describe('GlobalExceptionFilter', () => {
+  const logger = { debug: jest.fn(), error: jest.fn() } as any;
+  const filter = new GlobalExceptionFilter(new ExceptionService(), logger);
+  beforeEach(() => jest.clearAllMocks());
+
+  it('writes the envelope with the mapped status for a CLIENT error (no Sentry)', () => {
+    const { host, status, json } = hostFor('/users/1');
+    filter.catch(new (require('@nestjs/common').NotFoundException)('nf'), host);
+    expect(status).toHaveBeenCalledWith(404);
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({ error: expect.objectContaining({ code: ErrorCode.NOT_FOUND, statusCode: 404 }) }),
+    );
+    expect(Sentry.captureException).not.toHaveBeenCalled();
+    expect(logger.debug).toHaveBeenCalled();
+  });
+
+  it('reports INTERNAL errors to Sentry and hides the raw message', () => {
+    const { host, status, json } = hostFor('/chat');
+    filter.catch(new Error('secret stack'), host);
+    expect(status).toHaveBeenCalledWith(500);
+    const env = json.mock.calls[0][0];
+    expect(env.error.code).toBe(ErrorCode.INTERNAL_ERROR);
+    expect(env.error.message).not.toContain('secret');
+    expect(Sentry.captureException).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalled();
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd api && npx jest src/infrastructure/exceptions/global-exception.filter.spec.ts`
+Expected: FAIL — cannot find module `./global-exception.filter`.
+
+- [ ] **Step 3: Write `global-exception.filter.ts`**
+
+```ts
+import { ArgumentsHost, Catch, ExceptionFilter } from '@nestjs/common';
+import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
+import * as Sentry from '@sentry/nestjs';
+import { ExceptionService } from './exception.service';
+import { ErrorKind } from './error-codes';
+import { buildEnvelope } from './error-envelope';
+
+interface RequestLike { id?: string; url?: string }
+interface ResponseLike { status(code: number): { json(body: unknown): unknown } }
+
+@Catch()
+export class GlobalExceptionFilter implements ExceptionFilter {
+  constructor(
+    private readonly errors: ExceptionService,
+    @InjectPinoLogger(GlobalExceptionFilter.name) private readonly logger: PinoLogger,
+  ) {}
+
+  catch(exception: unknown, host: ArgumentsHost): void {
+    const http = host.switchToHttp();
+    const req = http.getRequest<RequestLike>();
+    const res = http.getResponse<ResponseLike>();
+
+    const appErr = this.errors.from(exception);
+    const correlationId = req.id ?? '-';
+    const envelope = buildEnvelope(appErr, correlationId, req.url ?? '');
+
+    if (appErr.kind === ErrorKind.CLIENT) {
+      this.logger.debug({ code: appErr.code, correlationId }, appErr.message);
+    } else {
+      this.logger.error({ err: exception, code: appErr.code, correlationId }, appErr.message);
+      Sentry.captureException(appErr.cause ?? exception, {
+        tags: { code: appErr.code, correlationId },
+      });
+    }
+
+    res.status(envelope.error.statusCode).json(envelope);
+  }
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd api && npx jest src/infrastructure/exceptions/global-exception.filter.spec.ts`
+Expected: PASS (2 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add api/src/infrastructure/exceptions/global-exception.filter.ts api/src/infrastructure/exceptions/global-exception.filter.spec.ts
+git commit -m "feat(exceptions): add GlobalExceptionFilter"
+```
+
+---
+
+### Task 8: Module, barrel, and app wiring
+
+**Files:**
+- Create: `api/src/infrastructure/exceptions/exceptions.module.ts`
+- Create: `api/src/infrastructure/exceptions/index.ts`
+- Modify: `api/src/app.module.ts`
+- Modify: `api/src/infrastructure/observability/sentry.module.ts`
+
+**Interfaces:**
+- Consumes: `ExceptionService` (Task 6), `GlobalExceptionFilter` (Task 7).
+- Produces: `@Global() class ExceptionsModule` (provides `ExceptionService` + `APP_FILTER`, exports `ExceptionService`); barrel `index.ts` re-exporting `ErrorCode`, `ErrorKind`, `AppException`, `ExceptionService`, `ErrorEnvelope`.
+
+- [ ] **Step 1: Write `exceptions.module.ts`**
+
+```ts
+import { Global, Module } from '@nestjs/common';
+import { APP_FILTER } from '@nestjs/core';
+import { ExceptionService } from './exception.service';
+import { GlobalExceptionFilter } from './global-exception.filter';
+
+/**
+ * Global exception handling. Provides the injectable throw API (ExceptionService)
+ * everywhere, and registers the single global filter that normalizes every error
+ * into the standard envelope.
+ */
+@Global()
+@Module({
+  providers: [
+    ExceptionService,
+    { provide: APP_FILTER, useClass: GlobalExceptionFilter },
+  ],
+  exports: [ExceptionService],
+})
+export class ExceptionsModule {}
+```
+
+- [ ] **Step 2: Write `index.ts` barrel**
+
+```ts
+export { ErrorCode, ErrorKind } from './error-codes';
+export { AppException } from './app-exception';
+export type { AppExceptionOptions } from './app-exception';
+export { ExceptionService } from './exception.service';
+export type { ValidationIssue } from './exception.service';
+export type { ErrorEnvelope } from './error-envelope';
+export { ExceptionsModule } from './exceptions.module';
+```
+
+- [ ] **Step 3: Remove `SentryGlobalFilter` from `sentry.module.ts`**
+
+Replace the whole file with (keeps Sentry SDK setup, drops the filter — our filter now owns capture):
+```ts
+import { Module } from '@nestjs/common';
+import { SentryModule as SentryCoreModule } from '@sentry/nestjs/setup';
+
+/**
+ * Wires Sentry into the Nest request lifecycle.
+ *
+ * `SentryModule.forRoot()` is imported from `@sentry/nestjs/setup` (NOT the
+ * package root) so `@nestjs/common` is loaded after OpenTelemetry patches it.
+ * The actual `Sentry.init()` lives in `src/instrument.ts`.
+ *
+ * Error reporting to Sentry is owned by `GlobalExceptionFilter`
+ * (`infrastructure/exceptions`), which captures DEPENDENCY/INTERNAL errors with
+ * `code` + `correlationId` tags — so no `SentryGlobalFilter` is registered here.
+ */
+@Module({
+  imports: [SentryCoreModule.forRoot()],
+})
+export class ObservabilityModule {}
+```
+
+- [ ] **Step 4: Import `ExceptionsModule` in `app.module.ts`**
+
+Add the import line near the other infrastructure imports:
+```ts
+import { ExceptionsModule } from './infrastructure/exceptions';
+```
+Add `ExceptionsModule` to the `imports` array immediately after `LoggerModule` (so the filter can inject `PinoLogger`):
+```ts
+    LoggerModule,
+    ExceptionsModule,
+    DatabaseModule,
+```
+
+- [ ] **Step 5: Build to verify wiring compiles**
+
+Run: `cd api && npm run build`
+Expected: build succeeds (no TS errors).
+
+- [ ] **Step 6: Run the full module test suite**
+
+Run: `cd api && npx jest src/infrastructure/exceptions`
+Expected: all exception-module specs PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add api/src/infrastructure/exceptions/exceptions.module.ts api/src/infrastructure/exceptions/index.ts api/src/app.module.ts api/src/infrastructure/observability/sentry.module.ts
+git commit -m "feat(exceptions): register global module, take over Sentry capture"
+```
+
+---
+
+## PHASE 2 — Migrate call sites
+
+**Migration recipe (applies to every Task 9–16):**
+1. Add `import { ErrorCode } from '../../infrastructure/exceptions';` (adjust depth) and inject `private readonly errors: ExceptionService` into the service constructor. Remove now-unused `@nestjs/common` exception imports.
+2. Replace each `throw new XxxException(msg)` per the task's table. Where the original message differs from the registry default, pass `{ message: '<original>' }` to preserve behavior.
+3. Update the co-located `.spec.ts`: pass `new ExceptionService()` as the new constructor arg, and change assertions from `.toThrow(XxxException)` to code/status checks (pattern below).
+4. Run the module's specs; then commit.
+
+**Spec assertion pattern** (replaces `rejects.toThrow(NotFoundException)`):
+```ts
+import { AppException, ErrorCode } from '../../infrastructure/exceptions';
+await expect(service.doThing()).rejects.toMatchObject({
+  code: ErrorCode.USER_NOT_FOUND,
+});
+// or, to assert status:
+await expect(service.doThing()).rejects.toSatisfy(
+  (e: AppException) => e.getStatus() === 404,
+);
+```
+(If `toSatisfy` is unavailable, wrap in try/catch and assert on the caught `AppException`.)
+
+---
+
+### Task 9: Standardize the Zod validation pipe
+
+**Files:**
+- Modify: `api/src/common/pipes/zod-validation.pipe.ts`
+- Test: `api/src/common/pipes/zod-validation.pipe.spec.ts` (create if absent)
+
+The pipe is constructed via `new` (not DI), so it throws `AppException` directly.
+
+- [ ] **Step 1: Write/adjust the failing test**
+
+`zod-validation.pipe.spec.ts`:
+```ts
+import { z } from 'zod';
+import { AppException, ErrorCode } from '../../infrastructure/exceptions';
+import { ZodValidationPipe } from './zod-validation.pipe';
+
+describe('ZodValidationPipe', () => {
+  const pipe = new ZodValidationPipe(z.object({ email: z.string().email() }));
+
+  it('passes valid input through', () => {
+    expect(pipe.transform({ email: 'a@b.co' })).toEqual({ email: 'a@b.co' });
+  });
+
+  it('throws an AppException(VALIDATION_FAILED) with issues on invalid input', () => {
     try {
-      const range = opts?.unseenOnly ? { seen: false } : '1:*';
-      const out: MailboxSummary[] = [];
-      for await (const msg of client.fetch(range, {
-        uid: true,
-        envelope: true,
-        flags: true,
-      })) {
-        out.push({
-          uid: msg.uid,
-          from: msg.envelope?.from?.[0]?.address ?? '',
-          subject: msg.envelope?.subject ?? '',
-          date: msg.envelope?.date ?? new Date(0),
-          seen: msg.flags?.has('\\Seen') ?? false,
+      pipe.transform({ email: 'nope' });
+      fail('should have thrown');
+    } catch (e) {
+      expect(e).toBeInstanceOf(AppException);
+      expect((e as AppException).code).toBe(ErrorCode.VALIDATION_FAILED);
+      expect((e as AppException).details).toHaveProperty('issues');
+    }
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd api && npx jest src/common/pipes/zod-validation.pipe.spec.ts`
+Expected: FAIL (still throws `BadRequestException`, not `AppException`).
+
+- [ ] **Step 3: Rewrite the pipe's catch block**
+
+Replace the `@nestjs/common` `BadRequestException` import and the `catch` body:
+```ts
+import { Injectable, type PipeTransform } from '@nestjs/common';
+import { z, ZodError, type ZodType } from 'zod';
+import { AppException, ErrorCode } from '../../infrastructure/exceptions';
+
+@Injectable()
+export class ZodValidationPipe<S extends ZodType> implements PipeTransform<unknown, z.infer<S>> {
+  constructor(private readonly schema: S) {}
+
+  transform(value: unknown): z.infer<S> {
+    try {
+      return this.schema.parse(value) as z.infer<S>;
+    } catch (error) {
+      if (error instanceof ZodError) {
+        throw new AppException(ErrorCode.VALIDATION_FAILED, {
+          details: {
+            issues: error.issues.map((issue) => ({
+              path: issue.path.join('.') || '(root)',
+              message: issue.message,
+            })),
+          },
         });
       }
-      // Newest last from the server; return newest first, capped at `limit`.
-      return out.slice(-limit).reverse();
-    } finally {
-      lock.release();
+      throw error;
     }
-  });
-}
-
-export async function fetchMessage(
-  conn: ImapConn,
-  uid: number,
-  mailbox = 'INBOX',
-): Promise<ParsedMessage | null> {
-  return withClient(conn, async (client) => {
-    const lock = await client.getMailboxLock(mailbox);
-    try {
-      const msg = await client.fetchOne(
-        uid,
-        { uid: true, source: true, flags: true },
-        { uid: true },
-      );
-      if (!msg || !msg.source) return null;
-      const parsed = await simpleParser(msg.source);
-      return {
-        uid,
-        from: parsed.from?.value?.[0]?.address ?? '',
-        to: typeof parsed.to?.text === 'string' ? parsed.to.text : '',
-        subject: parsed.subject ?? '',
-        date: parsed.date ?? new Date(0),
-        seen: msg.flags?.has('\\Seen') ?? false,
-        text: parsed.text ?? '',
-        html: typeof parsed.html === 'string' ? parsed.html : null,
-        attachments: (parsed.attachments ?? []).map((a) => ({
-          filename: a.filename ?? null,
-          contentType: a.contentType,
-          size: a.size,
-        })),
-      };
-    } finally {
-      lock.release();
-    }
-  });
-}
-
-export async function setSeen(
-  conn: ImapConn,
-  uid: number,
-  value: boolean,
-  mailbox = 'INBOX',
-): Promise<void> {
-  await withClient(conn, async (client) => {
-    const lock = await client.getMailboxLock(mailbox);
-    try {
-      if (value) {
-        await client.messageFlagsAdd(uid, ['\\Seen'], { uid: true });
-      } else {
-        await client.messageFlagsRemove(uid, ['\\Seen'], { uid: true });
-      }
-    } finally {
-      lock.release();
-    }
-  });
+  }
 }
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pnpm test -- imap.transport`
-Expected: PASS (6 tests).
-
-- [ ] **Step 5: Typecheck**
-
-Run: `pnpm typecheck`
-Expected: no type errors. If the installed `imapflow`/`mailparser` typings differ (e.g. `client.fetch` range union, `parsed.to` array vs object), adjust the mapping to match the real types — keep the returned `MailboxSummary`/`ParsedMessage` shape identical.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/infrastructure/email/transport/imap.transport.ts src/infrastructure/email/transport/imap.transport.spec.ts
-git commit -m "feat(email): add IMAP transport (verify, list, fetch+parse, flags)"
-```
-
-## Task 4: EmailConfigRepository
-
-Read-only resolution of the single active SMTP/IMAP row → decrypted `SmtpConn`/`ImapConn`. Reads the shared schema tables directly (no `system` feature dependency).
-
-**Files:**
-- Create: `src/infrastructure/email/email-config.repository.ts`
-- Test: `src/infrastructure/email/email-config.repository.spec.ts`
-
-**Interfaces:**
-- Consumes: `DRIZZLE`/`DrizzleDB`, `EncryptionService`, `smtpConfigs`/`imapConfigs` tables, `SmtpConn`/`ImapConn`.
-- Produces:
-  - `EmailConfigRepository.activeSmtp(): Promise<SmtpConn | null>`
-  - `EmailConfigRepository.activeImap(): Promise<ImapConn | null>`
-
-- [ ] **Step 1: Write the failing test**
-
-Create `src/infrastructure/email/email-config.repository.spec.ts`:
-
-```ts
-import { EmailConfigRepository } from './email-config.repository';
-
-function makeDb(row: any) {
-  // Chainable select().from().where().limit() -> [row?]
-  const chain = {
-    from: jest.fn(() => chain),
-    where: jest.fn(() => chain),
-    limit: jest.fn(async () => (row ? [row] : [])),
-  };
-  return { select: jest.fn(() => chain) } as any;
-}
-
-const crypto = { decrypt: jest.fn(() => 'decrypted-pass'), encrypt: jest.fn() } as any;
-
-describe('EmailConfigRepository', () => {
-  beforeEach(() => crypto.decrypt.mockClear());
-
-  it('activeSmtp resolves + decrypts the active row', async () => {
-    const db = makeDb({
-      host: 'smtp.example.com',
-      port: 587,
-      secure: true,
-      username: 'mailer',
-      secretEnc: 'v1.enc',
-      fromAddress: 'no-reply@example.com',
-      fromName: 'Cyber',
-    });
-    const repo = new EmailConfigRepository(db, crypto);
-    const conn = await repo.activeSmtp();
-    expect(crypto.decrypt).toHaveBeenCalledWith('v1.enc');
-    expect(conn).toEqual({
-      host: 'smtp.example.com',
-      port: 587,
-      secure: true,
-      username: 'mailer',
-      password: 'decrypted-pass',
-      fromAddress: 'no-reply@example.com',
-      fromName: 'Cyber',
-    });
-  });
-
-  it('activeSmtp returns null when there is no active row', async () => {
-    const repo = new EmailConfigRepository(makeDb(null), crypto);
-    expect(await repo.activeSmtp()).toBeNull();
-    expect(crypto.decrypt).not.toHaveBeenCalled();
-  });
-
-  it('activeImap returns null password when the row has no secret', async () => {
-    const db = makeDb({
-      host: 'imap.example.com',
-      port: 993,
-      secure: true,
-      username: 'user',
-      secretEnc: null,
-    });
-    const repo = new EmailConfigRepository(db, crypto);
-    const conn = await repo.activeImap();
-    expect(conn).toEqual({
-      host: 'imap.example.com',
-      port: 993,
-      secure: true,
-      username: 'user',
-      password: null,
-    });
-    expect(crypto.decrypt).not.toHaveBeenCalled();
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pnpm test -- email-config.repository`
-Expected: FAIL — `Cannot find module './email-config.repository'`.
-
-- [ ] **Step 3: Implement the repository**
-
-Create `src/infrastructure/email/email-config.repository.ts`:
-
-```ts
-import { Inject, Injectable } from '@nestjs/common';
-import { and, eq } from 'drizzle-orm';
-import {
-  DRIZZLE,
-  type DrizzleDB,
-} from '../database/drizzle.constants';
-import {
-  imapConfigs,
-  smtpConfigs,
-} from '../database/schema/system.schema';
-import { EncryptionService } from '../crypto/encryption.service';
-import type { ImapConn, SmtpConn } from './email.types';
-
-/**
- * Read-only resolver for the single active SMTP/IMAP profile. The write side
- * (CRUD) lives in the `system` feature; this reads the same tables for the
- * transport layer. Kept here so the email module never imports `system`.
- */
-@Injectable()
-export class EmailConfigRepository {
-  constructor(
-    @Inject(DRIZZLE) private readonly db: DrizzleDB,
-    private readonly crypto: EncryptionService,
-  ) {}
-
-  async activeSmtp(): Promise<SmtpConn | null> {
-    const rows = await this.db
-      .select()
-      .from(smtpConfigs)
-      .where(
-        and(eq(smtpConfigs.isActive, true), eq(smtpConfigs.isDeleted, false)),
-      )
-      .limit(1);
-    const row = rows[0];
-    if (!row) return null;
-    return {
-      host: row.host,
-      port: row.port,
-      secure: row.secure,
-      username: row.username ?? null,
-      password: row.secretEnc ? this.crypto.decrypt(row.secretEnc) : null,
-      fromAddress: row.fromAddress,
-      fromName: row.fromName ?? null,
-    };
-  }
-
-  async activeImap(): Promise<ImapConn | null> {
-    const rows = await this.db
-      .select()
-      .from(imapConfigs)
-      .where(
-        and(eq(imapConfigs.isActive, true), eq(imapConfigs.isDeleted, false)),
-      )
-      .limit(1);
-    const row = rows[0];
-    if (!row) return null;
-    return {
-      host: row.host,
-      port: row.port,
-      secure: row.secure,
-      username: row.username ?? null,
-      password: row.secretEnc ? this.crypto.decrypt(row.secretEnc) : null,
-    };
-  }
-}
-```
-
-- [ ] **Step 4: Run test + typecheck to verify they pass**
-
-Run: `pnpm test -- email-config.repository && pnpm typecheck`
-Expected: PASS (3 tests) and no type errors.
+Run: `cd api && npx jest src/common/pipes/zod-validation.pipe.spec.ts`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/infrastructure/email/email-config.repository.ts src/infrastructure/email/email-config.repository.spec.ts
-git commit -m "feat(email): add active SMTP/IMAP config resolver"
+git add api/src/common/pipes/zod-validation.pipe.ts api/src/common/pipes/zod-validation.pipe.spec.ts
+git commit -m "refactor(validation): zod pipe throws AppException(VALIDATION_FAILED)"
 ```
 
 ---
 
-## Task 5: MailerService + InboxService + module wiring
-
-The two high-level services: resolve the active config, then delegate to transport. Wire them into `EmailModule`.
+### Task 10: Migrate the auth module
 
 **Files:**
-- Create: `src/infrastructure/email/mailer.service.ts`
-- Create: `src/infrastructure/email/inbox.service.ts`
-- Modify: `src/infrastructure/email/email.module.ts` (register + export both)
-- Test: `src/infrastructure/email/mailer.service.spec.ts`
-- Test: `src/infrastructure/email/inbox.service.spec.ts`
+- Modify: `api/src/features/auth/auth.service.ts`, `password-reset.service.ts`, `service-credential.service.ts` (+ their `.spec.ts`)
 
-**Interfaces:**
-- Consumes: `EmailConfigRepository` (Task 4), the transport functions (Tasks 2–3), `EmailMessage`, `MailboxSummary`, `ParsedMessage`, `NoActiveEmailConfigError`.
-- Produces:
-  - `MailerService.send(msg: EmailMessage): Promise<void>` (throws `NoActiveEmailConfigError` if no active SMTP)
-  - `MailerService.verifyActive(): Promise<void>`
-  - `InboxService.list(opts?): Promise<MailboxSummary[]>`
-  - `InboxService.fetch(uid, mailbox?): Promise<ParsedMessage | null>`
-  - `InboxService.markSeen(uid, mailbox?): Promise<void>` / `markUnseen(...)`
-  - `InboxService.verifyActive(): Promise<void>`
+**Replacement table:**
 
-- [ ] **Step 1: Write the failing tests**
+| File:line | Old | New (code) | Message override? |
+|---|---|---|---|
+| auth.service.ts:36 | `UnauthorizedException('Invalid credentials')` | `AUTH_INVALID_CREDENTIALS` | no (default matches) |
+| auth.service.ts:42 | `UnauthorizedException('Invalid credentials')` | `AUTH_INVALID_CREDENTIALS` | no |
+| auth.service.ts:56 | `UnauthorizedException('Invalid refresh token')` | `AUTH_TOKEN_INVALID` | no |
+| auth.service.ts:61 | `UnauthorizedException('Refresh token reuse detected')` | `AUTH_TOKEN_REUSE` | no |
+| auth.service.ts:64 | `UnauthorizedException('Refresh token expired')` | `AUTH_TOKEN_EXPIRED` | no |
+| auth.service.ts:68 | `UnauthorizedException('Invalid refresh token')` | `AUTH_TOKEN_INVALID` | no |
+| auth.service.ts:94 | `UnauthorizedException('Current password is incorrect')` | `AUTH_INVALID_CREDENTIALS` | **yes**: `{ message: 'Current password is incorrect' }` |
+| password-reset.service.ts (fail helper) | `UnauthorizedException('Invalid or expired reset code')` | `AUTH_RESET_CODE_INVALID` | no |
+| service-credential.service.ts:61 | `UnauthorizedException('Invalid service credential')` | `AUTH_SERVICE_CREDENTIAL_INVALID` | no |
 
-Create `src/infrastructure/email/mailer.service.spec.ts`:
-
+- [ ] **Step 1:** Update `auth.service.spec.ts`, `password-reset.service.spec.ts`, `service-credential.service.spec.ts` — inject `new ExceptionService()`; convert `toThrow(UnauthorizedException)` assertions to `toMatchObject({ code: ErrorCode.AUTH_... })` (use the codes above). Run them to confirm they FAIL.
+   Run: `cd api && npx jest src/features/auth`
+- [ ] **Step 2:** Apply the migration recipe + replacement table to the three service files. Example (auth.service.ts constructor + one throw):
 ```ts
-const sendMail = jest.fn(async () => undefined);
-const verifySmtp = jest.fn(async () => undefined);
-jest.mock('./transport/smtp.transport', () => ({ sendMail, verifySmtp }));
-
-import { MailerService } from './mailer.service';
-import { NoActiveEmailConfigError } from './email.types';
-
-const conn = {
-  host: 'h', port: 587, secure: true, username: 'u', password: 'p',
-  fromAddress: 'no-reply@x.com', fromName: null,
-};
-
-describe('MailerService', () => {
-  let repo: any;
-  let service: MailerService;
-
-  beforeEach(() => {
-    sendMail.mockClear();
-    verifySmtp.mockClear();
-    repo = { activeSmtp: jest.fn(async () => conn), activeImap: jest.fn() };
-    service = new MailerService(repo);
-  });
-
-  it('send resolves the active config and delegates to transport', async () => {
-    const msg = { to: 'a@x.com', subject: 'Hi', text: 'body' };
-    await service.send(msg);
-    expect(repo.activeSmtp).toHaveBeenCalled();
-    expect(sendMail).toHaveBeenCalledWith(conn, msg);
-  });
-
-  it('send throws NoActiveEmailConfigError when none is active', async () => {
-    repo.activeSmtp.mockResolvedValueOnce(null);
-    await expect(
-      service.send({ to: 'a@x.com', subject: 'Hi', text: 'body' }),
-    ).rejects.toBeInstanceOf(NoActiveEmailConfigError);
-    expect(sendMail).not.toHaveBeenCalled();
-  });
-
-  it('verifyActive delegates to verifySmtp', async () => {
-    await service.verifyActive();
-    expect(verifySmtp).toHaveBeenCalledWith(conn);
-  });
-});
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
+// constructor: add `private readonly errors: ExceptionService,`
+// site :61
+throw this.errors.create(ErrorCode.AUTH_TOKEN_REUSE);
 ```
-
-Create `src/infrastructure/email/inbox.service.spec.ts`:
-
-```ts
-const verifyImap = jest.fn(async () => undefined);
-const listMessages = jest.fn(async () => []);
-const fetchMessage = jest.fn(async () => null);
-const setSeen = jest.fn(async () => undefined);
-jest.mock('./transport/imap.transport', () => ({
-  verifyImap, listMessages, fetchMessage, setSeen,
-}));
-
-import { InboxService } from './inbox.service';
-import { NoActiveEmailConfigError } from './email.types';
-
-const conn = { host: 'h', port: 993, secure: true, username: 'u', password: 'p' };
-
-describe('InboxService', () => {
-  let repo: any;
-  let service: InboxService;
-
-  beforeEach(() => {
-    verifyImap.mockClear();
-    listMessages.mockClear();
-    fetchMessage.mockClear();
-    setSeen.mockClear();
-    repo = { activeImap: jest.fn(async () => conn), activeSmtp: jest.fn() };
-    service = new InboxService(repo);
-  });
-
-  it('list resolves the active config and delegates', async () => {
-    await service.list({ limit: 10 });
-    expect(listMessages).toHaveBeenCalledWith(conn, { limit: 10 });
-  });
-
-  it('throws NoActiveEmailConfigError when no active IMAP config', async () => {
-    repo.activeImap.mockResolvedValueOnce(null);
-    await expect(service.list()).rejects.toBeInstanceOf(NoActiveEmailConfigError);
-  });
-
-  it('markSeen delegates with value true, markUnseen with false', async () => {
-    await service.markSeen(5);
-    expect(setSeen).toHaveBeenCalledWith(conn, 5, true, undefined);
-    await service.markUnseen(5);
-    expect(setSeen).toHaveBeenCalledWith(conn, 5, false, undefined);
-  });
-
-  it('fetch delegates the uid + mailbox', async () => {
-    await service.fetch(9, 'Archive');
-    expect(fetchMessage).toHaveBeenCalledWith(conn, 9, 'Archive');
-  });
-});
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `pnpm test -- mailer.service inbox.service`
-Expected: FAIL — `Cannot find module './mailer.service'` / `'./inbox.service'`.
-
-- [ ] **Step 3: Implement MailerService**
-
-Create `src/infrastructure/email/mailer.service.ts`:
-
-```ts
-import { Injectable } from '@nestjs/common';
-import { EmailConfigRepository } from './email-config.repository';
-import { NoActiveEmailConfigError, type EmailMessage } from './email.types';
-import { sendMail, verifySmtp } from './transport/smtp.transport';
-
-/** The single outbound-mail seam for the app. Sends via the active SMTP config. */
-@Injectable()
-export class MailerService {
-  constructor(private readonly config: EmailConfigRepository) {}
-
-  async send(msg: EmailMessage): Promise<void> {
-    const conn = await this.config.activeSmtp();
-    if (!conn) throw new NoActiveEmailConfigError('SMTP');
-    await sendMail(conn, msg);
-  }
-
-  async verifyActive(): Promise<void> {
-    const conn = await this.config.activeSmtp();
-    if (!conn) throw new NoActiveEmailConfigError('SMTP');
-    await verifySmtp(conn);
-  }
-}
-```
-
-- [ ] **Step 4: Implement InboxService**
-
-Create `src/infrastructure/email/inbox.service.ts`:
-
-```ts
-import { Injectable } from '@nestjs/common';
-import { EmailConfigRepository } from './email-config.repository';
-import {
-  NoActiveEmailConfigError,
-  type MailboxSummary,
-  type ParsedMessage,
-} from './email.types';
-import {
-  fetchMessage,
-  listMessages,
-  setSeen,
-  verifyImap,
-} from './transport/imap.transport';
-
-/** Inbound IMAP operations over the active IMAP config. Infra only (no HTTP). */
-@Injectable()
-export class InboxService {
-  constructor(private readonly config: EmailConfigRepository) {}
-
-  private async conn() {
-    const conn = await this.config.activeImap();
-    if (!conn) throw new NoActiveEmailConfigError('IMAP');
-    return conn;
-  }
-
-  async verifyActive(): Promise<void> {
-    await verifyImap(await this.conn());
-  }
-
-  async list(opts?: {
-    mailbox?: string;
-    limit?: number;
-    unseenOnly?: boolean;
-  }): Promise<MailboxSummary[]> {
-    return listMessages(await this.conn(), opts);
-  }
-
-  async fetch(uid: number, mailbox?: string): Promise<ParsedMessage | null> {
-    return fetchMessage(await this.conn(), uid, mailbox);
-  }
-
-  async markSeen(uid: number, mailbox?: string): Promise<void> {
-    await setSeen(await this.conn(), uid, true, mailbox);
-  }
-
-  async markUnseen(uid: number, mailbox?: string): Promise<void> {
-    await setSeen(await this.conn(), uid, false, mailbox);
-  }
-}
-```
-
-- [ ] **Step 5: Wire the module**
-
-Replace `src/infrastructure/email/email.module.ts` with:
-
-```ts
-import { Module } from '@nestjs/common';
-import { CryptoModule } from '../crypto/crypto.module';
-import { EmailConfigRepository } from './email-config.repository';
-import { InboxService } from './inbox.service';
-import { MailerService } from './mailer.service';
-
-/**
- * Email infrastructure: outbound SMTP (MailerService) and inbound IMAP
- * (InboxService). Depends only on infrastructure (DatabaseModule is @Global;
- * CryptoModule provides EncryptionService). Imported explicitly by every
- * consumer so module-subset e2e boots stay self-sufficient.
- */
-@Module({
-  imports: [CryptoModule],
-  providers: [EmailConfigRepository, MailerService, InboxService],
-  exports: [MailerService, InboxService],
-})
-export class EmailModule {}
-```
-
-- [ ] **Step 6: Run tests + typecheck to verify they pass**
-
-Run: `pnpm test -- mailer.service inbox.service && pnpm typecheck`
-Expected: PASS (3 + 4 tests) and no type errors.
-
-- [ ] **Step 7: Commit**
-
+- [ ] **Step 3:** Run tests.
+   Run: `cd api && npx jest src/features/auth`
+   Expected: PASS.
+- [ ] **Step 4:** Commit.
 ```bash
-git add src/infrastructure/email
-git commit -m "feat(email): add MailerService + InboxService and wire EmailModule"
+git add api/src/features/auth
+git commit -m "refactor(auth): throw via ExceptionService"
 ```
 
 ---
 
-## Task 6: Refactor `system` + `mastra` onto the email module
+### Task 11: Migrate the users module
 
-Route all transport through the email module: delete the loose testers, delegate `test()`, drop `sendActive`, repoint the mastra `sendEmail` dependency.
+**Files:** Modify `api/src/features/users/users.service.ts` + `users.service.spec.ts`.
 
-**Files:**
-- Modify: `src/features/system/smtp-config.service.ts` (import `verifySmtp` from email transport; **remove** `sendActive`)
-- Modify: `src/features/system/imap-config.service.ts` (import `verifyImap` from email transport)
-- Delete: `src/features/system/connection/smtp-tester.ts`, `src/features/system/connection/imap-tester.ts`
-- Modify: `src/features/system/system.module.ts` (import `EmailModule`)
-- Modify: `src/features/mastra/mastra.module.ts` (inject `MailerService` instead of `SmtpConfigService` for `sendEmail`)
-- Modify: `src/features/system/smtp-config.service.spec.ts` / `imap-config.service.spec.ts` (mock path → email transport)
+**Replacement table:**
 
-**Interfaces:**
-- Consumes: `verifySmtp`, `verifyImap` (Tasks 2–3), `MailerService` (Task 5).
-- Produces: no new public surface. `SmtpConfigService.sendActive` is removed.
+| File:line | Old | New | Override? |
+|---|---|---|---|
+| users.service.ts:43 | `ConflictException('Email already registered')` | `USER_EMAIL_TAKEN` | no |
+| users.service.ts:57 | `NotFoundException('User not found')` | `USER_NOT_FOUND` | no |
+| users.service.ts:74 | `NotFoundException('User not found')` | `USER_NOT_FOUND` | no |
 
-- [ ] **Step 1: Point the SMTP service test() at the email transport**
-
-In `src/features/system/smtp-config.service.ts`:
-
-Replace the import
-```ts
-import { sendSmtpMail, testSmtpConnection } from './connection/smtp-tester';
-```
-with
-```ts
-import { verifySmtp } from '../../infrastructure/email/transport/smtp.transport';
-```
-
-In `test(id, ctx)`, replace the `testSmtpConnection({...})` call with:
-```ts
-      await verifySmtp({
-        host: row.host,
-        port: row.port,
-        secure: row.secure,
-        username: row.username,
-        password: row.secretEnc ? this.crypto.decrypt(row.secretEnc) : null,
-        fromAddress: row.fromAddress,
-        fromName: row.fromName,
-      });
-```
-
-**Delete** the entire `sendActive(...)` method from `SmtpConfigService` (it is superseded by `MailerService.send`).
-
-- [ ] **Step 2: Point the IMAP service test() at the email transport**
-
-In `src/features/system/imap-config.service.ts`:
-
-Replace
-```ts
-import { testImapConnection } from './connection/imap-tester';
-```
-with
-```ts
-import { verifyImap } from '../../infrastructure/email/transport/imap.transport';
-```
-
-In `test(id, ctx)`, replace `testImapConnection({...})` with:
-```ts
-      await verifyImap({
-        host: row.host,
-        port: row.port,
-        secure: row.secure,
-        username: row.username,
-        password: row.secretEnc ? this.crypto.decrypt(row.secretEnc) : null,
-      });
-```
-
-- [ ] **Step 3: Delete the old testers**
-
-Run: `git rm src/features/system/connection/smtp-tester.ts src/features/system/connection/imap-tester.ts`
-(If the `connection/` directory is now empty, that's fine — leave it or remove it.)
-
-- [ ] **Step 4: Import EmailModule into SystemModule**
-
-In `src/features/system/system.module.ts`, add the import and add `EmailModule` to the module `imports` array:
-```ts
-import { EmailModule } from '../../infrastructure/email/email.module';
-```
-```ts
-  imports: [CryptoModule, CacheModule, EmailModule],
-```
-
-- [ ] **Step 5: Repoint the mastra sendEmail dependency**
-
-In `src/features/mastra/mastra.module.ts`:
-
-Replace the import
-```ts
-import { SmtpConfigService } from '../system/smtp-config.service';
-```
-with
-```ts
-import { MailerService } from '../../infrastructure/email/mailer.service';
-import { EmailModule } from '../../infrastructure/email/email.module';
-```
-
-Add `EmailModule` to both the outer `imports:` and the `MastraCoreModule.registerAsync({ imports: [...] })` arrays. Then swap the injected token:
-- in `inject: [...]`, replace `SmtpConfigService` with `MailerService`;
-- in `useFactory: (config, search, smtp, actionLog, pool) => {...}`, rename the param `smtp: SmtpConfigService` → `mailer: MailerService`;
-- change the wiring to:
-```ts
-          sendEmail: (m) => mailer.send(m),
-```
-(`ToolServices.sendEmail` is `{ to; subject; text; cc? }` → assignable to `EmailMessage`.)
-
-`SystemModule` can stay in the mastra imports (still needed for `SearchRecordService`? no — that's `SearchServiceModule`). Remove `SystemModule` from mastra's imports **only if** nothing else in the factory uses it; here the only system dependency was `SmtpConfigService`, so remove `SystemModule` from both `imports` arrays and delete its import if unused.
-
-- [ ] **Step 6: Fix the affected system specs**
-
-In `src/features/system/smtp-config.service.spec.ts`, change the mock target:
-```ts
-jest.mock('../../infrastructure/email/transport/smtp.transport', () => ({
-  verifySmtp: jest.fn(async () => undefined),
-}));
-import { verifySmtp } from '../../infrastructure/email/transport/smtp.transport';
-```
-and update the test body to reference `verifySmtp` (the connection object now also carries `fromAddress`/`fromName`; assert on `host`/`password` as before). Delete any test that exercised the removed `sendActive`.
-
-In `src/features/system/imap-config.service.spec.ts`, likewise mock `../../infrastructure/email/transport/imap.transport`'s `verifyImap`.
-
-- [ ] **Step 7: Verify build, typecheck, and the touched specs**
-
-Run: `pnpm test -- smtp-config.service imap-config.service && pnpm typecheck && pnpm build`
-Expected: PASS; no type errors; Nest build succeeds (no dangling `smtp-tester`/`sendActive` references).
-
-- [ ] **Step 8: Commit**
-
+- [ ] **Step 1:** Update `users.service.spec.ts`: constructor becomes `new UsersService(repo, passwords, new ExceptionService())`; change the duplicate-email + not-found assertions to `toMatchObject({ code: ErrorCode.USER_EMAIL_TAKEN })` / `{ code: ErrorCode.USER_NOT_FOUND }`. Run → FAIL.
+   Run: `cd api && npx jest src/features/users/users.service.spec.ts`
+- [ ] **Step 2:** Edit `users.service.ts`: add `import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';`, add `private readonly errors: ExceptionService,` to the constructor, remove `ConflictException`/`NotFoundException` imports, and apply the table (e.g. `throw this.errors.create(ErrorCode.USER_EMAIL_TAKEN);`).
+- [ ] **Step 3:** Run tests → PASS.
+   Run: `cd api && npx jest src/features/users/users.service.spec.ts`
+- [ ] **Step 4:** Commit.
 ```bash
-git add src/features/system src/features/mastra
-git commit -m "refactor(system,mastra): route mail transport through infrastructure/email"
-```
-
-## Task 7: `password_reset_codes` schema + migration
-
-**Files:**
-- Create: `src/infrastructure/database/schema/password-reset.schema.ts`
-- Modify: `src/infrastructure/database/schema/index.ts` (barrel export)
-- Test: `src/infrastructure/database/schema/password-reset.schema.spec.ts`
-- Generated: `src/infrastructure/database/migrations/*` (via `pnpm db:generate`)
-
-**Interfaces:**
-- Produces: `passwordResetCodes` table → `PasswordResetCodeRow`, `NewPasswordResetCodeRow`.
-
-- [ ] **Step 1: Write the failing test**
-
-Create `src/infrastructure/database/schema/password-reset.schema.spec.ts`:
-
-```ts
-import { passwordResetCodes } from './password-reset.schema';
-
-describe('password-reset schema', () => {
-  it('defines the password_reset_codes table with the expected columns', () => {
-    expect(passwordResetCodes).toBeDefined();
-    const cols = Object.keys((passwordResetCodes as any));
-    expect(cols).toEqual(
-      expect.arrayContaining([
-        'id',
-        'createdAt',
-        'userId',
-        'codeHash',
-        'expiresAt',
-        'attemptCount',
-        'consumedAt',
-      ]),
-    );
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pnpm test -- password-reset.schema`
-Expected: FAIL — `Cannot find module './password-reset.schema'`.
-
-- [ ] **Step 3: Create the schema**
-
-Create `src/infrastructure/database/schema/password-reset.schema.ts`:
-
-```ts
-import { index, integer, pgTable, timestamp, uuid, varchar } from 'drizzle-orm/pg-core';
-import { users } from './identity.schema';
-
-/**
- * Single-use password-reset codes. The 6-digit code is stored ONLY as an
- * HMAC-SHA256 (keyed with a server pepper) hex digest — never in plaintext.
- * `consumedAt` is the burn/single-use marker (null = live). Append-style
- * lifecycle, so `baseColumns` is not used (same reasoning as `sessions`).
- */
-export const passwordResetCodes = pgTable(
-  'password_reset_codes',
-  {
-    id: uuid('id').primaryKey().defaultRandom(),
-    createdAt: timestamp('created_at', { withTimezone: true })
-      .notNull()
-      .defaultNow(),
-    userId: uuid('user_id')
-      .notNull()
-      .references(() => users.id, { onDelete: 'cascade' }),
-    codeHash: varchar('code_hash', { length: 64 }).notNull(),
-    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-    attemptCount: integer('attempt_count').notNull().default(0),
-    consumedAt: timestamp('consumed_at', { withTimezone: true }),
-  },
-  (t) => [
-    index('password_reset_codes_user_idx').on(t.userId),
-    index('password_reset_codes_expires_idx').on(t.expiresAt),
-  ],
-);
-
-export type PasswordResetCodeRow = typeof passwordResetCodes.$inferSelect;
-export type NewPasswordResetCodeRow = typeof passwordResetCodes.$inferInsert;
-```
-
-Add to `src/infrastructure/database/schema/index.ts`:
-```ts
-export * from './password-reset.schema';
-```
-
-- [ ] **Step 4: Run test + typecheck**
-
-Run: `pnpm test -- password-reset.schema && pnpm typecheck`
-Expected: PASS (1 test) and no type errors.
-
-- [ ] **Step 5: Generate the migration**
-
-Run: `pnpm db:generate`
-Expected: a new migration under `src/infrastructure/database/migrations/` creating `password_reset_codes` with the FK to `users(id) ON DELETE CASCADE` and the two indexes. Review it.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add src/infrastructure/database/schema src/infrastructure/database/migrations
-git commit -m "feat(auth): add password_reset_codes schema and migration"
+git add api/src/features/users
+git commit -m "refactor(users): throw via ExceptionService"
 ```
 
 ---
 
-## Task 8: Config/env for the reset flow
+### Task 12: Migrate the file-processor module
 
-**Files:**
-- Modify: `src/config/env.validation.ts` (add `PASSWORD_RESET_PEPPER` + prod guard)
-- Modify: `src/config/configurations/auth.config.ts` (add `passwordReset` block)
-- Modify: `api/.env.example` (document the new var)
-- Test: `src/config/configurations/auth.config.spec.ts`
+**Files:** Modify `api/src/features/file-processor/file.service.ts` + spec.
 
-**Interfaces:**
-- Produces: `AuthConfig.passwordReset = { pepper: string; codeTtlSeconds: number; maxAttempts: number; codeLength: number }`.
+**Replacement table** (note: ownership stays 404 by design — `loadOwned` → `FILE_NOT_FOUND`):
 
-- [ ] **Step 1: Write the failing test**
+| File:line | Old | New | Override? |
+|---|---|---|---|
+| file.service.ts:141 | `ConflictException('File is not awaiting upload (status=…)')` | `FILE_INVALID_STATE` | **yes** (dynamic status message) |
+| file.service.ts:147 | `BadRequestException('Upload not found in storage; …')` | `FILE_UPLOAD_MISSING` | no |
+| file.service.ts:159 | `BadRequestException('Uploaded file size … exceeds …')` | `FILE_TOO_LARGE` | **yes** (dynamic sizes) |
+| file.service.ts:168 | `NotFoundException('File not found')` | `FILE_NOT_FOUND` | no |
+| file.service.ts:213 | `ConflictException('File is not available (status=…)')` | `FILE_INVALID_STATE` | **yes** |
+| file.service.ts:279 | `ConflictException('File is not available (status=…)')` | `FILE_INVALID_STATE` | **yes** |
+| file.service.ts:294 | `BadRequestException('MIME type "…" is not allowed')` | `FILE_MIME_NOT_ALLOWED` | **yes** |
+| file.service.ts:297 | `BadRequestException('File size … exceeds …')` | `FILE_TOO_LARGE` | **yes** |
+| file.service.ts:307 | `NotFoundException('File not found')` (loadOwned, masks ownership) | `FILE_NOT_FOUND` | no |
 
-Create `src/config/configurations/auth.config.spec.ts`:
-
+- [ ] **Step 1:** Update `file.service.spec.ts`: inject `new ExceptionService()`; convert assertions to the codes above (`toMatchObject({ code })`). Run → FAIL.
+   Run: `cd api && npx jest src/features/file-processor`
+- [ ] **Step 2:** Apply the migration recipe + table. Example for a dynamic-message site:
 ```ts
-import { authConfig } from './auth.config';
-
-describe('authConfig.passwordReset', () => {
-  it('exposes the reset policy with sane defaults', () => {
-    const cfg = authConfig();
-    expect(cfg.passwordReset).toEqual(
-      expect.objectContaining({
-        codeTtlSeconds: 900,
-        maxAttempts: 5,
-        codeLength: 6,
-      }),
-    );
-    expect(typeof cfg.passwordReset.pepper).toBe('string');
-    expect(cfg.passwordReset.pepper.length).toBeGreaterThan(0);
-  });
+throw this.errors.create(ErrorCode.FILE_INVALID_STATE, {
+  message: `File is not awaiting upload (status=${row.status})`,
 });
 ```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pnpm test -- auth.config`
-Expected: FAIL — `passwordReset` is undefined.
-
-- [ ] **Step 3: Add the env var + prod guard**
-
-In `src/config/env.validation.ts`, inside the `z.object({...})` (after the Security block), add:
-```ts
-    // Password reset (forgot-password OTP)
-    PASSWORD_RESET_PEPPER: z
-      .string()
-      .min(1)
-      .default('dev-insecure-reset-pepper-change-me'),
-```
-
-Inside `.superRefine((env, ctx) => { ... })`, add:
-```ts
-    if (
-      env.NODE_ENV === 'production' &&
-      (env.PASSWORD_RESET_PEPPER === 'dev-insecure-reset-pepper-change-me' ||
-        env.PASSWORD_RESET_PEPPER.length < 16)
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['PASSWORD_RESET_PEPPER'],
-        message:
-          'PASSWORD_RESET_PEPPER must be a strong non-default value (>= 16 chars) when NODE_ENV=production.',
-      });
-    }
-```
-
-- [ ] **Step 4: Add the passwordReset block to auth config**
-
-In `src/config/configurations/auth.config.ts`, add to the returned object:
-```ts
-    passwordReset: {
-      pepper: env.PASSWORD_RESET_PEPPER,
-      codeTtlSeconds: 900, // 15 minutes
-      maxAttempts: 5,
-      codeLength: 6,
-    },
-```
-
-- [ ] **Step 5: Document the env var**
-
-In `api/.env.example`, under an `# Auth` section (add if missing), append:
-```
-# Password reset OTP pepper (HMAC key). MUST be a strong non-default value in production.
-PASSWORD_RESET_PEPPER=dev-insecure-reset-pepper-change-me
-```
-
-- [ ] **Step 6: Run test + typecheck to verify they pass**
-
-Run: `pnpm test -- auth.config && pnpm typecheck`
-Expected: PASS (1 test) and no type errors.
-
-- [ ] **Step 7: Commit**
-
+- [ ] **Step 3:** Run tests → PASS.
+   Run: `cd api && npx jest src/features/file-processor`
+- [ ] **Step 4:** Commit.
 ```bash
-git add src/config api/.env.example
-git commit -m "feat(auth): add PASSWORD_RESET_PEPPER env and passwordReset config"
+git add api/src/features/file-processor
+git commit -m "refactor(file-processor): throw via ExceptionService (ownership stays 404 explicitly)"
 ```
 
 ---
 
-## Task 9: ResetCodeHasher
+### Task 13: Migrate the search-service module
 
-Generates the 6-digit code and HMAC-hashes/verifies it (timing-safe).
+**Files:** Modify `api/src/features/search-service/search-record.service.ts`, `collection.service.ts` (+ specs). **Do NOT** change `search-indexing.processor.ts:143` (a BullMQ job-payload `Error` — not HTTP-facing; out of scope, keep as-is for retry semantics).
 
-**Files:**
-- Create: `src/features/auth/reset-code-hasher.ts`
-- Test: `src/features/auth/reset-code-hasher.spec.ts`
+**Replacement table:**
 
-**Interfaces:**
-- Consumes: `AuthConfig.passwordReset` (Task 8).
-- Produces:
-  - `ResetCodeHasher.generate(): string` (zero-padded 6-digit)
-  - `ResetCodeHasher.hash(code: string): string` (HMAC-SHA256 hex)
-  - `ResetCodeHasher.verify(code: string, hash: string): boolean` (timing-safe)
+| File:line | Old | New | Override? |
+|---|---|---|---|
+| search-record.service.ts:82 | `BadRequestException({ message, issues: string[] })` | `this.errors.validation(errors.map((m,) => ({ path: \`records[${i}]\`, message: m })), { message: \`Record ${i} failed validation\` })` | — (standardizes shape) |
+| search-record.service.ts:144 | `NotFoundException('Record not found')` | `SEARCH_RECORD_NOT_FOUND` | no |
+| search-record.service.ts:197 | catch `SearchEngineError` → `ServiceUnavailableException('Search is temporarily unavailable')` | `throw this.errors.create(ErrorCode.SEARCH_UNAVAILABLE, { cause: e });` (keep the `instanceof SearchEngineError` guard; rethrow others) | no |
+| search-record.service.ts:205 | `NotFoundException('Unknown collection "…"')` | `SEARCH_COLLECTION_NOT_FOUND` | **yes** |
+| search-record.service.ts:216 | `BadRequestException('Unknown filter field "…"')` | `SEARCH_QUERY_INVALID` | **yes** |
+| search-record.service.ts:231 | `BadRequestException('Invalid sort "…"')` | `SEARCH_QUERY_INVALID` | **yes** |
+| search-record.service.ts:246 | `BadRequestException('Unknown facet(s): …')` | `SEARCH_QUERY_INVALID` | **yes** |
+| collection.service.ts:83 | `ConflictException('Collection "…" already exists')` | `SEARCH_COLLECTION_EXISTS` | **yes** |
+| collection.service.ts:104/113/125/140 | `NotFoundException('Unknown collection "…"')` | `SEARCH_COLLECTION_NOT_FOUND` | **yes** |
 
-- [ ] **Step 1: Write the failing test**
-
-Create `src/features/auth/reset-code-hasher.spec.ts`:
-
-```ts
-import { ResetCodeHasher } from './reset-code-hasher';
-
-function makeHasher(pepper = 'test-pepper', codeLength = 6) {
-  const config = {
-    getOrThrow: () => ({ passwordReset: { pepper, codeLength } }),
-  } as any;
-  return new ResetCodeHasher(config);
-}
-
-describe('ResetCodeHasher', () => {
-  it('generate returns a zero-padded 6-digit string', () => {
-    const h = makeHasher();
-    for (let i = 0; i < 50; i++) {
-      const code = h.generate();
-      expect(code).toMatch(/^\d{6}$/);
-    }
-  });
-
-  it('hash is deterministic, hex, and not the plaintext', () => {
-    const h = makeHasher();
-    const a = h.hash('123456');
-    const b = h.hash('123456');
-    expect(a).toBe(b);
-    expect(a).toMatch(/^[0-9a-f]{64}$/);
-    expect(a).not.toContain('123456');
-  });
-
-  it('hash depends on the pepper', () => {
-    expect(makeHasher('p1').hash('123456')).not.toBe(
-      makeHasher('p2').hash('123456'),
-    );
-  });
-
-  it('verify is true for the right code, false otherwise', () => {
-    const h = makeHasher();
-    const hash = h.hash('654321');
-    expect(h.verify('654321', hash)).toBe(true);
-    expect(h.verify('000000', hash)).toBe(false);
-  });
-
-  it('verify returns false (no throw) on a malformed stored hash', () => {
-    const h = makeHasher();
-    expect(h.verify('654321', 'not-hex')).toBe(false);
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pnpm test -- reset-code-hasher`
-Expected: FAIL — `Cannot find module './reset-code-hasher'`.
-
-- [ ] **Step 3: Implement the hasher**
-
-Create `src/features/auth/reset-code-hasher.ts`:
-
-```ts
-import { Injectable } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { createHmac, randomInt, timingSafeEqual } from 'node:crypto';
-import type { AuthConfig } from '../../config/configurations/auth.config';
-
-/**
- * Generates + verifies the 6-digit reset code. The code is stored only as an
- * HMAC-SHA256 keyed with a server pepper, so a DB leak alone cannot brute the
- * low-entropy (10^6) code space. Verification is constant-time.
- */
-@Injectable()
-export class ResetCodeHasher {
-  private readonly pepper: string;
-  private readonly length: number;
-
-  constructor(config: ConfigService) {
-    const cfg = config.getOrThrow<AuthConfig>('auth');
-    this.pepper = cfg.passwordReset.pepper;
-    this.length = cfg.passwordReset.codeLength;
-  }
-
-  generate(): string {
-    const max = 10 ** this.length;
-    return String(randomInt(0, max)).padStart(this.length, '0');
-  }
-
-  hash(code: string): string {
-    return createHmac('sha256', this.pepper).update(code).digest('hex');
-  }
-
-  verify(code: string, hash: string): boolean {
-    const expected = Buffer.from(this.hash(code), 'hex');
-    let actual: Buffer;
-    try {
-      actual = Buffer.from(hash, 'hex');
-    } catch {
-      return false;
-    }
-    if (actual.length !== expected.length) return false;
-    return timingSafeEqual(actual, expected);
-  }
-}
-```
-
-- [ ] **Step 4: Run test + typecheck to verify they pass**
-
-Run: `pnpm test -- reset-code-hasher && pnpm typecheck`
-Expected: PASS (5 tests) and no type errors.
-
-- [ ] **Step 5: Commit**
-
+- [ ] **Step 1:** Update both specs: inject `new ExceptionService()`; convert assertions to the codes above. For the SearchEngineError→503 path, keep the existing behavior test but assert `code === ErrorCode.SEARCH_UNAVAILABLE` and status 503. Run → FAIL.
+   Run: `cd api && npx jest src/features/search-service`
+- [ ] **Step 2:** Apply the migration recipe + table. For the validation site, ensure the `issues` become `{ path, message }[]`.
+- [ ] **Step 3:** Run tests → PASS.
+   Run: `cd api && npx jest src/features/search-service`
+- [ ] **Step 4:** Commit.
 ```bash
-git add src/features/auth/reset-code-hasher.ts src/features/auth/reset-code-hasher.spec.ts
-git commit -m "feat(auth): add HMAC-peppered ResetCodeHasher"
+git add api/src/features/search-service
+git commit -m "refactor(search): throw via ExceptionService; standardize validation issues"
 ```
 
 ---
 
-## Task 10: PasswordResetRepository
+### Task 14: Migrate the system module
 
-CRUD for `password_reset_codes`. (Unit-tested with a mocked chainable `db`, matching `EmailConfigRepository`; real-DB behaviour is covered by the e2e in Task 15.)
+**Files:** Modify `api/src/features/system/integration-credential.service.ts`, `imap-config.service.ts`, `smtp-config.service.ts`, `system-settings.service.ts` (+ specs). **Do NOT** change `encryption.service.ts` (constructor misconfig is a boot-time fatal — correct as a plain `Error`; runtime decrypt failures are normalized by the infra mapper). **Do NOT** change `system-audit.service.ts` (audit failures stay swallowed).
 
-**Files:**
-- Create: `src/features/auth/password-reset.repository.ts`
-- Test: `src/features/auth/password-reset.repository.spec.ts`
+**Replacement table:**
 
-**Interfaces:**
-- Consumes: `DRIZZLE`/`DrizzleDB`, `passwordResetCodes` table + row types.
-- Produces:
-  - `insert(row: NewPasswordResetCodeRow): Promise<PasswordResetCodeRow>`
-  - `findLiveByUser(userId: string): Promise<PasswordResetCodeRow | null>`
-  - `consumeAllForUser(userId: string): Promise<void>`
-  - `incrementAttempts(id: string): Promise<number>` (returns the new count)
-  - `consume(id: string): Promise<void>`
-  - `deleteExpired(now?: Date): Promise<void>`
+| File:line | Old | New | Override? |
+|---|---|---|---|
+| integration-credential.service.ts:58 | `NotFoundException('Integration credential not found')` | `CONFIG_NOT_FOUND` | **yes** |
+| integration-credential.service.ts:67 | `ConflictException('A credential named "…" already exists for …')` | `CONFLICT` | **yes** |
+| integration-credential.service.ts:114 | `ConflictException(same)` | `CONFLICT` | **yes** |
+| integration-credential.service.ts:133 | `NotFoundException('Integration credential not found')` | `CONFIG_NOT_FOUND` | **yes** |
+| imap-config.service.ts:53/108/133 | `NotFoundException('IMAP config not found')` | `CONFIG_NOT_FOUND` | **yes**: `{ message: 'IMAP config not found' }` |
+| smtp-config.service.ts:57/116/141 | `NotFoundException('SMTP config not found')` | `CONFIG_NOT_FOUND` | **yes**: `{ message: 'SMTP config not found' }` |
+| system-settings.service.ts:60/98 | `NotFoundException('Setting "…" not found')` | `CONFIG_NOT_FOUND` | **yes** |
 
-- [ ] **Step 1: Write the failing test**
-
-Create `src/features/auth/password-reset.repository.spec.ts`:
-
-```ts
-import { PasswordResetRepository } from './password-reset.repository';
-
-/** Minimal chainable Drizzle mock. Each terminal returns the queued result. */
-function makeDb() {
-  const state: any = { lastInsertValues: null };
-  const db: any = {
-    insert: jest.fn(() => ({
-      values: jest.fn((v: any) => {
-        state.lastInsertValues = v;
-        return { returning: jest.fn(async () => [{ id: 'r1', ...v }]) };
-      }),
-    })),
-    select: jest.fn(() => {
-      const chain: any = {
-        from: () => chain,
-        where: () => chain,
-        orderBy: () => chain,
-        limit: async () => state.selectResult ?? [],
-      };
-      return chain;
-    }),
-    update: jest.fn(() => ({
-      set: jest.fn(() => ({
-        where: jest.fn(() => ({
-          returning: jest.fn(async () => state.updateResult ?? [{ attemptCount: 3 }]),
-        })),
-      })),
-    })),
-    delete: jest.fn(() => ({ where: jest.fn(async () => undefined) })),
-  };
-  return { db, state };
-}
-
-describe('PasswordResetRepository', () => {
-  it('insert stores the row and returns it', async () => {
-    const { db } = makeDb();
-    const repo = new PasswordResetRepository(db);
-    const row = await repo.insert({
-      userId: 'u1',
-      codeHash: 'h',
-      expiresAt: new Date('2030-01-01'),
-    } as any);
-    expect(db.insert).toHaveBeenCalled();
-    expect(row).toEqual(expect.objectContaining({ id: 'r1', userId: 'u1' }));
-  });
-
-  it('findLiveByUser returns null when none live', async () => {
-    const { db, state } = makeDb();
-    state.selectResult = [];
-    const repo = new PasswordResetRepository(db);
-    expect(await repo.findLiveByUser('u1')).toBeNull();
-  });
-
-  it('findLiveByUser returns the live row', async () => {
-    const { db, state } = makeDb();
-    state.selectResult = [{ id: 'r1', userId: 'u1', consumedAt: null }];
-    const repo = new PasswordResetRepository(db);
-    expect(await repo.findLiveByUser('u1')).toEqual(
-      expect.objectContaining({ id: 'r1' }),
-    );
-  });
-
-  it('incrementAttempts returns the new count', async () => {
-    const { db, state } = makeDb();
-    state.updateResult = [{ attemptCount: 4 }];
-    const repo = new PasswordResetRepository(db);
-    expect(await repo.incrementAttempts('r1')).toBe(4);
-  });
-
-  it('consumeAllForUser and consume issue updates; deleteExpired issues a delete', async () => {
-    const { db } = makeDb();
-    const repo = new PasswordResetRepository(db);
-    await repo.consumeAllForUser('u1');
-    await repo.consume('r1');
-    await repo.deleteExpired(new Date('2020-01-01'));
-    expect(db.update).toHaveBeenCalledTimes(2);
-    expect(db.delete).toHaveBeenCalledTimes(1);
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pnpm test -- password-reset.repository`
-Expected: FAIL — `Cannot find module './password-reset.repository'`.
-
-- [ ] **Step 3: Implement the repository**
-
-Create `src/features/auth/password-reset.repository.ts`:
-
-```ts
-import { Inject, Injectable } from '@nestjs/common';
-import { and, desc, eq, isNull, lt, sql } from 'drizzle-orm';
-import {
-  DRIZZLE,
-  type DrizzleDB,
-} from '../../infrastructure/database/drizzle.constants';
-import {
-  passwordResetCodes,
-  type NewPasswordResetCodeRow,
-  type PasswordResetCodeRow,
-} from '../../infrastructure/database/schema/password-reset.schema';
-
-/** Access to the `password_reset_codes` table. */
-@Injectable()
-export class PasswordResetRepository {
-  constructor(@Inject(DRIZZLE) private readonly db: DrizzleDB) {}
-
-  async insert(row: NewPasswordResetCodeRow): Promise<PasswordResetCodeRow> {
-    const rows = await this.db
-      .insert(passwordResetCodes)
-      .values(row)
-      .returning();
-    return rows[0];
-  }
-
-  /** The user's most recent live (un-consumed) code, if any. */
-  async findLiveByUser(userId: string): Promise<PasswordResetCodeRow | null> {
-    const rows = await this.db
-      .select()
-      .from(passwordResetCodes)
-      .where(
-        and(
-          eq(passwordResetCodes.userId, userId),
-          isNull(passwordResetCodes.consumedAt),
-        ),
-      )
-      .orderBy(desc(passwordResetCodes.createdAt))
-      .limit(1);
-    return rows[0] ?? null;
-  }
-
-  /** Burn every live code for a user (called before issuing a new one). */
-  async consumeAllForUser(userId: string): Promise<void> {
-    await this.db
-      .update(passwordResetCodes)
-      .set({ consumedAt: new Date() })
-      .where(
-        and(
-          eq(passwordResetCodes.userId, userId),
-          isNull(passwordResetCodes.consumedAt),
-        ),
-      );
-  }
-
-  /** Atomically bump the attempt counter; returns the new value. */
-  async incrementAttempts(id: string): Promise<number> {
-    const rows = await this.db
-      .update(passwordResetCodes)
-      .set({ attemptCount: sql`${passwordResetCodes.attemptCount} + 1` })
-      .where(eq(passwordResetCodes.id, id))
-      .returning();
-    return rows[0]?.attemptCount ?? 0;
-  }
-
-  async consume(id: string): Promise<void> {
-    await this.db
-      .update(passwordResetCodes)
-      .set({ consumedAt: new Date() })
-      .where(eq(passwordResetCodes.id, id));
-  }
-
-  async deleteExpired(now = new Date()): Promise<void> {
-    await this.db
-      .delete(passwordResetCodes)
-      .where(lt(passwordResetCodes.expiresAt, now));
-  }
-}
-```
-
-- [ ] **Step 4: Run test + typecheck to verify they pass**
-
-Run: `pnpm test -- password-reset.repository && pnpm typecheck`
-Expected: PASS (5 tests) and no type errors.
-
-- [ ] **Step 5: Commit**
-
+- [ ] **Step 1:** Update the four specs: inject `new ExceptionService()`; convert assertions to `CONFIG_NOT_FOUND` / `CONFLICT` with the preserved messages. Run → FAIL.
+   Run: `cd api && npx jest src/features/system`
+- [ ] **Step 2:** Apply the migration recipe + table.
+- [ ] **Step 3:** Run tests → PASS.
+   Run: `cd api && npx jest src/features/system`
+- [ ] **Step 4:** Commit.
 ```bash
-git add src/features/auth/password-reset.repository.ts src/features/auth/password-reset.repository.spec.ts
-git commit -m "feat(auth): add PasswordResetRepository"
+git add api/src/features/system
+git commit -m "refactor(system): throw via ExceptionService"
 ```
 
 ---
 
-## Task 11: ResetMailer
+### Task 15: Migrate the mailbox module
 
-Owns the two email templates and delegates to `MailerService`. Keeps copy out of the security logic.
+**Files:** Modify `api/src/features/mailbox/mailbox.service.ts` + spec. **Do NOT** change the ingest/scheduler swallow-and-log paths (best-effort semantics preserved); `NoActiveEmailConfigError` reaching an HTTP request is normalized by the infra mapper.
 
-**Files:**
-- Create: `src/features/auth/reset-mailer.ts`
-- Test: `src/features/auth/reset-mailer.spec.ts`
+**Replacement table:**
 
-**Interfaces:**
-- Consumes: `MailerService.send` (Task 5).
-- Produces:
-  - `ResetMailer.sendCode(email: string, code: string): Promise<void>`
-  - `ResetMailer.sendChangedConfirmation(email: string): Promise<void>`
+| File:line | Old | New | Override? |
+|---|---|---|---|
+| mailbox.service.ts:77 | `BadRequestException('No mailbox account specified and MAILBOX_DEFAULT_ACCOUNT_ID is unset')` | `MAILBOX_ACCOUNT_UNRESOLVED` | **yes**: `{ message: 'No mailbox account specified and MAILBOX_DEFAULT_ACCOUNT_ID is unset' }` |
+| mailbox.service.ts:108 | `NotFoundException('Message not found')` | `MAILBOX_MESSAGE_NOT_FOUND` | no |
+| mailbox.service.ts:131 | `NotFoundException('Attachment not found')` | `MAILBOX_ATTACHMENT_NOT_FOUND` | no |
+| mailbox.service.ts:137 | `NotFoundException('Message not found')` | `MAILBOX_MESSAGE_NOT_FOUND` | no |
 
-- [ ] **Step 1: Write the failing test**
-
-Create `src/features/auth/reset-mailer.spec.ts`:
-
-```ts
-import { ResetMailer } from './reset-mailer';
-
-describe('ResetMailer', () => {
-  let mailer: any;
-  let reset: ResetMailer;
-
-  beforeEach(() => {
-    mailer = { send: jest.fn(async () => undefined) };
-    reset = new ResetMailer(mailer);
-  });
-
-  it('sendCode emails the code to the user', async () => {
-    await reset.sendCode('user@example.com', '482913');
-    expect(mailer.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        to: 'user@example.com',
-        subject: expect.stringContaining('reset code'),
-        text: expect.stringContaining('482913'),
-      }),
-    );
-    const arg = mailer.send.mock.calls[0][0];
-    expect(arg.html).toContain('482913');
-  });
-
-  it('sendChangedConfirmation emails a confirmation (no code)', async () => {
-    await reset.sendChangedConfirmation('user@example.com');
-    expect(mailer.send).toHaveBeenCalledWith(
-      expect.objectContaining({
-        to: 'user@example.com',
-        subject: expect.stringContaining('changed'),
-        text: expect.stringContaining('changed'),
-      }),
-    );
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pnpm test -- reset-mailer`
-Expected: FAIL — `Cannot find module './reset-mailer'`.
-
-- [ ] **Step 3: Implement the mailer**
-
-Create `src/features/auth/reset-mailer.ts`:
-
-```ts
-import { Injectable } from '@nestjs/common';
-import { MailerService } from '../../infrastructure/email/mailer.service';
-
-/** Password-reset email templates. Delegates delivery to MailerService. */
-@Injectable()
-export class ResetMailer {
-  constructor(private readonly mailer: MailerService) {}
-
-  async sendCode(email: string, code: string): Promise<void> {
-    const subject = 'Your password reset code';
-    const text =
-      `Your password reset code is ${code}. It expires in 15 minutes.\n\n` +
-      `If you didn't request this, you can safely ignore this email.`;
-    const html =
-      `<p>Your password reset code is <strong>${code}</strong>.</p>` +
-      `<p>It expires in 15 minutes.</p>` +
-      `<p>If you didn't request this, you can safely ignore this email.</p>`;
-    await this.mailer.send({ to: email, subject, text, html });
-  }
-
-  async sendChangedConfirmation(email: string): Promise<void> {
-    const subject = 'Your password was changed';
-    const text =
-      `Your password was just changed.\n\n` +
-      `If this wasn't you, contact support immediately.`;
-    const html =
-      `<p>Your password was just changed.</p>` +
-      `<p>If this wasn't you, contact support immediately.</p>`;
-    await this.mailer.send({ to: email, subject, text, html });
-  }
-}
-```
-
-- [ ] **Step 4: Run test + typecheck to verify they pass**
-
-Run: `pnpm test -- reset-mailer && pnpm typecheck`
-Expected: PASS (2 tests) and no type errors.
-
-- [ ] **Step 5: Commit**
-
+- [ ] **Step 1:** Update `mailbox.service.spec.ts`: inject `new ExceptionService()`; convert assertions. Run → FAIL.
+   Run: `cd api && npx jest src/features/mailbox`
+- [ ] **Step 2:** Apply the migration recipe + table.
+- [ ] **Step 3:** Run tests → PASS.
+   Run: `cd api && npx jest src/features/mailbox`
+- [ ] **Step 4:** Commit.
 ```bash
-git add src/features/auth/reset-mailer.ts src/features/auth/reset-mailer.spec.ts
-git commit -m "feat(auth): add ResetMailer templates"
-```
-
-## Task 12: PasswordResetService
-
-The core orchestration: `request` (issue a code, best-effort email) and `reset` (verify + set password + revoke sessions + confirm). Uniform failure, enumeration-safe.
-
-**Files:**
-- Create: `src/features/auth/password-reset.service.ts`
-- Test: `src/features/auth/password-reset.service.spec.ts`
-
-**Interfaces:**
-- Consumes: `UserRepository` (`findByEmail`, `update`), `PasswordResetRepository` (Task 10), `SessionRepository` (`revokeAllForUser`), `PasswordService` (`hash`), `ResetCodeHasher` (Task 9), `ResetMailer` (Task 11), `AuthConfig.passwordReset`.
-- Produces:
-  - `PasswordResetService.request(email: string): Promise<void>` (always resolves)
-  - `PasswordResetService.reset(email: string, code: string, newPassword: string): Promise<void>` (throws `UnauthorizedException` on any business failure)
-
-- [ ] **Step 1: Write the failing test**
-
-Create `src/features/auth/password-reset.service.spec.ts`:
-
-```ts
-import { UnauthorizedException } from '@nestjs/common';
-import { PasswordResetService } from './password-reset.service';
-
-function makeConfig() {
-  return {
-    getOrThrow: () => ({
-      passwordReset: {
-        pepper: 'p',
-        codeTtlSeconds: 900,
-        maxAttempts: 5,
-        codeLength: 6,
-      },
-    }),
-  } as any;
-}
-
-const user = { id: 'u1', email: 'user@example.com', passwordHash: 'old' };
-
-describe('PasswordResetService', () => {
-  let users: any;
-  let codes: any;
-  let sessions: any;
-  let passwords: any;
-  let hasher: any;
-  let mailer: any;
-  let service: PasswordResetService;
-
-  beforeEach(() => {
-    users = {
-      findByEmail: jest.fn(async () => user),
-      update: jest.fn(async () => user),
-    };
-    codes = {
-      consumeAllForUser: jest.fn(async () => undefined),
-      insert: jest.fn(async () => ({ id: 'c1' })),
-      findLiveByUser: jest.fn(async () => ({
-        id: 'c1',
-        codeHash: 'HASH',
-        expiresAt: new Date(Date.now() + 60_000),
-        attemptCount: 0,
-      })),
-      incrementAttempts: jest.fn(async () => 1),
-      consume: jest.fn(async () => undefined),
-    };
-    sessions = { revokeAllForUser: jest.fn(async () => undefined) };
-    passwords = { hash: jest.fn(async () => 'new-hash') };
-    hasher = {
-      generate: jest.fn(() => '482913'),
-      hash: jest.fn(() => 'HASH'),
-      verify: jest.fn(() => true),
-    };
-    mailer = {
-      sendCode: jest.fn(async () => undefined),
-      sendChangedConfirmation: jest.fn(async () => undefined),
-    };
-    service = new PasswordResetService(
-      users, codes, sessions, passwords, hasher, mailer, makeConfig(),
-    );
-  });
-
-  // --- request ---
-
-  it('request issues + emails a code for a known user', async () => {
-    await service.request('User@Example.com');
-    expect(users.findByEmail).toHaveBeenCalledWith('user@example.com');
-    expect(codes.consumeAllForUser).toHaveBeenCalledWith('u1');
-    expect(codes.insert).toHaveBeenCalledWith(
-      expect.objectContaining({ userId: 'u1', codeHash: 'HASH' }),
-    );
-    expect(mailer.sendCode).toHaveBeenCalledWith('user@example.com', '482913');
-  });
-
-  it('request is a no-op for an unknown email (no throw, no code, no mail)', async () => {
-    users.findByEmail.mockResolvedValueOnce(null);
-    await expect(service.request('nobody@example.com')).resolves.toBeUndefined();
-    expect(codes.insert).not.toHaveBeenCalled();
-    expect(mailer.sendCode).not.toHaveBeenCalled();
-  });
-
-  it('request still resolves when sending mail throws (best-effort)', async () => {
-    mailer.sendCode.mockRejectedValueOnce(new Error('smtp down'));
-    await expect(service.request('user@example.com')).resolves.toBeUndefined();
-    expect(codes.insert).toHaveBeenCalled();
-  });
-
-  // --- reset ---
-
-  it('reset succeeds: sets password, burns code, revokes sessions, confirms', async () => {
-    await service.reset('user@example.com', '482913', 'a-strong-password');
-    expect(hasher.verify).toHaveBeenCalledWith('482913', 'HASH');
-    expect(passwords.hash).toHaveBeenCalledWith('a-strong-password');
-    expect(users.update).toHaveBeenCalledWith('u1', { passwordHash: 'new-hash' });
-    expect(codes.consume).toHaveBeenCalledWith('c1');
-    expect(sessions.revokeAllForUser).toHaveBeenCalledWith('u1');
-    expect(mailer.sendChangedConfirmation).toHaveBeenCalledWith('user@example.com');
-  });
-
-  it('reset throws 401 for an unknown email and does equalizing HMAC work', async () => {
-    users.findByEmail.mockResolvedValueOnce(null);
-    await expect(
-      service.reset('nobody@example.com', '482913', 'a-strong-password'),
-    ).rejects.toBeInstanceOf(UnauthorizedException);
-    expect(hasher.verify).toHaveBeenCalled(); // decoy comparison ran
-    expect(users.update).not.toHaveBeenCalled();
-  });
-
-  it('reset throws 401 when there is no live code', async () => {
-    codes.findLiveByUser.mockResolvedValueOnce(null);
-    await expect(
-      service.reset('user@example.com', '482913', 'a-strong-password'),
-    ).rejects.toBeInstanceOf(UnauthorizedException);
-  });
-
-  it('reset throws 401 when the code is expired', async () => {
-    codes.findLiveByUser.mockResolvedValueOnce({
-      id: 'c1', codeHash: 'HASH', expiresAt: new Date(Date.now() - 1000), attemptCount: 0,
-    });
-    await expect(
-      service.reset('user@example.com', '482913', 'a-strong-password'),
-    ).rejects.toBeInstanceOf(UnauthorizedException);
-    expect(passwords.hash).not.toHaveBeenCalled();
-  });
-
-  it('reset on a wrong code increments attempts and throws', async () => {
-    hasher.verify.mockReturnValueOnce(false);
-    await expect(
-      service.reset('user@example.com', '000000', 'a-strong-password'),
-    ).rejects.toBeInstanceOf(UnauthorizedException);
-    expect(codes.incrementAttempts).toHaveBeenCalledWith('c1');
-    expect(codes.consume).not.toHaveBeenCalled();
-  });
-
-  it('reset burns the code on the final (5th) wrong attempt', async () => {
-    hasher.verify.mockReturnValueOnce(false);
-    codes.incrementAttempts.mockResolvedValueOnce(5);
-    await expect(
-      service.reset('user@example.com', '000000', 'a-strong-password'),
-    ).rejects.toBeInstanceOf(UnauthorizedException);
-    expect(codes.consume).toHaveBeenCalledWith('c1');
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `pnpm test -- password-reset.service`
-Expected: FAIL — `Cannot find module './password-reset.service'`.
-
-- [ ] **Step 3: Implement the service**
-
-Create `src/features/auth/password-reset.service.ts`:
-
-```ts
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import type { AuthConfig } from '../../config/configurations/auth.config';
-import { UserRepository } from '../users/user.repository';
-import { PasswordResetRepository } from './password-reset.repository';
-import { PasswordService } from './password.service';
-import { ResetCodeHasher } from './reset-code-hasher';
-import { ResetMailer } from './reset-mailer';
-import { SessionRepository } from './session.repository';
-
-/** A syntactically valid but unmatchable hash, for timing equalization. */
-const DECOY_CODE_HASH = '0'.repeat(64);
-
-@Injectable()
-export class PasswordResetService {
-  private readonly logger = new Logger(PasswordResetService.name);
-  private readonly ttlMs: number;
-  private readonly maxAttempts: number;
-
-  constructor(
-    private readonly users: UserRepository,
-    private readonly codes: PasswordResetRepository,
-    private readonly sessions: SessionRepository,
-    private readonly passwords: PasswordService,
-    private readonly hasher: ResetCodeHasher,
-    private readonly mailer: ResetMailer,
-    config: ConfigService,
-  ) {
-    const cfg = config.getOrThrow<AuthConfig>('auth');
-    this.ttlMs = cfg.passwordReset.codeTtlSeconds * 1000;
-    this.maxAttempts = cfg.passwordReset.maxAttempts;
-  }
-
-  /**
-   * Issue a reset code and email it. Always resolves and never reveals whether
-   * the account exists (enumeration-safe); mail delivery is best-effort.
-   */
-  async request(email: string): Promise<void> {
-    const user = await this.users.findByEmail(email.toLowerCase());
-    if (!user) {
-      this.logger.log('forgot_requested email=unknown');
-      return;
-    }
-    await this.codes.consumeAllForUser(user.id);
-    const code = this.hasher.generate();
-    await this.codes.insert({
-      userId: user.id,
-      codeHash: this.hasher.hash(code),
-      expiresAt: new Date(Date.now() + this.ttlMs),
-    });
-    this.logger.log(`forgot_requested userId=${user.id}`);
-    try {
-      await this.mailer.sendCode(user.email, code);
-    } catch (err) {
-      this.logger.error(
-        `reset code email failed userId=${user.id}`,
-        err instanceof Error ? err.stack : String(err),
-      );
-    }
-  }
-
-  /**
-   * Verify the code and reset the password. Throws a uniform 401 on any
-   * failure (unknown email, missing/expired/consumed code, wrong code,
-   * attempts exhausted) — never revealing which factor failed.
-   */
-  async reset(email: string, code: string, newPassword: string): Promise<void> {
-    const fail = () =>
-      new UnauthorizedException('Invalid or expired reset code');
-
-    const user = await this.users.findByEmail(email.toLowerCase());
-    if (!user) {
-      this.hasher.verify(code, DECOY_CODE_HASH); // equalize HMAC timing
-      this.logger.warn('reset_failed reason=unknown_email');
-      throw fail();
-    }
-
-    const row = await this.codes.findLiveByUser(user.id);
-    if (!row || row.expiresAt.getTime() <= Date.now()) {
-      this.hasher.verify(code, DECOY_CODE_HASH);
-      this.logger.warn(`reset_failed userId=${user.id} reason=no_live_code`);
-      throw fail();
-    }
-
-    if (!this.hasher.verify(code, row.codeHash)) {
-      const attempts = await this.codes.incrementAttempts(row.id);
-      if (attempts >= this.maxAttempts) {
-        await this.codes.consume(row.id);
-        this.logger.warn(`reset_lockout userId=${user.id}`);
-      } else {
-        this.logger.warn(`reset_failed userId=${user.id} reason=wrong_code`);
-      }
-      throw fail();
-    }
-
-    await this.users.update(user.id, {
-      passwordHash: await this.passwords.hash(newPassword),
-    });
-    await this.codes.consume(row.id);
-    await this.sessions.revokeAllForUser(user.id);
-    this.logger.log(`reset_succeeded userId=${user.id}`);
-    try {
-      await this.mailer.sendChangedConfirmation(user.email);
-    } catch (err) {
-      this.logger.error(
-        `reset confirmation email failed userId=${user.id}`,
-        err instanceof Error ? err.stack : String(err),
-      );
-    }
-  }
-}
-```
-
-- [ ] **Step 4: Run test + typecheck to verify they pass**
-
-Run: `pnpm test -- password-reset.service && pnpm typecheck`
-Expected: PASS (9 tests) and no type errors.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add src/features/auth/password-reset.service.ts src/features/auth/password-reset.service.spec.ts
-git commit -m "feat(auth): add PasswordResetService (request + reset)"
+git add api/src/features/mailbox
+git commit -m "refactor(mailbox): throw via ExceptionService"
 ```
 
 ---
 
-## Task 13: DTOs + controller routes + AuthModule wiring
+### Task 16: Migrate the mastra module
 
-**Files:**
-- Create: `src/features/auth/dto/forgot-password.dto.ts`
-- Create: `src/features/auth/dto/reset-password.dto.ts`
-- Modify: `src/features/auth/auth.controller.ts` (two `@Public()` routes)
-- Modify: `src/features/auth/auth.module.ts` (import `EmailModule`; register providers)
+**Files:** Modify `api/src/features/mastra/services/approval.service.ts`, `conversation.service.ts` (+ specs). **Do NOT** change the raw `Error` invariants in `action-log.repository.ts:25`, `mastra-adapters.ts:183`, `agent-run.processor.ts:170` (internal invariants / BullMQ-retry, not HTTP-facing). Raw `MastraError` from `agent.generate()` reaching HTTP is normalized by the Mastra mapper.
 
-**Interfaces:**
-- Consumes: `PasswordResetService` (Task 12).
-- Produces: `POST /auth/forgot-password`, `POST /auth/reset-password`.
+**Replacement table:**
 
-- [ ] **Step 1: Create the DTOs**
+| File:line | Old | New | Override? |
+|---|---|---|---|
+| approval.service.ts:45 | `NotFoundException('Approval not found')` | `AGENT_APPROVAL_NOT_FOUND` | no |
+| approval.service.ts:47 | `ConflictException('Approval already decided')` | `AGENT_APPROVAL_CONFLICT` | no |
+| approval.service.ts:56 | `ForbiddenException('Not your approval')` | `AGENT_APPROVAL_FORBIDDEN` | no |
+| conversation.service.ts:33 | `NotFoundException('Conversation not found')` | `AGENT_CONVERSATION_NOT_FOUND` | no |
+| conversation.service.ts:39 | `ForbiddenException('Not your conversation')` | `FORBIDDEN` | **yes**: `{ message: 'Not your conversation' }` |
+| conversation.service.ts:59 | `NotFoundException('Conversation not found')` | `AGENT_CONVERSATION_NOT_FOUND` | no |
+| conversation.service.ts:61 | `ForbiddenException('Not your conversation')` | `FORBIDDEN` | **yes**: `{ message: 'Not your conversation' }` |
 
-Create `src/features/auth/dto/forgot-password.dto.ts`:
-```ts
-import { z } from 'zod';
-
-export const forgotPasswordSchema = z.object({
-  email: z.string().email(),
-});
-
-export type ForgotPasswordDto = z.infer<typeof forgotPasswordSchema>;
-```
-
-Create `src/features/auth/dto/reset-password.dto.ts`:
-```ts
-import { z } from 'zod';
-
-export const resetPasswordSchema = z.object({
-  email: z.string().email(),
-  code: z.string().regex(/^\d{6}$/, 'code must be 6 digits'),
-  newPassword: z.string().min(12).max(200),
-});
-
-export type ResetPasswordDto = z.infer<typeof resetPasswordSchema>;
-```
-
-- [ ] **Step 2: Add the controller routes**
-
-In `src/features/auth/auth.controller.ts`:
-
-Add imports:
-```ts
-import {
-  forgotPasswordSchema,
-  type ForgotPasswordDto,
-} from './dto/forgot-password.dto';
-import {
-  resetPasswordSchema,
-  type ResetPasswordDto,
-} from './dto/reset-password.dto';
-import { PasswordResetService } from './password-reset.service';
-```
-
-Inject the service — extend the constructor:
-```ts
-  constructor(
-    private readonly auth: AuthService,
-    private readonly credentials: ServiceCredentialService,
-    private readonly passwordReset: PasswordResetService,
-  ) {}
-```
-
-Add the two routes (place them near `login`/`refresh`, before `service-token`):
-```ts
-  @Public()
-  @Throttle({ default: { limit: 3, ttl: 900_000 } })
-  @Post('forgot-password')
-  @HttpCode(204)
-  async forgotPassword(
-    @Body(new ZodValidationPipe(forgotPasswordSchema)) body: ForgotPasswordDto,
-  ): Promise<void> {
-    await this.passwordReset.request(body.email);
-  }
-
-  @Public()
-  @Throttle({ default: { limit: 10, ttl: 900_000 } })
-  @Post('reset-password')
-  @HttpCode(204)
-  async resetPassword(
-    @Body(new ZodValidationPipe(resetPasswordSchema)) body: ResetPasswordDto,
-  ): Promise<void> {
-    await this.passwordReset.reset(body.email, body.code, body.newPassword);
-  }
-```
-
-- [ ] **Step 3: Wire AuthModule**
-
-In `src/features/auth/auth.module.ts`:
-
-Add imports:
-```ts
-import { EmailModule } from '../../infrastructure/email/email.module';
-import { PasswordResetRepository } from './password-reset.repository';
-import { PasswordResetService } from './password-reset.service';
-import { ResetCodeHasher } from './reset-code-hasher';
-import { ResetMailer } from './reset-mailer';
-```
-
-Add `EmailModule` to `imports`:
-```ts
-  imports: [UsersModule, PassportModule, JwtModule.register({}), EmailModule],
-```
-
-Add the four providers to the `providers` array:
-```ts
-    PasswordResetService,
-    PasswordResetRepository,
-    ResetCodeHasher,
-    ResetMailer,
-```
-
-(`UsersModule` already exports `UserRepository` + `PasswordService`; `SessionRepository` is already an auth provider; `ConfigService` is global.)
-
-- [ ] **Step 4: Verify build + typecheck**
-
-Run: `pnpm typecheck && pnpm build`
-Expected: no type errors; Nest build succeeds. (`PasswordResetService`'s deps all resolve: `UserRepository`/`PasswordService` from `UsersModule`, `SessionRepository` local, `MailerService` via `ResetMailer` from `EmailModule`.)
-
-- [ ] **Step 5: Commit**
-
+- [ ] **Step 1:** Update `approval.service.spec.ts`, `conversation.service.spec.ts`: inject `new ExceptionService()`; convert assertions. Run → FAIL.
+   Run: `cd api && npx jest src/features/mastra`
+- [ ] **Step 2:** Apply the migration recipe + table (import depth here is `../../../infrastructure/exceptions`).
+- [ ] **Step 3:** Run tests → PASS.
+   Run: `cd api && npx jest src/features/mastra`
+- [ ] **Step 4:** Commit.
 ```bash
-git add src/features/auth
-git commit -m "feat(auth): expose POST /auth/forgot-password and /auth/reset-password"
+git add api/src/features/mastra
+git commit -m "refactor(mastra): throw via ExceptionService"
 ```
 
 ---
 
-## Task 14: Build + typecheck + full unit verification
+## PHASE 3 — Verify end-to-end
 
-A whole-suite gate before the e2e — catches cross-module breakage from the Task 6 refactor.
+### Task 17: Full build, test suite, and manual envelope check
 
-- [ ] **Step 1: Run the full unit suite**
+**Files:** none (verification only).
 
-Run: `pnpm test`
-Expected: all specs PASS, including the refactored `smtp-config.service` / `imap-config.service` and every new email + auth spec. Investigate and fix any failure before proceeding.
+- [ ] **Step 1: Full build**
 
-- [ ] **Step 2: Typecheck + build**
+Run: `cd api && npm run build`
+Expected: success, zero TS errors.
 
-Run: `pnpm typecheck && pnpm build`
-Expected: no type errors; Nest build succeeds with no references to the deleted `smtp-tester`/`imap-tester` or the removed `sendActive`.
+- [ ] **Step 2: Full test suite**
+
+Run: `cd api && npm test`
+Expected: all suites PASS. Investigate any spec still asserting a removed Nest exception class and fix it to the code/status pattern.
 
 - [ ] **Step 3: Lint**
 
-Run: `pnpm lint`
-Expected: clean (auto-fixes applied). Resolve any remaining errors.
+Run: `cd api && npx eslint src/infrastructure/exceptions --max-warnings=0`
+Expected: clean (no unused `@nestjs/common` exception imports left behind in migrated files — extend the path if lint flags others).
 
-- [ ] **Step 4: Commit (only if lint/format changed files)**
+- [ ] **Step 4: Manual end-to-end envelope check**
+
+Boot the app and hit one route per kind, confirming the envelope + status:
+```bash
+cd api && npm run start:dev   # in one shell (uses .env datastore ports)
+# CLIENT 404:
+curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/users/00000000-0000-0000-0000-000000000000   # expect 404
+curl -s http://localhost:3000/users/00000000-0000-0000-0000-000000000000 | jq .   # expect { "error": { "code": "USER_NOT_FOUND", ... } }
+# VALIDATION 400 (post an invalid body to any zod-validated route) → { "error": { "code": "VALIDATION_FAILED", "details": { "issues": [...] } } }
+```
+Expected: every response is the standard envelope; `correlationId` present; no stack traces leak on 500s.
+
+- [ ] **Step 5: Final commit (if any spec/lint fixes were needed)**
 
 ```bash
 git add -A
-git commit -m "chore: lint + format after email module + forgot-password"
-```
-
-## Task 15: e2e — forgot → reset flow
-
-Boots the **auth + email module subset** (never `AppModule` — Mastra's ESM dep breaks Jest), overriding `MailerService` with a capturing fake so the test can read the generated code. Requires Postgres (migration from Task 7 applied via `pnpm db:migrate`) + Redis on the `.env` ports.
-
-> **Throttle note:** `POST /auth/forgot-password` carries a per-route `@Throttle({limit:3, ttl:900_000})` that the high global test limit does NOT override. The functional describe therefore makes **at most 3** forgot-password calls; the 429 assertion lives in a separate describe with its own app boot (in-memory throttler storage resets per app instance).
-
-**Files:**
-- Create: `test/password-reset.e2e-spec.ts`
-
-**Interfaces:**
-- Consumes: `AuthModule`, `UsersModule`, `MailerService` (overridden), `UsersService.create`.
-
-- [ ] **Step 1: Write the e2e spec**
-
-Create `test/password-reset.e2e-spec.ts`:
-
-```ts
-import { INestApplication } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
-import { Test } from '@nestjs/testing';
-import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
-import request from 'supertest';
-import { JwtAuthGuard } from '../src/common/guards/jwt-auth.guard';
-import { RolesGuard } from '../src/common/guards/roles.guard';
-import { ConfigModule } from '../src/config/config.module';
-import type { AuthConfig } from '../src/config/configurations/auth.config';
-import { AuthModule } from '../src/features/auth/auth.module';
-import { UsersModule } from '../src/features/users/users.module';
-import { UsersService } from '../src/features/users/users.service';
-import { DatabaseModule } from '../src/infrastructure/database/database.module';
-import { MailerService } from '../src/infrastructure/email/mailer.service';
-
-/** In-memory MailerService replacement that records every message. */
-class FakeMailer {
-  sent: { to: string; subject: string; text: string; html?: string }[] = [];
-  async send(msg: any) {
-    this.sent.push(msg);
-  }
-  async verifyActive() {
-    /* no-op */
-  }
-  lastCodeFor(to: string): string | null {
-    for (let i = this.sent.length - 1; i >= 0; i--) {
-      const m = this.sent[i];
-      if (m.to === to) {
-        const match = m.text.match(/\b(\d{6})\b/);
-        if (match) return match[1];
-      }
-    }
-    return null;
-  }
-}
-
-function buildModule(mailer: FakeMailer) {
-  return Test.createTestingModule({
-    imports: [
-      ConfigModule,
-      DatabaseModule,
-      ThrottlerModule.forRootAsync({
-        inject: [ConfigService],
-        useFactory: (c: ConfigService) => {
-          const a = c.getOrThrow<AuthConfig>('auth');
-          return [{ ttl: a.throttleTtl * 1000, limit: 10_000 }];
-        },
-      }),
-      AuthModule,
-      UsersModule,
-    ],
-    providers: [
-      { provide: APP_GUARD, useClass: ThrottlerGuard },
-      { provide: APP_GUARD, useClass: JwtAuthGuard },
-      { provide: APP_GUARD, useClass: RolesGuard },
-    ],
-  })
-    .overrideProvider(MailerService)
-    .useValue(mailer)
-    .compile();
-}
-
-describe('Password reset (e2e)', () => {
-  let app: INestApplication;
-  let mailer: FakeMailer;
-  const stamp = String(Date.now());
-  const userAEmail = `reset_a_${stamp}@e2e.local`;
-  const userBEmail = `reset_b_${stamp}@e2e.local`;
-  const oldPass = 'old-e2e-password-123';
-  const newPass = 'new-e2e-password-456';
-  let userARefresh: string;
-
-  beforeAll(async () => {
-    mailer = new FakeMailer();
-    const moduleRef = await buildModule(mailer);
-    app = moduleRef.createNestApplication();
-    await app.init();
-
-    const users = app.get(UsersService);
-    await users.create({ email: userAEmail, password: oldPass, role: 'user' });
-    await users.create({ email: userBEmail, password: oldPass, role: 'user' });
-
-    // Log userA in first to obtain a refresh token that reset must revoke.
-    const login = await request(app.getHttpServer())
-      .post('/auth/login')
-      .send({ email: userAEmail, password: oldPass })
-      .expect(200);
-    userARefresh = login.body.refreshToken;
-  });
-
-  afterAll(async () => {
-    await app?.close();
-  });
-
-  const server = () => app.getHttpServer();
-
-  // forgot-password call #1
-  it('completes the happy path: forgot → reset → login with new password', async () => {
-    await request(server())
-      .post('/auth/forgot-password')
-      .send({ email: userAEmail })
-      .expect(204);
-
-    const code = mailer.lastCodeFor(userAEmail);
-    expect(code).toMatch(/^\d{6}$/);
-
-    await request(server())
-      .post('/auth/reset-password')
-      .send({ email: userAEmail, code, newPassword: newPass })
-      .expect(204);
-
-    // New password works.
-    await request(server())
-      .post('/auth/login')
-      .send({ email: userAEmail, password: newPass })
-      .expect(200);
-
-    // Old password no longer works.
-    await request(server())
-      .post('/auth/login')
-      .send({ email: userAEmail, password: oldPass })
-      .expect(401);
-
-    // The pre-reset refresh token was revoked (all sessions killed).
-    await request(server())
-      .post('/auth/refresh')
-      .send({ refreshToken: userARefresh })
-      .expect(401);
-
-    // A confirmation email was sent.
-    expect(
-      mailer.sent.some(
-        (m) => m.to === userAEmail && /changed/i.test(m.subject),
-      ),
-    ).toBe(true);
-  });
-
-  // forgot-password call #2
-  it('returns 204 for an unknown email and sends no mail', async () => {
-    const before = mailer.sent.length;
-    await request(server())
-      .post('/auth/forgot-password')
-      .send({ email: `ghost_${stamp}@e2e.local` })
-      .expect(204);
-    expect(mailer.sent.length).toBe(before);
-  });
-
-  // forgot-password call #3
-  it('locks out after 5 wrong codes and burns the code', async () => {
-    await request(server())
-      .post('/auth/forgot-password')
-      .send({ email: userBEmail })
-      .expect(204);
-    const realCode = mailer.lastCodeFor(userBEmail);
-    expect(realCode).toMatch(/^\d{6}$/);
-
-    // A deliberately wrong 6-digit code (differs from the real one).
-    const wrong = realCode === '000000' ? '111111' : '000000';
-    for (let i = 0; i < 5; i++) {
-      await request(server())
-        .post('/auth/reset-password')
-        .send({ email: userBEmail, code: wrong, newPassword: newPass })
-        .expect(401);
-    }
-
-    // The correct code is now burned → still 401.
-    await request(server())
-      .post('/auth/reset-password')
-      .send({ email: userBEmail, code: realCode, newPassword: newPass })
-      .expect(401);
-
-    // userB's original password is unchanged.
-    await request(server())
-      .post('/auth/login')
-      .send({ email: userBEmail, password: oldPass })
-      .expect(200);
-  });
-
-  it('rejects malformed input with 400 (validation, pre-lookup)', async () => {
-    await request(server())
-      .post('/auth/reset-password')
-      .send({ email: userAEmail, code: '12', newPassword: 'short' })
-      .expect(400);
-  });
-});
-
-describe('Password reset throttling (e2e)', () => {
-  let app: INestApplication;
-
-  beforeAll(async () => {
-    const moduleRef = await buildModule(new FakeMailer());
-    app = moduleRef.createNestApplication();
-    await app.init();
-  });
-
-  afterAll(async () => {
-    await app?.close();
-  });
-
-  it('throttles forgot-password after 3 requests (429 on the 4th)', async () => {
-    const email = `throttle_${Date.now()}@e2e.local`;
-    for (let i = 0; i < 3; i++) {
-      await request(app.getHttpServer())
-        .post('/auth/forgot-password')
-        .send({ email })
-        .expect(204);
-    }
-    await request(app.getHttpServer())
-      .post('/auth/forgot-password')
-      .send({ email })
-      .expect(429);
-  });
-});
-```
-
-- [ ] **Step 2: Apply the migration (if not already applied)**
-
-Run: `pnpm db:migrate`
-Expected: `password_reset_codes` created in the target database.
-
-- [ ] **Step 3: Run the e2e**
-
-Run: `pnpm test:e2e -- password-reset.e2e`
-Expected: all tests PASS (Postgres + Redis must be up on the `.env` ports).
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add test/password-reset.e2e-spec.ts
-git commit -m "test(auth): e2e for forgot-password/reset flow, lockout, throttle"
+git commit -m "test(exceptions): finalize migration; full build + suite green"
 ```
 
 ---
 
-## Coverage & Notes
+## Self-Review (completed by plan author)
 
-**Spec → task mapping**
-
-- Email module structure, types, `NoActiveEmailConfigError` — Tasks 1, 2, 3, 5.
-- SMTP send seam (`MailerService`) — Tasks 2, 5.
-- Full IMAP receive (`InboxService`: verify/list/fetch+parse/flags) — Tasks 3, 5.
-- Active-config resolution, dependency direction (infra-only) — Task 4.
-- System/mastra refactor (drop `sendActive`, delete testers, delegate `test()`) — Task 6.
-- `password_reset_codes` table + HMAC-pepper storage — Tasks 7, 9.
-- Config/env (`PASSWORD_RESET_PEPPER`, `passwordReset` block) — Task 8.
-- Single-active code, verify/lockout lifecycle, revoke-all, confirmation, enumeration-safe uniform `401` — Tasks 10, 11, 12.
-- Public throttled endpoints, DTO validation `400` — Task 13.
-- Full-suite gate + e2e (happy path, unknown email, lockout, validation `400`, throttle `429`) — Tasks 14, 15.
-
-**Known limitations / deferred (per the design's §15):**
-
-- **IMAP real-API validation:** unit tests mock `imapflow`/`mailparser`, so the transport's correctness against a live server is not exercised by CI (no inbound consumer yet). Validate `InboxService` manually against a real/greenmail IMAP mailbox before relying on it. Confirm the `imapflow`/`mailparser` typings match the mappings in Task 3 during implementation.
-- **Expired-code path** is covered by the Task 12 unit test (injected past `expiresAt`), not e2e (no time-travel in the HTTP flow).
-- No IMAP HTTP endpoint / poller, no pooled IMAP connection, no expired-code sweep job, no password-history check — all deferred.
-- **Timing equalization** on `reset` uses a matched HMAC (`DECOY_CODE_HASH`) on the failure paths; residual DB-query-count differences between "unknown email" and "wrong code" are accepted for v1.
-
-
-
-
+- **Spec coverage:** design §4 (registry) → Task 1; §5 (envelope) → Task 3; §6 (AppException) → Task 2; §7 (ExceptionService/from) → Task 6; §8 (Mastra map) → Task 4; §9 (infra map) → Task 5; §10 (filter + wiring + Sentry removal) → Tasks 7–8; §11.2 (validation shape) → Tasks 9,13; §11.1 (403-vs-404) → Task 12; §12 (full migration) → Tasks 9–16; §13 (testing) → every task + Task 17. Covered.
+- **Placeholder scan:** none — every code/test/command is concrete.
+- **Type consistency:** `ErrorCode`/`ErrorKind`/`ERROR_REGISTRY`/`STATUS_TO_CODE`/`AppException(code, opts)`/`ExceptionService.create|validation|from`/`buildEnvelope(err, correlationId, path)`/`isMastraError`/`mapMastraError`/`mapInfraError` names are used identically across all tasks.
+- **Out-of-scope (intentional, documented in-task):** BullMQ/processor job-payload `Error`s, internal invariants, boot-time crypto misconfig, and best-effort swallow-and-log paths are explicitly left unchanged.
