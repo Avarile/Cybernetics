@@ -17,6 +17,7 @@ import { QueueModule } from './infrastructure/queue/queue.module';
 import { SearchEngineModule } from './infrastructure/search-engine/search-engine.module';
 import { AuthModule } from './features/auth/auth.module';
 import { FileProcessorModule } from './features/file-processor/file-processor.module';
+import { MailboxModule } from './features/mailbox/mailbox.module';
 import { MastraModule } from './features/mastra/mastra.module';
 import { SearchServiceModule } from './features/search-service/search-service.module';
 import { SystemModule } from './features/system/system.module';
@@ -57,6 +58,7 @@ import { UsersModule } from './features/users/users.module';
     FileProcessorModule,
     SearchServiceModule,
     SystemModule,
+    MailboxModule,
 
     // Mastra AI — must remain last.
     MastraModule,
