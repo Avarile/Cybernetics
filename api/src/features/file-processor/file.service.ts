@@ -1,16 +1,11 @@
 import { InjectQueue } from '@nestjs/bullmq';
-import {
-  BadRequestException,
-  ConflictException,
-  Inject,
-  Injectable,
-  NotFoundException,
-} from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Queue } from 'bullmq';
 import { createHash } from 'node:crypto';
 import type { Readable } from 'node:stream';
 import type { StorageConfig } from '../../config/configurations/storage.config';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { OBJECT_STORAGE } from '../../infrastructure/file-manage/minio.constants';
 import type {
   ObjectStorage,
@@ -73,6 +68,7 @@ export class FileService {
     private readonly repo: FileRepository,
     @InjectQueue(FILE_PROCESSING_QUEUE) private readonly queue: Queue,
     config: ConfigService,
+    private readonly errors: ExceptionService,
   ) {
     const storageConfig = config.getOrThrow<StorageConfig>('storage');
     this.maxFileSize = storageConfig.maxFileSize;
@@ -138,15 +134,13 @@ export class FileService {
   ): Promise<FileMetadata> {
     const row = await this.loadOwned(fileId, owner);
     if (row.status !== 'PENDING') {
-      throw new ConflictException(
-        `File is not awaiting upload (status=${row.status})`,
-      );
+      throw this.errors.create(ErrorCode.FILE_INVALID_STATE, {
+        message: `File is not awaiting upload (status=${row.status})`,
+      });
     }
 
     if (!(await this.storage.objectExists(row.objectKey))) {
-      throw new BadRequestException(
-        'Upload not found in storage; upload the file before completing',
-      );
+      throw this.errors.create(ErrorCode.FILE_UPLOAD_MISSING);
     }
 
     const stat = await this.storage.statObject(row.objectKey);
@@ -156,16 +150,16 @@ export class FileService {
       if ((await this.repo.countLiveReferences(row.objectKey)) === 0) {
         await this.storage.removeObject(row.objectKey);
       }
-      throw new BadRequestException(
-        `Uploaded file size ${stat.size} exceeds the maximum of ${this.maxFileSize} bytes`,
-      );
+      throw this.errors.create(ErrorCode.FILE_TOO_LARGE, {
+        message: `Uploaded file size ${stat.size} exceeds the maximum of ${this.maxFileSize} bytes`,
+      });
     }
 
     const updated = await this.repo.markStatus(fileId, 'AVAILABLE', {
       size: stat.size,
       checksumSha256: dto?.sha256?.toLowerCase() ?? row.checksumSha256,
     });
-    if (!updated) throw new NotFoundException('File not found');
+    if (!updated) throw this.errors.create(ErrorCode.FILE_NOT_FOUND);
 
     await this.enqueueProcessing(fileId);
     return toFileMetadata(updated);
@@ -210,9 +204,9 @@ export class FileService {
   ): Promise<PresignedTarget> {
     const row = await this.loadOwned(fileId, owner);
     if (row.status !== 'AVAILABLE') {
-      throw new ConflictException(
-        `File is not available (status=${row.status})`,
-      );
+      throw this.errors.create(ErrorCode.FILE_INVALID_STATE, {
+        message: `File is not available (status=${row.status})`,
+      });
     }
     return this.storage.presignedGetUrl(row.objectKey, {
       expiresIn: opts?.ttl ?? this.presignExpiry,
@@ -276,9 +270,9 @@ export class FileService {
   ): Promise<Readable> {
     const row = await this.loadOwned(fileId, owner);
     if (row.status !== 'AVAILABLE') {
-      throw new ConflictException(
-        `File is not available (status=${row.status})`,
-      );
+      throw this.errors.create(ErrorCode.FILE_INVALID_STATE, {
+        message: `File is not available (status=${row.status})`,
+      });
     }
     return this.storage.getObjectStream(row.objectKey);
   }
@@ -291,12 +285,14 @@ export class FileService {
     allowAnyMime = false,
   ): void {
     if (!allowAnyMime && !isMimeAllowed(mimeType, this.allowedMimeTypes)) {
-      throw new BadRequestException(`MIME type "${mimeType}" is not allowed`);
+      throw this.errors.create(ErrorCode.FILE_MIME_NOT_ALLOWED, {
+        message: `MIME type "${mimeType}" is not allowed`,
+      });
     }
     if (size !== undefined && size > this.maxFileSize) {
-      throw new BadRequestException(
-        `File size ${size} exceeds the maximum of ${this.maxFileSize} bytes`,
-      );
+      throw this.errors.create(ErrorCode.FILE_TOO_LARGE, {
+        message: `File size ${size} exceeds the maximum of ${this.maxFileSize} bytes`,
+      });
     }
   }
 
@@ -304,7 +300,7 @@ export class FileService {
   private async loadOwned(fileId: string, owner: FilePrincipal) {
     const row = await this.repo.findById(fileId);
     if (!row || row.isDeleted || row.ownerId !== owner.id) {
-      throw new NotFoundException('File not found');
+      throw this.errors.create(ErrorCode.FILE_NOT_FOUND);
     }
     return row;
   }

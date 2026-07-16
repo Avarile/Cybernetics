@@ -1,9 +1,5 @@
-import {
-  BadRequestException,
-  ConflictException,
-  NotFoundException,
-} from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { FileService } from './file.service';
 
 // Test doubles are intentionally loosely typed.
@@ -77,7 +73,13 @@ describe('FileService', () => {
       countLiveReferences: jest.fn(async () => 0),
     };
     queue = { add: jest.fn(async () => undefined) };
-    service = new FileService(storage, repo, queue, config);
+    service = new FileService(
+      storage,
+      repo,
+      queue,
+      config,
+      new ExceptionService(),
+    );
   });
 
   describe('initiateUpload', () => {
@@ -123,7 +125,7 @@ describe('FileService', () => {
           { filename: 'a', mimeType: 'text/plain', size: 1000 },
           { id: null },
         ),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      ).rejects.toMatchObject({ code: ErrorCode.FILE_TOO_LARGE });
     });
 
     it('rejects a disallowed MIME type', async () => {
@@ -134,13 +136,19 @@ describe('FileService', () => {
           presignExpirySeconds: 300,
         }),
       } as unknown as ConfigService;
-      const restricted = new FileService(storage, repo, queue, cfg);
+      const restricted = new FileService(
+        storage,
+        repo,
+        queue,
+        cfg,
+        new ExceptionService(),
+      );
       await expect(
         restricted.initiateUpload(
           { filename: 'a', mimeType: 'text/plain', size: 10 },
           { id: null },
         ),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      ).rejects.toMatchObject({ code: ErrorCode.FILE_MIME_NOT_ALLOWED });
     });
   });
 
@@ -161,7 +169,10 @@ describe('FileService', () => {
       repo.findById.mockResolvedValueOnce(makeRow({ status: 'AVAILABLE' }));
       await expect(
         service.completeUpload('id', { id: null }),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        code: ErrorCode.FILE_INVALID_STATE,
+        message: 'File is not awaiting upload (status=AVAILABLE)',
+      });
     });
 
     it('rejects when the object is missing from storage', async () => {
@@ -169,7 +180,7 @@ describe('FileService', () => {
       storage.objectExists.mockResolvedValueOnce(false);
       await expect(
         service.completeUpload('id', { id: null }),
-      ).rejects.toBeInstanceOf(BadRequestException);
+      ).rejects.toMatchObject({ code: ErrorCode.FILE_UPLOAD_MISSING });
     });
   });
 
@@ -180,7 +191,7 @@ describe('FileService', () => {
       );
       await expect(
         service.getMetadata('id', { id: 'me' }),
-      ).rejects.toBeInstanceOf(NotFoundException);
+      ).rejects.toMatchObject({ code: ErrorCode.FILE_NOT_FOUND });
     });
   });
 
@@ -195,7 +206,10 @@ describe('FileService', () => {
       repo.findById.mockResolvedValueOnce(makeRow({ status: 'PENDING' }));
       await expect(
         service.getDownloadUrl('id', { id: null }),
-      ).rejects.toBeInstanceOf(ConflictException);
+      ).rejects.toMatchObject({
+        code: ErrorCode.FILE_INVALID_STATE,
+        message: 'File is not available (status=PENDING)',
+      });
     });
   });
 
@@ -224,6 +238,7 @@ describe('FileService', () => {
         repo,
         queue,
         restrictedConfig,
+        new ExceptionService(),
       );
       await expect(
         restricted.putFromStream(
@@ -231,7 +246,10 @@ describe('FileService', () => {
           { filename: 'a.bin', mimeType: 'application/zip', size: 4 },
           { id: null },
         ),
-      ).rejects.toThrow(/not allowed/);
+      ).rejects.toMatchObject({
+        code: ErrorCode.FILE_MIME_NOT_ALLOWED,
+        message: expect.stringMatching(/not allowed/),
+      });
     });
 
     it('accepts a disallowed MIME when allowAnyMime is set', async () => {
@@ -240,6 +258,7 @@ describe('FileService', () => {
         repo,
         queue,
         restrictedConfig,
+        new ExceptionService(),
       );
       const res = await restricted.putFromStream(
         Buffer.from('x'),
@@ -261,6 +280,7 @@ describe('FileService', () => {
         repo,
         queue,
         restrictedConfig,
+        new ExceptionService(),
       );
       await expect(
         restricted.putFromStream(
@@ -273,7 +293,10 @@ describe('FileService', () => {
           },
           { id: null },
         ),
-      ).rejects.toThrow(/exceeds the maximum/);
+      ).rejects.toMatchObject({
+        code: ErrorCode.FILE_TOO_LARGE,
+        message: expect.stringMatching(/exceeds the maximum/),
+      });
     });
   });
 });
