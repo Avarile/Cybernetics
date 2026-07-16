@@ -13,3 +13,4 @@ export * from './identity.schema';
 export * from './system.schema';
 export * from './search.schema';
 export * from './agent.schema';
+export * from './password-reset.schema';
