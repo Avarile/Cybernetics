@@ -5,7 +5,14 @@ import { readRuntime } from './tool-context';
 
 export const searchQueryInput = z.object({
   collection: z.string().min(1),
-  query: z.string().default(''),
+  query: z
+    .string()
+    .default('')
+    .describe(
+      'Full-text query. Matches ONLY the collection\'s searchable text fields. ' +
+        'To list or analyze ALL records in a collection, pass an empty string (""). ' +
+        'Only supply text for a keyword lookup; use `filters` for exact field matches.',
+    ),
   filters: z
     .record(z.string(), z.union([z.string(), z.number(), z.boolean()]))
     .optional(),
@@ -40,7 +47,10 @@ export function makeSearchQueryTool(services: ToolServices) {
   return createTool({
     id: 'search-query',
     description:
-      'Search a collection and return the top matches with facet counts. Read-only. Use to gather data before analysis; never request more than 25 results.',
+      'Search a collection and return the top matches with facet counts. Read-only. ' +
+      'The `query` is full-text over searchable text fields only — to list or analyze an ENTIRE ' +
+      'collection, pass an EMPTY query (""); only pass query text for a keyword lookup, and use ' +
+      '`filters` for exact field matches. Use to gather data before analysis; never request more than 25 results.',
     inputSchema: searchQueryInput,
     outputSchema: z.object({
       collection: z.string(),

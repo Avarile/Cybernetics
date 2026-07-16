@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { MastraService } from '@mastra/nestjs';
+import type { MastraConfig } from '../../../config/configurations/mastra.config';
 import { AGENT_ID } from '../mastra.constants';
 import type { PendingApproval, PrincipalRef } from '../mastra.types';
 import { AgentRunRepository } from '../repositories/agent-run.repository';
@@ -31,12 +33,22 @@ export interface ChatResult {
  */
 @Injectable()
 export class AgentRunnerService {
+  /**
+   * The configured model slug (e.g. `anthropic/claude-sonnet-4.6`). Used as the
+   * ledger's `model` value because the AI Gateway provider does not return a
+   * served model id on the result — see `mastra-adapters.ts::readUsage`.
+   */
+  private readonly configuredModel: string;
+
   constructor(
     private readonly conversations: ConversationService,
     private readonly runs: AgentRunRepository,
     private readonly approvals: ApprovalRepository,
     private readonly mastra: MastraService,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.configuredModel = config.getOrThrow<MastraConfig>('mastra').model;
+  }
 
   async runChat(
     principal: PrincipalRef,
@@ -85,7 +97,7 @@ export class AgentRunnerService {
       await this.runs.finish(run.id, {
         status: pending.length ? 'awaiting_approval' : 'succeeded',
         output: { text: usage.text },
-        model: usage.model,
+        model: usage.model ?? this.configuredModel,
         tokensInput: usage.tokensInput,
         tokensOutput: usage.tokensOutput,
         finishedAt: new Date(),

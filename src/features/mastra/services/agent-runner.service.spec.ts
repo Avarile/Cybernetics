@@ -30,13 +30,17 @@ function make(genResult: unknown) {
   const approvals = { create: jest.fn(async () => ({ id: 'appr-1' })) };
   const agent = { generate: jest.fn(async () => genResult) };
   const mastra = { getAgent: jest.fn(() => agent) };
+  const config = {
+    getOrThrow: jest.fn(() => ({ model: 'anthropic/claude-sonnet-4.6' })),
+  };
   const service = new AgentRunnerService(
     conversations as never,
     runs as never,
     approvals as never,
     mastra as never,
+    config as never,
   );
-  return { service, conversations, runs, approvals, agent, mastra };
+  return { service, conversations, runs, approvals, agent, mastra, config };
 }
 
 describe('AgentRunnerService.runChat', () => {
@@ -61,6 +65,24 @@ describe('AgentRunnerService.runChat', () => {
       }),
     );
     expect(conversations.touch).toHaveBeenCalledWith('conv-1');
+  });
+
+  it('falls back to the configured model slug when the result carries no served model id', async () => {
+    // The AI Gateway provider leaves modelId blank: top-level `response` has none
+    // and the per-step `response.modelId` is an empty string — see readUsage.
+    const { service, runs } = make({
+      finishReason: 'stop',
+      text: 'Answer',
+      totalUsage: { inputTokens: 10, outputTokens: 5 },
+      response: {},
+      steps: [{ response: { modelId: '' } }],
+      runId: 'mastra-run-1b',
+    });
+    await service.runChat({ id: 'u1' }, { message: 'hi' });
+    expect(runs.finish).toHaveBeenCalledWith(
+      'run-1',
+      expect.objectContaining({ model: 'anthropic/claude-sonnet-4.6' }),
+    );
   });
 
   it('persists pending approvals and marks the run awaiting_approval', async () => {

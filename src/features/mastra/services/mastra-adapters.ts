@@ -81,8 +81,14 @@ export function toPendingApprovals(result: unknown): PendingApproval[] {
  *   `FullOutput` doc comment, while `totalUsage` is the aggregate across every step in
  *   the turn (relevant when the agent loops through tool calls before finishing); we bind
  *   to `totalUsage` (falling back to `usage`) so the run ledger reflects the whole turn.
- * - `model` is NOT a top-level `FullOutput` field. It lives at
- *   `response.modelId` (`LLMStepResult['response']`, `dist/stream/types.d.ts` ~L1148-1159).
+ * - `model` is NOT a top-level `FullOutput` field. It is documented to live at
+ *   `response.modelId` (`LLMStepResult['response']`, `dist/stream/types.d.ts` ~L1148-1159),
+ *   but EMPIRICALLY the Vercel AI Gateway provider (`@ai-sdk/gateway@4.0.20`) leaves it
+ *   BLANK: top-level `response` carries no `modelId`, and the per-step
+ *   `steps[i].response.modelId` is an empty string `''`. So there is no reliable served
+ *   model id on the result today. We still read it defensively (top-level, then last step,
+ *   coercing `''` → null) so this survives a future provider that DOES populate it, and the
+ *   caller (`AgentRunnerService`) falls back to the configured model slug when it is null.
  */
 export function readUsage(result: unknown): {
   model: string | null;
@@ -95,10 +101,13 @@ export function readUsage(result: unknown): {
     usage?: { inputTokens?: number; outputTokens?: number };
     totalUsage?: { inputTokens?: number; outputTokens?: number };
     response?: { modelId?: string };
+    steps?: Array<{ response?: { modelId?: string } }>;
   };
   const usage = r.totalUsage ?? r.usage;
+  const stepModel = r.steps?.[r.steps.length - 1]?.response?.modelId;
+  const model = (r.response?.modelId || stepModel || '').trim() || null;
   return {
-    model: r.response?.modelId ?? null,
+    model,
     tokensInput: usage?.inputTokens ?? null,
     tokensOutput: usage?.outputTokens ?? null,
     text: r.text ?? '',

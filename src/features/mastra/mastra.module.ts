@@ -15,11 +15,8 @@ import type { ToolServices } from './mastra.types';
 import { ChatController } from './controllers/chat.controller';
 import { ApprovalController } from './controllers/approval.controller';
 import { ScheduleController } from './controllers/schedule.controller';
-import { ConversationRepository } from './repositories/conversation.repository';
-import { AgentRunRepository } from './repositories/agent-run.repository';
-import { ApprovalRepository } from './repositories/approval.repository';
+import { MastraRepositoriesModule } from './mastra-repositories.module';
 import { ActionLogRepository } from './repositories/action-log.repository';
-import { ScheduleRepository } from './repositories/schedule.repository';
 import { ConversationService } from './services/conversation.service';
 import { AgentRunnerService } from './services/agent-runner.service';
 import { ApprovalService } from './services/approval.service';
@@ -49,9 +46,10 @@ import { AgentScheduleScheduler } from './schedulers/agent-schedule.scheduler';
   imports: [
     SearchServiceModule,
     SystemModule,
+    MastraRepositoriesModule,
     BullModule.registerQueue({ name: AGENT_RUN_QUEUE }),
     MastraCoreModule.registerAsync({
-      imports: [SearchServiceModule, SystemModule],
+      imports: [SearchServiceModule, SystemModule, MastraRepositoriesModule],
       inject: [
         ConfigService,
         SearchRecordService,
@@ -81,11 +79,6 @@ import { AgentScheduleScheduler } from './schedulers/agent-schedule.scheduler';
   ],
   controllers: [ChatController, ApprovalController, ScheduleController],
   providers: [
-    ConversationRepository,
-    AgentRunRepository,
-    ApprovalRepository,
-    ActionLogRepository,
-    ScheduleRepository,
     ConversationService,
     AgentRunnerService,
     ApprovalService,
