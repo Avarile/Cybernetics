@@ -9,6 +9,7 @@ import { RolesGuard } from './common/guards/roles.guard';
 import { CacheModule } from './infrastructure/cache/cache.module';
 import { SessionCacheModule } from './infrastructure/cache/session/session-cache.module';
 import { DatabaseModule } from './infrastructure/database/database.module';
+import { ExceptionsModule } from './infrastructure/exceptions';
 import { FileManageModule } from './infrastructure/file-manage/file-manage.module';
 import { HealthModule } from './infrastructure/health/health.module';
 import { LoggerModule } from './infrastructure/logger/logger.module';
@@ -44,6 +45,7 @@ import { UsersModule } from './features/users/users.module';
     }),
 
     LoggerModule,
+    ExceptionsModule,
     DatabaseModule,
     CacheModule,
     SessionCacheModule,
