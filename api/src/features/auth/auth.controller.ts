@@ -21,13 +21,22 @@ import {
   changePasswordSchema,
   type ChangePasswordDto,
 } from './dto/change-password.dto';
+import {
+  forgotPasswordSchema,
+  type ForgotPasswordDto,
+} from './dto/forgot-password.dto';
 import { loginSchema, type LoginDto } from './dto/login.dto';
 import { logoutSchema, type LogoutDto } from './dto/logout.dto';
 import { refreshSchema, type RefreshDto } from './dto/refresh.dto';
 import {
+  resetPasswordSchema,
+  type ResetPasswordDto,
+} from './dto/reset-password.dto';
+import {
   serviceTokenSchema,
   type ServiceTokenDto,
 } from './dto/service-token.dto';
+import { PasswordResetService } from './password-reset.service';
 import { ServiceCredentialService } from './service-credential.service';
 
 function reqContext(req: Request) {
@@ -39,6 +48,7 @@ export class AuthController {
   constructor(
     private readonly auth: AuthService,
     private readonly credentials: ServiceCredentialService,
+    private readonly passwordReset: PasswordResetService,
   ) {}
 
   @Public()
@@ -99,6 +109,26 @@ export class AuthController {
       body.currentPassword,
       body.newPassword,
     );
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 3, ttl: 900_000 } })
+  @Post('forgot-password')
+  @HttpCode(204)
+  async forgotPassword(
+    @Body(new ZodValidationPipe(forgotPasswordSchema)) body: ForgotPasswordDto,
+  ): Promise<void> {
+    await this.passwordReset.request(body.email);
+  }
+
+  @Public()
+  @Throttle({ default: { limit: 10, ttl: 900_000 } })
+  @Post('reset-password')
+  @HttpCode(204)
+  async resetPassword(
+    @Body(new ZodValidationPipe(resetPasswordSchema)) body: ResetPasswordDto,
+  ): Promise<void> {
+    await this.passwordReset.reset(body.email, body.code, body.newPassword);
   }
 
   @Public()
