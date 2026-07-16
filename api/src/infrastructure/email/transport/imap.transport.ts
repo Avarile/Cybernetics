@@ -57,6 +57,7 @@ export async function listMessages(
         });
       }
       // Newest last from the server; return newest first, capped at `limit`.
+      if (limit <= 0) return [];
       return out.slice(-limit).reverse();
     } finally {
       lock.release();

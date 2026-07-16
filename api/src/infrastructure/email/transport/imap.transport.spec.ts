@@ -108,6 +108,20 @@ describe('imap.transport', () => {
     ]);
   });
 
+  it('listMessages returns an empty array when limit is 0', async () => {
+    currentClient.fetch.mockReturnValue(
+      iter([
+        {
+          uid: 1,
+          envelope: { subject: 'one', date: new Date('2020-01-01'), from: [] },
+          flags: new Set(),
+        },
+      ]),
+    );
+    const res = await listMessages(conn, { limit: 0 });
+    expect(res).toEqual([]);
+  });
+
   it('fetchMessage parses the raw source into a ParsedMessage', async () => {
     currentClient.fetchOne.mockResolvedValue({
       uid: 7,
@@ -144,6 +158,25 @@ describe('imap.transport', () => {
         { filename: 'f.pdf', contentType: 'application/pdf', size: 10 },
       ],
     });
+  });
+
+  it('fetchMessage flattens multiple To: addresses to text', async () => {
+    currentClient.fetchOne.mockResolvedValue({
+      uid: 8,
+      source: Buffer.from('raw'),
+      flags: new Set(),
+    });
+    simpleParserMock.mockResolvedValue({
+      subject: 'Hi all',
+      from: { value: [{ address: 'a@x.com', name: 'A' }] },
+      to: [{ text: 'a@x.com' }, { text: 'b@x.com' }],
+      date: new Date('2020-06-01'),
+      text: 'body',
+      html: false,
+      attachments: [],
+    });
+    const res = await fetchMessage(conn, 8);
+    expect(res?.to).toBe('a@x.com, b@x.com');
   });
 
   it('fetchMessage returns null when the message is missing', async () => {
