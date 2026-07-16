@@ -1,15 +1,9 @@
 import { InjectQueue } from '@nestjs/bullmq';
-import {
-  BadRequestException,
-  Inject,
-  Injectable,
-  Logger,
-  NotFoundException,
-  ServiceUnavailableException,
-} from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Queue } from 'bullmq';
 import type { SearchConfig } from '../../config/configurations/search.config';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { SEARCH_ENGINE } from '../../infrastructure/search-engine/meili.constants';
 import {
   SearchEngineError,
@@ -63,6 +57,7 @@ export class SearchRecordService {
     private readonly registry: IndexRegistry,
     @InjectQueue(SEARCH_INDEXING_QUEUE) private readonly queue: Queue,
     config: ConfigService,
+    private readonly errors: ExceptionService,
   ) {
     const cfg = config.getOrThrow<SearchConfig>('search');
     this.defaultPageSize = cfg.defaultPageSize;
@@ -79,10 +74,10 @@ export class SearchRecordService {
     for (const [i, input] of inputs.entries()) {
       const errors = validateDocument(def.fields, input.document);
       if (errors.length) {
-        throw new BadRequestException({
-          message: `Record ${i} failed validation`,
-          issues: errors,
-        });
+        throw this.errors.validation(
+          errors.map((m) => ({ path: `records[${i}]`, message: m })),
+          { message: `Record ${i} failed validation` },
+        );
       }
     }
 
@@ -98,7 +93,10 @@ export class SearchRecordService {
           externalId,
         );
         if (existing) {
-          if (existing.checksum === checksum && existing.indexState === 'INDEXED') {
+          if (
+            existing.checksum === checksum &&
+            existing.indexState === 'INDEXED'
+          ) {
             results.push({
               id: existing.id,
               externalId: existing.externalId,
@@ -141,7 +139,7 @@ export class SearchRecordService {
     let row = UUID_RE.test(key) ? await this.records.findLiveById(key) : null;
     if (!row) row = await this.records.findLiveByExternalId(collection, key);
     if (!row || row.collection !== collection) {
-      throw new NotFoundException('Record not found');
+      throw this.errors.create(ErrorCode.SEARCH_RECORD_NOT_FOUND);
     }
     await this.records.softDelete(row.id);
     await this.queue.add(
@@ -194,7 +192,9 @@ export class SearchRecordService {
     } catch (error) {
       if (error instanceof SearchEngineError) {
         this.logger.warn(`Search failed on "${collection}": ${error.message}`);
-        throw new ServiceUnavailableException('Search is temporarily unavailable');
+        throw this.errors.create(ErrorCode.SEARCH_UNAVAILABLE, {
+          cause: error,
+        });
       }
       throw error;
     }
@@ -202,7 +202,11 @@ export class SearchRecordService {
 
   private async requireCollection(name: string): Promise<CompiledCollection> {
     const def = await this.registry.resolve(name);
-    if (!def) throw new NotFoundException(`Unknown collection "${name}"`);
+    if (!def) {
+      throw this.errors.create(ErrorCode.SEARCH_COLLECTION_NOT_FOUND, {
+        message: `Unknown collection "${name}"`,
+      });
+    }
     return def;
   }
 
@@ -213,7 +217,9 @@ export class SearchRecordService {
     const clauses: string[] = [];
     for (const [field, value] of Object.entries(filters ?? {})) {
       if (!def.definition.filterableAttributes.includes(field)) {
-        throw new BadRequestException(`Unknown filter field "${field}"`);
+        throw this.errors.create(ErrorCode.SEARCH_QUERY_INVALID, {
+          message: `Unknown filter field "${field}"`,
+        });
       }
       clauses.push(toFilterClause(field, value));
     }
@@ -228,7 +234,9 @@ export class SearchRecordService {
         !def.definition.sortableAttributes.includes(field) ||
         (dir !== 'asc' && dir !== 'desc')
       ) {
-        throw new BadRequestException(`Invalid sort "${entry}"`);
+        throw this.errors.create(ErrorCode.SEARCH_QUERY_INVALID, {
+          message: `Invalid sort "${entry}"`,
+        });
       }
       return `${field}:${dir}`;
     });
@@ -243,7 +251,9 @@ export class SearchRecordService {
       (f) => !def.definition.filterableAttributes.includes(f),
     );
     if (invalid.length) {
-      throw new BadRequestException(`Unknown facet(s): ${invalid.join(', ')}`);
+      throw this.errors.create(ErrorCode.SEARCH_QUERY_INVALID, {
+        message: `Unknown facet(s): ${invalid.join(', ')}`,
+      });
     }
     return facets;
   }

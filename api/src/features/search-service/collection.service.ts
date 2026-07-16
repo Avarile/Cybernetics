@@ -1,13 +1,12 @@
 import { InjectQueue } from '@nestjs/bullmq';
 import {
-  ConflictException,
   Inject,
   Injectable,
   Logger,
-  NotFoundException,
   type OnApplicationBootstrap,
 } from '@nestjs/common';
 import { Queue } from 'bullmq';
+import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { SEARCH_ENGINE } from '../../infrastructure/search-engine/meili.constants';
 import type { SearchEngine } from '../../infrastructure/search-engine/search-engine.interface';
 import type { FieldSpec } from '../../infrastructure/database/schema/search.schema';
@@ -15,7 +14,10 @@ import { CollectionRepository } from './collection.repository';
 import { fieldSpecToIndexDefinition } from './document-validator';
 import { IndexRegistry } from './index-registry';
 import { SearchRecordRepository } from './search-record.repository';
-import { REINDEX_COLLECTION_JOB, SEARCH_INDEXING_QUEUE } from './search.constants';
+import {
+  REINDEX_COLLECTION_JOB,
+  SEARCH_INDEXING_QUEUE,
+} from './search.constants';
 import { INDEXING_JOB_OPTS } from './search.util';
 
 /** A collection as returned to API callers. */
@@ -56,6 +58,7 @@ export class CollectionService implements OnApplicationBootstrap {
     private readonly records: SearchRecordRepository,
     private readonly registry: IndexRegistry,
     @InjectQueue(SEARCH_INDEXING_QUEUE) private readonly queue: Queue,
+    private readonly errors: ExceptionService,
   ) {}
 
   /** Warm the registry and converge Meili settings at boot (best-effort). */
@@ -64,7 +67,9 @@ export class CollectionService implements OnApplicationBootstrap {
     try {
       compiled = await this.registry.warm();
     } catch (error) {
-      this.logger.warn(`Failed to warm collection registry: ${asMessage(error)}`);
+      this.logger.warn(
+        `Failed to warm collection registry: ${asMessage(error)}`,
+      );
       return;
     }
     for (const def of compiled) {
@@ -80,7 +85,9 @@ export class CollectionService implements OnApplicationBootstrap {
 
   async create(input: CreateCollectionInput): Promise<CollectionView> {
     if (await this.collections.findByName(input.name)) {
-      throw new ConflictException(`Collection "${input.name}" already exists`);
+      throw this.errors.create(ErrorCode.SEARCH_COLLECTION_EXISTS, {
+        message: `Collection "${input.name}" already exists`,
+      });
     }
     await this.engine.ensureIndex(
       fieldSpecToIndexDefinition(input.name, input.fields),
@@ -101,7 +108,11 @@ export class CollectionService implements OnApplicationBootstrap {
 
   async get(name: string): Promise<CollectionView> {
     const row = await this.collections.findByName(name);
-    if (!row) throw new NotFoundException(`Unknown collection "${name}"`);
+    if (!row) {
+      throw this.errors.create(ErrorCode.SEARCH_COLLECTION_NOT_FOUND, {
+        message: `Unknown collection "${name}"`,
+      });
+    }
     return toView(row);
   }
 
@@ -110,7 +121,11 @@ export class CollectionService implements OnApplicationBootstrap {
     input: UpdateCollectionInput,
   ): Promise<CollectionView> {
     const existing = await this.collections.findByName(name);
-    if (!existing) throw new NotFoundException(`Unknown collection "${name}"`);
+    if (!existing) {
+      throw this.errors.create(ErrorCode.SEARCH_COLLECTION_NOT_FOUND, {
+        message: `Unknown collection "${name}"`,
+      });
+    }
 
     if (input.fields) {
       await this.engine.ensureIndex(
@@ -118,11 +133,19 @@ export class CollectionService implements OnApplicationBootstrap {
       );
     }
     const row = await this.collections.updateByName(name, {
-      ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
-      ...(input.description !== undefined ? { description: input.description } : {}),
+      ...(input.displayName !== undefined
+        ? { displayName: input.displayName }
+        : {}),
+      ...(input.description !== undefined
+        ? { description: input.description }
+        : {}),
       ...(input.fields !== undefined ? { fields: input.fields } : {}),
     });
-    if (!row) throw new NotFoundException(`Unknown collection "${name}"`);
+    if (!row) {
+      throw this.errors.create(ErrorCode.SEARCH_COLLECTION_NOT_FOUND, {
+        message: `Unknown collection "${name}"`,
+      });
+    }
     this.registry.invalidate(name);
 
     if (input.fields) {
@@ -137,7 +160,11 @@ export class CollectionService implements OnApplicationBootstrap {
 
   async remove(name: string): Promise<void> {
     const existing = await this.collections.findByName(name);
-    if (!existing) throw new NotFoundException(`Unknown collection "${name}"`);
+    if (!existing) {
+      throw this.errors.create(ErrorCode.SEARCH_COLLECTION_NOT_FOUND, {
+        message: `Unknown collection "${name}"`,
+      });
+    }
     await this.collections.softDeleteByName(name);
     await this.records.softDeleteByCollection(name);
     this.registry.invalidate(name);
