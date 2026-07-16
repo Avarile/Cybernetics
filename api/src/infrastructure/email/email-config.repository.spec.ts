@@ -1,13 +1,21 @@
 import { EmailConfigRepository } from './email-config.repository';
 
 function makeDb(row: any) {
-  // Chainable select().from().where().limit() -> [row?]
+  // Chainable select().from().where().limit() -> [row?]. `state` records the
+  // `where(...)` argument so tests can assert a filter was actually applied
+  // (a regression that drops the isActive/isDeleted filter would otherwise
+  // go undetected).
+  const state: { whereArg?: unknown } = {};
   const chain: any = {
     from: jest.fn(() => chain),
-    where: jest.fn(() => chain),
+    where: jest.fn((arg: unknown) => {
+      state.whereArg = arg;
+      return chain;
+    }),
     limit: jest.fn(async () => (row ? [row] : [])),
   };
-  return { select: jest.fn(() => chain) } as any;
+  const db = { select: jest.fn(() => chain) } as any;
+  return { db, state };
 }
 
 const crypto = {
@@ -19,7 +27,7 @@ describe('EmailConfigRepository', () => {
   beforeEach(() => crypto.decrypt.mockClear());
 
   it('activeSmtp resolves + decrypts the active row', async () => {
-    const db = makeDb({
+    const { db, state } = makeDb({
       host: 'smtp.example.com',
       port: 587,
       secure: true,
@@ -30,6 +38,7 @@ describe('EmailConfigRepository', () => {
     });
     const repo = new EmailConfigRepository(db, crypto);
     const conn = await repo.activeSmtp();
+    expect(state.whereArg).toBeDefined();
     expect(crypto.decrypt).toHaveBeenCalledWith('v1.enc');
     expect(conn).toEqual({
       host: 'smtp.example.com',
@@ -43,13 +52,35 @@ describe('EmailConfigRepository', () => {
   });
 
   it('activeSmtp returns null when there is no active row', async () => {
-    const repo = new EmailConfigRepository(makeDb(null), crypto);
+    const { db } = makeDb(null);
+    const repo = new EmailConfigRepository(db, crypto);
     expect(await repo.activeSmtp()).toBeNull();
     expect(crypto.decrypt).not.toHaveBeenCalled();
   });
 
+  it('activeImap resolves + decrypts the active row', async () => {
+    const { db, state } = makeDb({
+      host: 'imap.example.com',
+      port: 993,
+      secure: true,
+      username: 'user',
+      secretEnc: 'v1.imap-enc',
+    });
+    const repo = new EmailConfigRepository(db, crypto);
+    const conn = await repo.activeImap();
+    expect(state.whereArg).toBeDefined();
+    expect(crypto.decrypt).toHaveBeenCalledWith('v1.imap-enc');
+    expect(conn).toEqual({
+      host: 'imap.example.com',
+      port: 993,
+      secure: true,
+      username: 'user',
+      password: 'decrypted-pass',
+    });
+  });
+
   it('activeImap returns null password when the row has no secret', async () => {
-    const db = makeDb({
+    const { db } = makeDb({
       host: 'imap.example.com',
       port: 993,
       secure: true,
