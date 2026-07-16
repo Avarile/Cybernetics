@@ -1,8 +1,12 @@
 import { Test, type TestingModule } from '@nestjs/testing';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { ConfigModule } from '../src/config/config.module';
-import { DRIZZLE, type DrizzleDB } from '../src/infrastructure/database/drizzle.constants';
+import {
+  DRIZZLE,
+  type DrizzleDB,
+} from '../src/infrastructure/database/drizzle.constants';
 import { DatabaseModule } from '../src/infrastructure/database/database.module';
+import { files } from '../src/infrastructure/database/schema/file.schema';
 import {
   emailAttachments,
   emailMessages,
@@ -91,18 +95,52 @@ describe('Mailbox ingestion (e2e)', () => {
   });
 
   afterAll(async () => {
-    // Clean up the rows this test created for the dedicated test accountId —
-    // do not leave orphaned test data in the live DB. (Leaving the
-    // `inbound_email` Meili collection behind is fine; it's a system collection.)
-    const messages = await db
-      .select({ id: emailMessages.id })
-      .from(emailMessages)
-      .where(eq(emailMessages.accountId, accountId));
-    for (const { id } of messages) {
-      await db.delete(emailAttachments).where(eq(emailAttachments.emailId, id));
+    // Guard the DB cleanup: if `beforeAll` threw before `db` was assigned,
+    // don't let cleanup itself throw a confusing "undefined" error on top.
+    if (db) {
+      // Clean up the rows this test created for the dedicated test accountId —
+      // do not leave orphaned test data in the live DB. (Leaving the
+      // `inbound_email` Meili collection behind is fine; it's a system collection.)
+      //
+      // Every `ingest.sync` run also calls `FileService.putFromStream` twice
+      // (the raw `.eml`, since `storeRaw` defaults true, plus the `note.txt`
+      // attachment). Content-addressed dedup means the MinIO object may be
+      // shared/reused, but each run still inserts a NEW `files` DB row — so we
+      // must collect and delete those rows too, or they leak unbounded. We
+      // intentionally do NOT delete the MinIO objects themselves: they may be
+      // shared with other rows, and only the `files` DB row is the leak.
+      const messages = await db
+        .select({ id: emailMessages.id, rawFileId: emailMessages.rawFileId })
+        .from(emailMessages)
+        .where(eq(emailMessages.accountId, accountId));
+
+      const fileIds = new Set<string>();
+      for (const { rawFileId } of messages) {
+        if (rawFileId) fileIds.add(rawFileId);
+      }
+      for (const { id } of messages) {
+        const attachments = await db
+          .select({ fileId: emailAttachments.fileId })
+          .from(emailAttachments)
+          .where(eq(emailAttachments.emailId, id));
+        for (const { fileId } of attachments) {
+          fileIds.add(fileId);
+        }
+        await db
+          .delete(emailAttachments)
+          .where(eq(emailAttachments.emailId, id));
+      }
+      await db
+        .delete(emailMessages)
+        .where(eq(emailMessages.accountId, accountId));
+      await db
+        .delete(emailSyncState)
+        .where(eq(emailSyncState.accountId, accountId));
+
+      if (fileIds.size > 0) {
+        await db.delete(files).where(inArray(files.id, [...fileIds]));
+      }
     }
-    await db.delete(emailMessages).where(eq(emailMessages.accountId, accountId));
-    await db.delete(emailSyncState).where(eq(emailSyncState.accountId, accountId));
 
     await moduleRef?.close();
   });
