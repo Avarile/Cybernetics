@@ -14,3 +14,12 @@ export const SYNC_JOB_OPTS = {
   removeOnComplete: true,
   removeOnFail: 100,
 } as const;
+
+/** Job: re-index recent stored messages whose Meili document may be missing/stale. */
+export const RECONCILE_MAILBOX_JOB = 'reconcile-mailbox';
+/** How often the reconciliation sweep runs. */
+export const RECONCILE_EVERY_MS = 6 * 60 * 60 * 1000; // 6h
+/** Only reconcile messages received within this lookback window. */
+export const RECONCILE_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000; // 7d
+/** Max messages re-persisted per sweep. */
+export const RECONCILE_BATCH = 500;

@@ -31,6 +31,7 @@ function deps(over: any = {}) {
       id: `id-${m.uid}`,
       ...m,
     })),
+    listForReindex: jest.fn(async () => []),
     ...over.repo,
   };
   const files = {
@@ -211,5 +212,57 @@ describe('MailboxIngestService.sync', () => {
       'INBOX',
       expect.objectContaining({ lastStatus: 'ok' }),
     );
+  });
+});
+
+function makeRow(id: string): any {
+  return {
+    id,
+    accountId: 'acc',
+    mailbox: 'INBOX',
+    threadId: `t-${id}`,
+    subject: `subject-${id}`,
+    bodyText: 'body',
+    fromAddress: 'a@x.com',
+    fromName: 'A',
+    seen: false,
+    flagged: false,
+    receivedAt: new Date('2020-01-01'),
+    sentAt: new Date('2020-01-01'),
+  };
+}
+
+describe('MailboxIngestService.reconcile', () => {
+  it('re-persists every row returned by listForReindex', async () => {
+    const rows = [makeRow('m1'), makeRow('m2'), makeRow('m3')];
+    const { svc, repo, search } = deps({
+      repo: { listForReindex: jest.fn(async () => rows) },
+    });
+    const res = await svc.reconcile('acc', 'INBOX');
+    expect(repo.listForReindex).toHaveBeenCalledWith(
+      'acc',
+      'INBOX',
+      expect.any(Date),
+      500,
+    );
+    expect(search.persist).toHaveBeenCalledTimes(3);
+    expect(res).toEqual({ reindexed: 3 });
+  });
+
+  it('is best-effort: continues past a rejected persist and counts only the successes', async () => {
+    const rows = [makeRow('m1'), makeRow('m2')];
+    const persist = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('meili down'))
+      .mockResolvedValueOnce([]);
+    const { svc, repo } = deps({
+      repo: { listForReindex: jest.fn(async () => rows) },
+      search: { persist },
+    });
+    await expect(svc.reconcile('acc', 'INBOX')).resolves.toEqual({
+      reindexed: 1,
+    });
+    expect(repo.listForReindex).toHaveBeenCalled();
+    expect(persist).toHaveBeenCalledTimes(2);
   });
 });

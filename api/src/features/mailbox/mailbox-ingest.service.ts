@@ -5,7 +5,11 @@ import { InboxService } from '../../infrastructure/email/inbox.service';
 import { FileService } from '../file-processor/file.service';
 import { SYSTEM_PRINCIPAL } from '../../common/principal';
 import { SearchRecordService } from '../search-service/search-record.service';
-import { INBOUND_EMAIL_COLLECTION } from './mailbox.constants';
+import {
+  INBOUND_EMAIL_COLLECTION,
+  RECONCILE_BATCH,
+  RECONCILE_LOOKBACK_MS,
+} from './mailbox.constants';
 import { MailboxRepository } from './mailbox.repository';
 import type { NewEmailAttachmentRow } from '../../infrastructure/database/schema/mailbox.schema';
 import type { IngestMessage } from '../../infrastructure/email/email.types';
@@ -89,6 +93,39 @@ export class MailboxIngestService {
       });
       throw error;
     }
+  }
+
+  /**
+   * Reconciliation sweep: re-persist recent, non-deleted messages so any whose
+   * search document failed to index during ingest (best-effort there) get a
+   * chance to converge. `SearchRecordService.persist` is idempotent — it
+   * no-ops when the record is already INDEXED with a matching checksum.
+   */
+  async reconcile(
+    accountId: string,
+    mailbox: string,
+  ): Promise<{ reindexed: number }> {
+    const cutoff = new Date(Date.now() - RECONCILE_LOOKBACK_MS);
+    const rows = await this.repo.listForReindex(
+      accountId,
+      mailbox,
+      cutoff,
+      RECONCILE_BATCH,
+    );
+    let reindexed = 0;
+    for (const row of rows) {
+      try {
+        await this.search.persist(INBOUND_EMAIL_COLLECTION, [
+          { externalId: row.id, document: toSearchDocument(row) },
+        ]);
+        reindexed++;
+      } catch (error) {
+        this.logger.warn(
+          `Reindex failed for message ${row.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    return { reindexed };
   }
 
   private async persist(

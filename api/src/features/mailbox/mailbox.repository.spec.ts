@@ -44,4 +44,19 @@ describe('MailboxRepository', () => {
     expect(tx.insert).toHaveBeenCalledTimes(2); // message + attachment
     expect(res).toEqual(inserted);
   });
+
+  it('listForReindex issues the filtered/ordered/limited select', async () => {
+    const rows = [{ id: 'm1' }, { id: 'm2' }];
+    const chain = selectChain(rows);
+    const db: any = { select: jest.fn(() => chain) };
+    const repo = new MailboxRepository(db);
+    const cutoff = new Date('2024-01-01');
+    const res = await repo.listForReindex('acc', 'INBOX', cutoff, 500);
+    expect(db.select).toHaveBeenCalled();
+    expect(chain.from).toHaveBeenCalled();
+    expect(chain.where).toHaveBeenCalled();
+    expect(chain.orderBy).toHaveBeenCalled();
+    expect(chain.limit).toHaveBeenCalledWith(500);
+    expect(res).toEqual(rows);
+  });
 });

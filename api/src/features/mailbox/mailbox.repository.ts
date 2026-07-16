@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, count, desc, eq } from 'drizzle-orm';
+import { and, count, desc, eq, gte } from 'drizzle-orm';
 import {
   DRIZZLE,
   type DrizzleDB,
@@ -90,9 +90,7 @@ export class MailboxRepository extends BaseRepository<typeof emailMessages> {
     return { rows, total: Number(totals[0]?.value ?? 0) };
   }
 
-  async findByIdWithAttachments(
-    id: string,
-  ): Promise<{
+  async findByIdWithAttachments(id: string): Promise<{
     message: EmailMessageRow;
     attachments: EmailAttachmentRow[];
   } | null> {
@@ -120,6 +118,28 @@ export class MailboxRepository extends BaseRepository<typeof emailMessages> {
       )
       .limit(1);
     return rows[0] ?? null;
+  }
+
+  /** Recent, non-deleted messages eligible for a reindex sweep, newest first. */
+  async listForReindex(
+    accountId: string,
+    mailbox: string,
+    cutoff: Date,
+    limit: number,
+  ): Promise<EmailMessageRow[]> {
+    return this.db
+      .select()
+      .from(emailMessages)
+      .where(
+        and(
+          eq(emailMessages.accountId, accountId),
+          eq(emailMessages.mailbox, mailbox),
+          eq(emailMessages.isDeleted, false),
+          gte(emailMessages.createdAt, cutoff),
+        ),
+      )
+      .orderBy(desc(emailMessages.createdAt))
+      .limit(limit);
   }
 
   async setSeen(id: string, seen: boolean): Promise<EmailMessageRow | null> {
