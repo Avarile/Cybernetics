@@ -26,12 +26,15 @@ function documentOf(record?: RecordHit): RecordDocument {
 
 /** Per-type empty default so an untouched required field is e.g. '' (triggers the
  * schema's custom "X is required" message) rather than undefined (which fails zod's
- * base type check first with a generic, non-custom message). */
+ * base type check first with a generic, non-custom message). Numbers are the
+ * exception: a blank number input must submit as undefined, not '' (which
+ * z.coerce.number() would otherwise coerce to 0, silently bypassing `required`). */
 function emptyValueFor(f: FieldSpec): unknown {
   switch (f.type) {
     case 'boolean': return false
     case 'string[]':
     case 'number[]': return []
+    case 'number': return undefined
     default: return ''
   }
 }

@@ -29,4 +29,21 @@ describe('buildRecordSchema', () => {
     if (ok.success) expect(ok.data.rating).toBe(2)
     expect(schema.safeParse({ rating: 5 }).success).toBe(false)
   })
+  it('rejects a blank required number instead of coercing to 0', () => {
+    const schema = buildRecordSchema([{ name: 'price', type: 'number', required: true }])
+    expect(schema.safeParse({ price: '' }).success).toBe(false)
+    expect(schema.safeParse({}).success).toBe(false)
+  })
+  it('omits a blank optional number rather than storing 0', () => {
+    const schema = buildRecordSchema([{ name: 'price', type: 'number' }])
+    const parsed = schema.safeParse({ price: '' })
+    expect(parsed.success).toBe(true)
+    if (parsed.success) expect(parsed.data.price).toBeUndefined()
+  })
+  it('still accepts a real numeric value', () => {
+    const schema = buildRecordSchema([{ name: 'price', type: 'number', required: true }])
+    const parsed = schema.safeParse({ price: '42' })
+    expect(parsed.success).toBe(true)
+    if (parsed.success) expect(parsed.data.price).toBe(42)
+  })
 })
