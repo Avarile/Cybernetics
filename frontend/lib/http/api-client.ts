@@ -1,105 +1,91 @@
-import axios, { type AxiosInstance, type AxiosError } from 'axios'
-import type { IApiError } from '@/lib/interfaces/auth.interface'
-
-// ─── Error class ──────────────────────────────────────────────────────────────
+import axios, { AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
+import { clientEnv } from '@/lib/config/env'
+import { ERROR_CODES } from '@/lib/config/constants'
+import { getAccessToken } from '@/lib/http/token-store'
+import { refreshSession, clearSession } from '@/lib/auth/session'
+import type { ErrorEnvelope } from '@/lib/interfaces/auth.interface'
 
 export class ApiError extends Error {
   constructor(
     message: string,
+    public readonly code: string,
     public readonly statusCode: number,
-    public readonly raw?: unknown,
+    public readonly correlationId?: string,
+    public readonly details?: unknown,
   ) {
     super(message)
     this.name = 'ApiError'
   }
+
+  /** Field-level messages parsed from a VALIDATION_FAILED envelope. path → message. */
+  get fieldErrors(): Record<string, string> {
+    const out: Record<string, string> = {}
+    const d = this.details as { issues?: { path: string; message: string }[] } | null | undefined
+    if (d && Array.isArray(d.issues)) {
+      for (const issue of d.issues) {
+        const key = issue.path && issue.path !== '(root)' ? issue.path : '_root'
+        if (!(key in out)) out[key] = issue.message
+      }
+    }
+    return out
+  }
 }
 
-// ─── Env guard ────────────────────────────────────────────────────────────────
-// Runs once at module load time (both server and client bundles).
-// Throws during build / startup so a missing variable is caught immediately
-// rather than surfacing as a cryptic network error at runtime.
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL
-
-if (!API_URL) {
-  throw new Error(
-    '[api-client] NEXT_PUBLIC_API_URL is not set.\n' +
-    'Add it to your .env.local (or deployment environment) and restart the dev server.\n' +
-    'Example: NEXT_PUBLIC_API_URL=http://localhost:3001',
-  )
+// Overridable so the auth store can wire "hard logout + redirect", and tests
+// can assert it without touching window.location.
+let onUnauthorized: () => void = () => {
+  if (typeof window !== 'undefined') window.location.href = '/auth/login'
 }
-
-// ─── In-memory token ──────────────────────────────────────────────────────────
-// Set by the auth store after login / logout.
-// The request interceptor injects it as Authorization: Bearer <token>.
-// Google OAuth sessions rely on the httpOnly cookie sent automatically via
-// withCredentials: true, so this may be null for those sessions.
-
-// Read the session cookie synchronously so the very first API call on any
-// page load already carries a bearer token, even before AuthProvider runs.
-function readCookieSync(name: string): string | null {
-  if (typeof document === 'undefined') return null
-  const match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'))
-  return match ? decodeURIComponent(match[1]) : null
+export function setUnauthorizedHandler(fn: () => void): void {
+  onUnauthorized = fn
 }
-
-let _sessionToken: string | null = readCookieSync('session_token')
-
-export function setApiToken(token: string | null): void {
-  _sessionToken = token
-}
-
-// ─── Axios instance ───────────────────────────────────────────────────────────
 
 export const apiClient: AxiosInstance = axios.create({
-  baseURL: `${API_URL}/api`,
-  withCredentials: true, // send cookies (OAuth httpOnly session) on every request
+  baseURL: clientEnv.apiUrl, // NO /api prefix — backend routes are root-level
   headers: { 'Content-Type': 'application/json' },
 })
 
-// ─── Request interceptor — inject bearer token ────────────────────────────────
-// Prefer the in-memory token (set by setApiToken after login / early hydration).
-// Fall back to reading the cookie directly at request time so that the header
-// is still injected even when the module was first evaluated during SSR (where
-// document is undefined and _sessionToken starts as null).
-
+// ── Request: inject bearer token ────────────────────────────────────────────
 apiClient.interceptors.request.use((config) => {
-  const token = _sessionToken ?? readCookieSync('session_token')
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`
-    // Keep the in-memory token in sync so subsequent calls skip the cookie read.
-    if (!_sessionToken) _sessionToken = token
-  }
+  const token = getAccessToken()
+  if (token) config.headers.Authorization = `Bearer ${token}`
   return config
 })
 
-// ─── Response interceptor — normalize shape ────────────────────────────────────
-// The backend ResponseInterceptor wraps every success as:
-//   { status: 'success', payload: <data>, message, count, pagination, ... }
-// The frontend services expect:
-//   { data: <data>, message, count, pagination }
-// This interceptor flattens the backend envelope so services work uniformly.
+// ── Response: normalize errors + single-flight refresh ──────────────────────
+function toApiError(error: AxiosError<ErrorEnvelope>): ApiError {
+  const env = error.response?.data?.error
+  if (env) return new ApiError(env.message, env.code, env.statusCode, env.correlationId, env.details)
+  return new ApiError(error.message || 'Network error', 'NETWORK_ERROR', error.response?.status ?? 0)
+}
+
+let refreshPromise: Promise<unknown> | null = null
 
 apiClient.interceptors.response.use(
-  (response) => {
-    const body = response.data
-    if (body && body.status === 'success' && 'payload' in body) {
-      response.data = {
-        data: body.payload,
-        message: body.message,
-        count: body.count,
-        pagination: body.pagination,
+  (r) => r,
+  async (error: AxiosError<ErrorEnvelope>) => {
+    const apiError = toApiError(error)
+    const original = error.config as (InternalAxiosRequestConfig & { _retry?: boolean }) | undefined
+
+    const isExpired = apiError.code === ERROR_CODES.AUTH_TOKEN_EXPIRED
+    if (isExpired && original && !original._retry) {
+      original._retry = true
+      try {
+        refreshPromise = refreshPromise ?? refreshSession().finally(() => { refreshPromise = null })
+        await refreshPromise
+        return apiClient(original) // replay; request interceptor re-adds the fresh bearer
+      } catch {
+        clearSession()
+        onUnauthorized()
+        return Promise.reject(apiError)
       }
     }
-    return response
-  },
-  (error: AxiosError<IApiError>) => {
-    const data = error.response?.data
-    const rawMessage = data?.message
-    const message = Array.isArray(rawMessage)
-      ? rawMessage.join(', ')
-      : (rawMessage ?? error.message ?? 'Unknown error')
-    const statusCode = error.response?.status ?? 0
-    return Promise.reject(new ApiError(message, statusCode, data))
+
+    // Non-refreshable auth failures → hard logout.
+    if (apiError.statusCode === 401 && apiError.code !== ERROR_CODES.AUTH_INVALID_CREDENTIALS) {
+      clearSession()
+      onUnauthorized()
+    }
+    return Promise.reject(apiError)
   },
 )
