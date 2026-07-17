@@ -25,6 +25,7 @@ describe('fileService', () => {
     const form = init.body as FormData
     expect(form.get('key')).toBe('k')
     expect(form.get('file')).toBe(file)
+    expect(Array.from(form.keys())).toEqual(['key', 'policy', 'file'])
     vi.unstubAllGlobals()
   })
 
