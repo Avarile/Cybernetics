@@ -41,8 +41,12 @@ export function RecordFieldInput({
 
 function renderWidget(field: FieldSpec, f: F) {
   if (field.enum && field.type !== 'string[]' && field.type !== 'number[]') {
+    const numeric = field.type === 'number'
     return (
-      <Select value={f.value ? String(f.value) : ''} onValueChange={f.onChange}>
+      <Select
+        value={f.value === undefined || f.value === null || f.value === '' ? '' : String(f.value)}
+        onValueChange={(v) => f.onChange(numeric ? Number(v) : v)}
+      >
         <SelectTrigger id={field.name} className="w-full">
           <SelectValue placeholder={`Select ${field.name}`} />
         </SelectTrigger>
@@ -65,7 +69,7 @@ function renderWidget(field: FieldSpec, f: F) {
           id={field.name}
           type="number"
           value={f.value === undefined || f.value === null ? '' : String(f.value)}
-          onChange={(e) => f.onChange(e.target.value === '' ? undefined : Number(e.target.value))}
+          onChange={(e) => f.onChange(e.target.value === '' ? undefined : e.target.value)}
         />
       )
     case 'date':

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { useForm } from 'react-hook-form'
 import { RecordFieldInput } from '@/components/data-management/field-to-input'
 import type { FieldSpec } from '@/lib/interfaces/search.interface'
@@ -21,5 +21,11 @@ describe('RecordFieldInput', () => {
   it('renders a number input for a number field', () => {
     render(<Harness field={{ name: 'price', type: 'number' }} />)
     expect(screen.getByLabelText('price')).toHaveAttribute('type', 'number')
+  })
+  it('lets a number field hold a decimal without truncating', () => {
+    render(<Harness field={{ name: 'price', type: 'number' }} />)
+    const input = screen.getByLabelText('price') as HTMLInputElement
+    fireEvent.change(input, { target: { value: '1.5' } })
+    expect(input.value).toBe('1.5')
   })
 })
