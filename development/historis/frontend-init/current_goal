@@ -1,4 +1,4 @@
-# Goal: use the existing ai components in 
+# Goal: use the existing templated frontend, update the design / implementation, and make it usable for the current backend
 
 feature description: review the frontend professionally, especially the statemanagement(authentication, session, user role, user info, global envirables, and the router guards), Basically focusing on the foundational layers. To make it easier later when meaningful components, views and pages to be built on a solid foundation
 
