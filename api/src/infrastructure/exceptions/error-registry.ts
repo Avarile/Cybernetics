@@ -49,6 +49,11 @@ export const ERROR_REGISTRY: Record<ErrorCode, ErrorSpec> = {
     kind: I,
     message: 'Internal server error',
   },
+  [ErrorCode.CLIENT_ERROR]: {
+    status: S.BAD_REQUEST,
+    kind: C,
+    message: 'The request could not be processed',
+  },
 
   [ErrorCode.AUTH_INVALID_CREDENTIALS]: {
     status: S.UNAUTHORIZED,

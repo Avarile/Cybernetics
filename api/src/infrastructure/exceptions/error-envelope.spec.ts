@@ -16,6 +16,17 @@ describe('buildEnvelope', () => {
     expect(typeof env.error.timestamp).toBe('string');
   });
 
+  it('reports the exception status, honouring a boundary status override', () => {
+    const err = new AppException(ErrorCode.CLIENT_ERROR, {
+      status: 413,
+      message: 'Payload too large',
+    });
+    const env = buildEnvelope(err, 'req-5', '/upload');
+    expect(env.error.statusCode).toBe(413);
+    expect(env.error.code).toBe(ErrorCode.CLIENT_ERROR);
+    expect(env.error.message).toBe('Payload too large');
+  });
+
   it('hides the raw message of INTERNAL errors behind the safe registry message', () => {
     const err = new AppException(ErrorCode.AGENT_RUN_FAILED, {
       message: 'stacktrace: secret',

@@ -63,8 +63,21 @@ export class ExceptionService {
       });
     }
 
-    const code = STATUS_TO_CODE[status] ?? ErrorCode.INTERNAL_ERROR;
     const message = typeof body.message === 'string' ? body.message : undefined;
-    return new AppException(code, { message, cause: err });
+
+    const mapped = STATUS_TO_CODE[status];
+    if (mapped) return new AppException(mapped, { message, cause: err });
+
+    // No dedicated code for this status. Preserve genuine client (4xx) errors
+    // as-is — masking them as 500s changes the response contract and hides an
+    // actionable message. Everything else is treated as INTERNAL.
+    if (status >= 400 && status < 500) {
+      return new AppException(ErrorCode.CLIENT_ERROR, {
+        status,
+        message,
+        cause: err,
+      });
+    }
+    return new AppException(ErrorCode.INTERNAL_ERROR, { cause: err });
   }
 }

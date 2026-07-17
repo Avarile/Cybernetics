@@ -6,6 +6,13 @@ export interface AppExceptionOptions {
   message?: string;
   details?: unknown;
   cause?: unknown;
+  /**
+   * Overrides the registry status for this code. Reserved for boundary
+   * normalization — preserving the original status of a framework
+   * HttpException whose status has no dedicated ErrorCode. Application code
+   * should pick a code whose registry status is already correct.
+   */
+  status?: number;
 }
 
 /**
@@ -22,7 +29,7 @@ export class AppException extends HttpException {
     const spec = ERROR_REGISTRY[code];
     super(
       { code, message: opts.message ?? spec.message, details: opts.details },
-      spec.status,
+      opts.status ?? spec.status,
       { cause: opts.cause },
     );
     this.code = code;

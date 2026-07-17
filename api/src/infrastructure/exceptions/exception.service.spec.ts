@@ -2,6 +2,9 @@ import {
   BadRequestException,
   NotFoundException,
   HttpException,
+  PayloadTooLargeException,
+  UnprocessableEntityException,
+  BadGatewayException,
 } from '@nestjs/common';
 import { ZodError, z } from 'zod';
 import { AppException } from './app-exception';
@@ -35,6 +38,24 @@ describe('ExceptionService', () => {
       expect(svc.from(new NotFoundException('nope')).code).toBe(
         ErrorCode.NOT_FOUND,
       );
+    });
+
+    it('preserves an unmapped 4xx HttpException status instead of masking it as 500', () => {
+      const mapped = svc.from(new PayloadTooLargeException('too big'));
+      expect(mapped.code).toBe(ErrorCode.CLIENT_ERROR);
+      expect(mapped.kind).toBe('CLIENT');
+      expect(mapped.getStatus()).toBe(413);
+      expect(mapped.message).toBe('too big');
+    });
+
+    it('preserves other unmapped 4xx statuses (e.g. 422)', () => {
+      expect(svc.from(new UnprocessableEntityException()).getStatus()).toBe(422);
+    });
+
+    it('treats an unmapped 5xx HttpException as INTERNAL_ERROR', () => {
+      const mapped = svc.from(new BadGatewayException('upstream said no'));
+      expect(mapped.code).toBe(ErrorCode.INTERNAL_ERROR);
+      expect(mapped.getStatus()).toBe(500);
     });
 
     it('maps a zod-pipe validation body to VALIDATION_FAILED with issues', () => {

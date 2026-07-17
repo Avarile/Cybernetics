@@ -241,3 +241,14 @@
 {"type":"edit","file":"/home/avarile/Documents/codeRepo/ai/Cybernetics/api/src/infrastructure/email/email.types.ts","success":true,"timestamp":1784244901298,"sessionId":null}
 {"type":"edit","file":"/home/avarile/Documents/codeRepo/ai/Cybernetics/api/src/infrastructure/email/transport/smtp.transport.ts","success":true,"timestamp":1784244909734,"sessionId":null}
 {"type":"edit","file":"/tmp/claude-1000/-home-avarile-Documents-codeRepo-ai-Cybernetics/37cbe4aa-3c8c-4cf8-bde2-7ddb1d99ab09/scratchpad/outbound-attach-verify.js","success":true,"timestamp":1784244968225,"sessionId":null}
+{"type":"edit","file":"/home/avarile/Documents/codeRepo/ai/Cybernetics/api/src/infrastructure/exceptions/error-codes.ts","success":true,"timestamp":1784248987117,"sessionId":null}
+{"type":"edit","file":"/home/avarile/Documents/codeRepo/ai/Cybernetics/api/src/infrastructure/exceptions/error-registry.ts","success":true,"timestamp":1784248989500,"sessionId":null}
+{"type":"edit","file":"/home/avarile/Documents/codeRepo/ai/Cybernetics/api/src/infrastructure/exceptions/app-exception.ts","success":true,"timestamp":1784248995852,"sessionId":null}
+{"type":"edit","file":"/home/avarile/Documents/codeRepo/ai/Cybernetics/api/src/infrastructure/exceptions/app-exception.ts","success":true,"timestamp":1784248998024,"sessionId":null}
+{"type":"edit","file":"/home/avarile/Documents/codeRepo/ai/Cybernetics/api/src/infrastructure/exceptions/error-envelope.ts","success":true,"timestamp":1784249005739,"sessionId":null}
+{"type":"edit","file":"/home/avarile/Documents/codeRepo/ai/Cybernetics/api/src/infrastructure/exceptions/exception.service.ts","success":true,"timestamp":1784249009563,"sessionId":null}
+{"type":"edit","file":"/home/avarile/Documents/codeRepo/ai/Cybernetics/api/src/infrastructure/exceptions/exception.service.spec.ts","success":true,"timestamp":1784249017939,"sessionId":null}
+{"type":"edit","file":"/home/avarile/Documents/codeRepo/ai/Cybernetics/api/src/infrastructure/exceptions/exception.service.spec.ts","success":true,"timestamp":1784249023590,"sessionId":null}
+{"type":"edit","file":"/home/avarile/Documents/codeRepo/ai/Cybernetics/api/src/infrastructure/exceptions/app-exception.spec.ts","success":true,"timestamp":1784249029303,"sessionId":null}
+{"type":"edit","file":"/home/avarile/Documents/codeRepo/ai/Cybernetics/api/src/infrastructure/exceptions/error-envelope.spec.ts","success":true,"timestamp":1784249032482,"sessionId":null}
+{"type":"edit","file":"/home/avarile/.claude/projects/-home-avarile-Documents-codeRepo-ai-Cybernetics/memory/exception-module-v1.md","success":true,"timestamp":1784249131078,"sessionId":null}

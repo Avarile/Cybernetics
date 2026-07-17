@@ -12,6 +12,13 @@ describe('AppException', () => {
     expect(err.message).toBe('User not found');
   });
 
+  it('honours a status override (boundary passthrough for unmapped statuses)', () => {
+    const err = new AppException(ErrorCode.CLIENT_ERROR, { status: 422 });
+    expect(err.getStatus()).toBe(422);
+    expect(err.code).toBe(ErrorCode.CLIENT_ERROR);
+    expect(err.kind).toBe(ErrorKind.CLIENT);
+  });
+
   it('honours a message override and stores details + cause', () => {
     const cause = new Error('root');
     const err = new AppException(ErrorCode.FILE_INVALID_STATE, {
