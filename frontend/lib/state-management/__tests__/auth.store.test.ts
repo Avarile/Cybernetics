@@ -25,8 +25,8 @@ beforeEach(() => {
 
 describe('auth.store', () => {
   it('login stores the token pair and hydrates the user', async () => {
-    ;(authService.login as any).mockResolvedValue({ accessToken: 'a', refreshToken: 'r', expiresIn: 900 })
-    ;(authService.getMe as any).mockResolvedValue({ id: 'u1', role: 'user' })
+    vi.mocked(authService.login).mockResolvedValue({ accessToken: 'a', refreshToken: 'r', expiresIn: 900 })
+    vi.mocked(authService.getMe).mockResolvedValue({ id: 'u1', role: 'user' })
 
     await useAuthStore.getState().login({ email: 'a@b.com', password: 'pw' })
 
@@ -36,16 +36,16 @@ describe('auth.store', () => {
   })
 
   it('bootstrap with no refresh token → unauthenticated', async () => {
-    ;(getRefreshToken as any).mockReturnValue(undefined)
+    vi.mocked(getRefreshToken).mockReturnValue(undefined)
     await useAuthStore.getState().bootstrap()
     expect(useAuthStore.getState().status).toBe('unauthenticated')
     expect(refreshSession).not.toHaveBeenCalled()
   })
 
   it('bootstrap with a refresh token refreshes then loads the user', async () => {
-    ;(getRefreshToken as any).mockReturnValue('r')
-    ;(refreshSession as any).mockResolvedValue({ accessToken: 'a', refreshToken: 'r2', expiresIn: 900 })
-    ;(authService.getMe as any).mockResolvedValue({ id: 'u1', role: 'admin' })
+    vi.mocked(getRefreshToken).mockReturnValue('r')
+    vi.mocked(refreshSession).mockResolvedValue({ accessToken: 'a', refreshToken: 'r2', expiresIn: 900 })
+    vi.mocked(authService.getMe).mockResolvedValue({ id: 'u1', role: 'admin' })
     await useAuthStore.getState().bootstrap()
     expect(useAuthStore.getState().status).toBe('authenticated')
     expect(useAuthStore.getState().user?.role).toBe('admin')

@@ -27,7 +27,7 @@ export function LoginForm({ className, ...props }: React.ComponentProps<'div'>) 
       await login(values)
       const callbackUrl = searchParams.get('callbackUrl') ?? '/dashboard'
       // Hard navigation so the fresh refresh cookie reaches the middleware.
-      window.location.href = callbackUrl
+      window.location.assign(callbackUrl)
     } catch (err) {
       const message = err instanceof ApiError ? err.message : 'Invalid email or password.'
       toast.error(message)
