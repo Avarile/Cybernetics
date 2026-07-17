@@ -16,4 +16,20 @@ describe('FieldCell', () => {
     render(<FieldCell field={{ name: 'active', type: 'boolean' }} value={true} />)
     expect(screen.getByText('Yes')).toBeInTheDocument()
   })
+  it('renders a locale date for a parseable date value', () => {
+    render(<FieldCell field={{ name: 'when', type: 'date' }} value="2026-01-15" />)
+    expect(screen.getByText(new Date('2026-01-15').toLocaleDateString())).toBeInTheDocument()
+  })
+  it('falls back to the raw value for an unparseable date', () => {
+    render(<FieldCell field={{ name: 'when', type: 'date' }} value="not-a-date" />)
+    expect(screen.getByText('not-a-date')).toBeInTheDocument()
+  })
+  it('renders an enum value as a badge', () => {
+    render(<FieldCell field={{ name: 'status', type: 'string', enum: ['active', 'archived'] }} value="active" />)
+    expect(screen.getByText('active')).toBeInTheDocument()
+  })
+  it('renders plain string values as text', () => {
+    render(<FieldCell field={{ name: 'title', type: 'string' }} value="Hello world" />)
+    expect(screen.getByText('Hello world')).toBeInTheDocument()
+  })
 })
