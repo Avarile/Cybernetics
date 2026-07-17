@@ -18,10 +18,12 @@ export function FilterControl({
   onChange: (v: FilterValue | undefined) => void
 }) {
   if (field.enum && field.enum.length) {
+    const numeric = field.type === 'number' || field.type === 'number[]'
     const selected = Array.isArray(value) ? value.map(String) : []
     const toggle = (opt: string, checked: boolean) => {
       const next = checked ? [...selected, opt] : selected.filter((v) => v !== opt)
-      onChange(next.length ? next : undefined)
+      if (!next.length) return onChange(undefined)
+      onChange(numeric ? next.map(Number) : next)
     }
     return (
       <div className="flex flex-col gap-2">

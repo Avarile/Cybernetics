@@ -21,4 +21,10 @@ describe('FilterControl', () => {
     fireEvent.change(screen.getByLabelText('price'), { target: { value: '10' } })
     expect(onChange).toHaveBeenCalledWith(10)
   })
+  it('enum on a numeric field emits numbers, not strings', () => {
+    const onChange = vi.fn()
+    render(<FilterControl field={{ name: 'rating', type: 'number', enum: [1, 2, 3] }} value={undefined} onChange={onChange} />)
+    fireEvent.click(screen.getByLabelText('1'))
+    expect(onChange).toHaveBeenCalledWith([1])
+  })
 })
