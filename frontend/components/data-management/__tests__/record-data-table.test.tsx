@@ -32,4 +32,14 @@ describe('RecordDataTable', () => {
     expect(screen.getByText('Could not load records')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
   })
+
+  it('skeleton row cell count matches the header when a column is hidden', () => {
+    useDataManagementStore.setState({ columnVisibility: { price: false } })
+    const { container } = render(
+      <RecordDataTable fields={fields} results={undefined} isLoading={true} onRetry={() => {}} />,
+    )
+    const headerCells = container.querySelectorAll('thead th').length
+    const firstSkeletonRowCells = container.querySelectorAll('tbody tr:first-child td').length
+    expect(firstSkeletonRowCells).toBe(headerCells)
+  })
 })

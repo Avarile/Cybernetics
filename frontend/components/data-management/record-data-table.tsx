@@ -113,6 +113,8 @@ export function RecordDataTable({
     getCoreRowModel: getCoreRowModel(),
   })
 
+  const visibleColumnCount = table.getVisibleLeafColumns().length
+
   return (
     <div className="flex flex-col gap-4 px-4 lg:px-6">
       <div className="flex items-center justify-between">
@@ -182,7 +184,7 @@ export function RecordDataTable({
           <TableBody>
             {error ? (
               <TableRow>
-                <TableCell colSpan={columns.length} className="h-40">
+                <TableCell colSpan={visibleColumnCount} className="h-40">
                   <Empty>
                     <EmptyHeader>
                       <EmptyTitle>Could not load records</EmptyTitle>
@@ -197,8 +199,8 @@ export function RecordDataTable({
             ) : isLoading && !results ? (
               Array.from({ length: 6 }).map((_, i) => (
                 <TableRow key={i}>
-                  {columns.map((_c, j) => (
-                    <TableCell key={j}><Skeleton className="h-5 w-full" /></TableCell>
+                  {table.getVisibleLeafColumns().map((col) => (
+                    <TableCell key={col.id}><Skeleton className="h-5 w-full" /></TableCell>
                   ))}
                 </TableRow>
               ))
@@ -212,7 +214,7 @@ export function RecordDataTable({
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={columns.length} className="h-40">
+                <TableCell colSpan={visibleColumnCount} className="h-40">
                   <Empty>
                     <EmptyHeader>
                       <EmptyTitle>No records</EmptyTitle>
