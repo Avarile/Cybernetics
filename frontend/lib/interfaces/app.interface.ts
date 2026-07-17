@@ -9,7 +9,7 @@ export interface IToast {
 }
 
 export interface IActiveContext {
-  projectId:   number | null
+  projectId:   string | null
   projectSlug: string | null
   projectName: string | null
 }
