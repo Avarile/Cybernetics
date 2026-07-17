@@ -55,6 +55,8 @@ export const useAuthStore = create<IAuthState>()(
       logoutAll: async () => {
         try {
           await authService.logoutAll()
+        } catch {
+          // best-effort: always clear local state even if the server call fails
         } finally {
           clearSession()
           set({ ...INITIAL, status: 'unauthenticated' }, false, 'auth/logoutAll')
@@ -63,7 +65,7 @@ export const useAuthStore = create<IAuthState>()(
 
       bootstrap: async () => {
         if (!getRefreshToken()) {
-          set({ status: 'unauthenticated' }, false, 'auth/bootstrap/anon')
+          set({ ...INITIAL, status: 'unauthenticated' }, false, 'auth/bootstrap/anon')
           return
         }
         set({ status: 'loading' }, false, 'auth/bootstrap/pending')
@@ -123,7 +125,7 @@ export function wireAuthUnauthorizedHandler(): void {
   wired = true
   setUnauthorizedHandler(() => {
     clearSession()
-    useAuthStore.setState({ user: null, status: 'unauthenticated', isLoading: false })
+    useAuthStore.setState({ user: null, status: 'unauthenticated', isLoading: false, error: null })
     if (typeof window !== 'undefined') window.location.href = '/auth/login'
   })
 }
