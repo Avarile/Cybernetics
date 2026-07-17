@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest'
 import { buildRecordSchema } from '@/lib/schema/field-to-zod'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
 
 describe('buildRecordSchema', () => {
   it('requires a required string and rejects empty', () => {
@@ -22,5 +21,12 @@ describe('buildRecordSchema', () => {
   it('treats non-required fields as optional', () => {
     const schema = buildRecordSchema([{ name: 'note', type: 'string' }])
     expect(schema.safeParse({}).success).toBe(true)
+  })
+  it('accepts numeric enum values and coerces, rejecting out-of-set', () => {
+    const schema = buildRecordSchema([{ name: 'rating', type: 'number', enum: [1, 2, 3], required: true }])
+    const ok = schema.safeParse({ rating: '2' })
+    expect(ok.success).toBe(true)
+    if (ok.success) expect(ok.data.rating).toBe(2)
+    expect(schema.safeParse({ rating: 5 }).success).toBe(false)
   })
 })

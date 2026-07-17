@@ -10,10 +10,15 @@ export function buildRecordSchema(fields: FieldSpec[]): z.ZodType<Record<string,
 
 function fieldToZod(f: FieldSpec): z.ZodTypeAny {
   if (f.enum && f.enum.length) {
+    if (f.type === 'number' || f.type === 'number[]') {
+      const allowed = f.enum.map(Number)
+      const member = z.coerce
+        .number()
+        .refine((n) => allowed.includes(n), { message: `Invalid value for ${f.name}` })
+      return f.type === 'number[]' ? z.array(member) : member
+    }
     const values = f.enum.map(String) as [string, ...string[]]
-    return f.type === 'string[]' || f.type === 'number[]'
-      ? z.array(z.enum(values))
-      : z.enum(values)
+    return f.type === 'string[]' ? z.array(z.enum(values)) : z.enum(values)
   }
   switch (f.type) {
     case 'number': return z.coerce.number()
