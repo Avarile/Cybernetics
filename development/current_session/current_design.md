@@ -1,418 +1,351 @@
-# Design — Centralized Exception Handling Module (v1)
+# Design — Frontend Foundational Layer (v1)
 
-**Status:** Approved (design), pre-implementation
-**Location:** `api/src/infrastructure/exceptions/`
-**Date:** 2026-07-17
+**Goal:** Rebuild the templated `frontend/` foundation — authentication, session, tokens,
+user/role, global env, and router guards — so it is correct against the *real* Cybernetics backend
+and forms a simple, clean, reliable base for building features on top.
 
----
+**Guiding principle:** the **existing backend API is the single source of truth.** The frontend
+targets only endpoints that exist today; **no backend changes are assumed or required.**
 
-## 1. Goal & principles
-
-Centralize the *definition*, *construction*, and *handling* of every exception in the
-API. All modules throw through one injectable service; one global filter normalizes
-every error — ours, NestJS's, Mastra's, and raw driver errors — into a single,
-machine-readable response envelope, logs it, and reports server-side faults to Sentry.
-
-**v1 is deliberately simple, clean, reliable:**
-
-- One error-code registry as the single source of truth (status + kind + message).
-- One injectable `ExceptionService` as the throw API.
-- One global filter as the only normalizer/logger/reporter.
-- **Types only** — no new database table (Sentry + Pino already persist for triage).
-
-### Non-goals (v1)
-
-- No persistent `error_log` table (Sentry is the store of record).
-- No i18n of messages (English defaults; envelope is code-driven so clients can localize).
-- No implementing the Mastra approval-expiry gap (tracked separately; see §14).
-- No retry/circuit-breaker logic (BullMQ retry stays where it is).
+**Status:** Approved design (this document). Next step: implementation plan.
 
 ---
 
-## 2. Scope — exception categories in the codebase (survey result)
+## 1. The core finding
 
-### A. Domain errors — already NestJS `HttpException` (mostly correct today)
+The template's foundation was written against a **different backend contract** than the one that
+exists. Almost every core assumption is wrong and must be rebuilt:
 
-| Category | HTTP | Notes |
+| Layer | Template assumed | Real backend (source of truth) |
 |---|---|---|
-| resource-not-found | 404 | ubiquitous |
-| duplicate / conflict | 409 | always pre-checked; **no** DB unique-violation catch anywhere |
-| invalid-state / lifecycle | 409 | file status machine (`not PENDING/AVAILABLE`) |
-| input-validation | 400 | **two inconsistent shapes**: zod pipe `issues:[{path,message}]` vs search `issues:string[]` |
-| auth: invalid-credentials | 401 | deliberately uniform messages |
-| auth: token invalid/expired/reuse | 401 | reuse triggers token-family revocation |
-| auth: reset-code invalid | 401 | enumeration-safe collapse |
-| authorization / ownership | inconsistent | file-processor returns **404** (masking); mastra uses **403** |
+| Auth | Opaque `session:uuid`, httpOnly cookie, `withCredentials` | **JWT access (15 min) + rotating refresh (7 days)**, both in JSON body. No cookies; CORS `credentials:false` |
+| Route prefix | Global `/api` | **None** (root routes); only `/api/agent-core` for the Mastra vendor adapter |
+| Response | `{status, payload}` success envelope | **No success envelope** — raw payloads. Error envelope only |
+| Current user | `/current-user/get` + `/current-user/rbac` | Only `GET /auth/me` → **`{id, role}`** |
+| RBAC | `roles[] + permissions[]` (CASL), 5-tier hierarchy | **4 roles: `guest`/`user`/`admin`/`agent`**, role-membership only |
+| Register / OAuth / verify | `/auth/register/local`, Google OAuth, email verify | **None** — users admin-created (`POST /users`). Frontend: **login-only, no public signup** |
+| Password reset | `{token, newPassword}`, min 8 | `{email, code(6-digit), newPassword}`, **min 12** |
 
-### B. Infra / external-service errors — mostly RAW → leak as generic 500
-
-DB connection/pool · DB unique-violation (`23505`) · Redis + corrupt-JSON `SyntaxError` ·
-BullMQ enqueue/scheduler · MinIO connect/access/not-found · SMTP/IMAP send/verify/fetch/timeout ·
-MIME parse · crypto misconfig + AES-GCM decrypt failure. Only **Meilisearch** is wrapped
-(`SearchEngineError` → 503). `NoActiveEmailConfigError` exists but is never HTTP-mapped.
-
-### C. AI / Agent (Mastra) errors — mostly RAW → 500
-
-agent-run failure · LLM/gateway rate-limit/timeout/provider (unclassified) · tool
-execution/validation · workflow non-success (failed/tripwire/paused) · scheduling ·
-approval-resume failure · approval-expiry (modeled but unimplemented). HITL
-approval-required is a **control signal**, not an error.
-
-### D. Best-effort / swallowed (logged, never surfaced)
-
-email delivery, audit writes, re-index, attachment upload, object purge, scheduler
-registration. **These stay swallowed** — v1 does not change best-effort semantics.
-
-### Facts shaping the design
-
-1. `SentryGlobalFilter` is the sole `APP_FILTER` today (reports, then default response).
-2. No machine-readable error codes exist — clients discriminate on human strings only.
-3. `MastraError` (`@mastra/core@1.50.1`) is structured: `id`, `domain`, `category`
-   (`USER|SYSTEM|THIRD_PARTY|UNKNOWN`), `details`, `cause`, `toJSON()` — a ready taxonomy.
-4. Biggest win: catching raw infra/LLM/crypto errors so they stop leaking as 500s.
+The *patterns* (Zustand store, provider, axios interceptor) are sound and are kept; the *contract*
+is replaced.
 
 ---
 
-## 3. Architecture overview
+## 2. Decisions locked
 
-```
-                       throw this.errors.create(ErrorCode.X)
-  feature/infra code ─────────────────────────────────────────► AppException
-        │                                                            │
-        │ raw Error / MastraError / ZodError / driver error          │
-        ▼                                                            ▼
-  ┌──────────────────────────  GlobalExceptionFilter  ─────────────────────────┐
-  │  errors.from(exception)  →  AppException (normalized)                        │
-  │  ├─ log by kind (Pino, correlationId)                                        │
-  │  ├─ Sentry.captureException() for DEPENDENCY / INTERNAL (tags: code, corrId) │
-  │  └─ res.status(status).json(envelope)                                        │
-  └─────────────────────────────────────────────────────────────────────────────┘
-```
-
-- `ExceptionService.from()` is the single mapping brain; the filter reuses it.
-- `AppException` is a plain class — usable via the service *or* `new` (non-DI contexts).
-
----
-
-## 4. Schema 1 — Error-code taxonomy (single source of truth)
-
-### 4.1 Kinds (drive logging + Sentry, mirror Mastra's category)
-
-```ts
-export enum ErrorKind {
-  CLIENT     = 'CLIENT',      // 4xx, caller's fault      — log debug, no Sentry
-  DEPENDENCY = 'DEPENDENCY',  // 502/503/504, ext. down   — log error, Sentry
-  INTERNAL   = 'INTERNAL',    // 500, our bug             — log error, Sentry (raw msg hidden)
-}
-```
-
-### 4.2 Registry
-
-```ts
-interface ErrorSpec { status: HttpStatus; kind: ErrorKind; message: string; }
-export const ERROR_REGISTRY: Record<ErrorCode, ErrorSpec> = { … };
-```
-
-Code format: `DOMAIN_REASON`, SCREAMING_SNAKE (same shape as `MastraError.id`, so mapped
-Mastra errors read as native). **v1 seed** (add codes by adding registry lines):
-
-| Code | Status | Kind |
+| # | Decision | Choice |
 |---|---|---|
-| `VALIDATION_FAILED` | 400 | CLIENT |
-| `NOT_FOUND` | 404 | CLIENT |
-| `CONFLICT` | 409 | CLIENT |
-| `UNAUTHORIZED` | 401 | CLIENT |
-| `FORBIDDEN` | 403 | CLIENT |
-| `RATE_LIMITED` | 429 | CLIENT |
-| `DEPENDENCY_UNAVAILABLE` | 503 | DEPENDENCY |
-| `INTERNAL_ERROR` | 500 | INTERNAL |
-| `AUTH_INVALID_CREDENTIALS` | 401 | CLIENT |
-| `AUTH_TOKEN_INVALID` | 401 | CLIENT |
-| `AUTH_TOKEN_EXPIRED` | 401 | CLIENT |
-| `AUTH_TOKEN_REUSE` | 401 | CLIENT |
-| `AUTH_RESET_CODE_INVALID` | 401 | CLIENT |
-| `AUTH_SERVICE_CREDENTIAL_INVALID` | 401 | CLIENT |
-| `USER_NOT_FOUND` | 404 | CLIENT |
-| `USER_EMAIL_TAKEN` | 409 | CLIENT |
-| `FILE_NOT_FOUND` | 404 | CLIENT |
-| `FILE_INVALID_STATE` | 409 | CLIENT |
-| `FILE_TOO_LARGE` | 400 | CLIENT |
-| `FILE_MIME_NOT_ALLOWED` | 400 | CLIENT |
-| `FILE_UPLOAD_MISSING` | 400 | CLIENT |
-| `SEARCH_COLLECTION_NOT_FOUND` | 404 | CLIENT |
-| `SEARCH_COLLECTION_EXISTS` | 409 | CLIENT |
-| `SEARCH_QUERY_INVALID` | 400 | CLIENT |
-| `SEARCH_RECORD_NOT_FOUND` | 404 | CLIENT |
-| `SEARCH_UNAVAILABLE` | 503 | DEPENDENCY |
-| `CONFIG_NOT_FOUND` | 404 | CLIENT |
-| `MAIL_CONFIG_MISSING` | 503 | DEPENDENCY |
-| `CRYPTO_DECRYPT_FAILED` | 500 | INTERNAL |
-| `CRYPTO_MISCONFIGURED` | 500 | INTERNAL |
-| `MAILBOX_MESSAGE_NOT_FOUND` | 404 | CLIENT |
-| `MAILBOX_ATTACHMENT_NOT_FOUND` | 404 | CLIENT |
-| `MAILBOX_ACCOUNT_UNRESOLVED` | 400 | CLIENT |
-| `MAILBOX_SYNC_FAILED` | 502 | DEPENDENCY |
-| `AGENT_CONVERSATION_NOT_FOUND` | 404 | CLIENT |
-| `AGENT_APPROVAL_NOT_FOUND` | 404 | CLIENT |
-| `AGENT_APPROVAL_CONFLICT` | 409 | CLIENT |
-| `AGENT_APPROVAL_FORBIDDEN` | 403 | CLIENT |
-| `AGENT_REQUEST_INVALID` | 400 | CLIENT |
-| `AGENT_RUN_FAILED` | 500 | INTERNAL |
-| `TOOL_EXECUTION_FAILED` | 500 | INTERNAL |
-| `LLM_RATE_LIMITED` | 429 | CLIENT |
-| `LLM_TIMEOUT` | 504 | DEPENDENCY |
-| `LLM_PROVIDER_ERROR` | 502 | DEPENDENCY |
-| `DB_UNAVAILABLE` | 503 | DEPENDENCY |
-| `CACHE_UNAVAILABLE` | 503 | DEPENDENCY |
-| `QUEUE_UNAVAILABLE` | 503 | DEPENDENCY |
-| `STORAGE_UNAVAILABLE` | 503 | DEPENDENCY |
-| `STORAGE_OBJECT_NOT_FOUND` | 404 | CLIENT |
-| `EMAIL_SEND_FAILED` | 502 | DEPENDENCY |
-
-**Invariant (unit-tested):** every `ErrorCode` enum member has exactly one `ERROR_REGISTRY` entry.
+| D1 | Registration | **No public registration.** Login-only; users are admin-provisioned out-of-band (`POST /users`, admin-only). No signup / OAuth / email-verification pages. |
+| D2 | User info | **Current-user = `{ id, role }`** (+ `email` from the JWT claim if present). No self-profile edit, no avatar. Account page = **change-password + active-session management** (real endpoints). |
+| D3 | Session/token model | **Access token in memory; refresh token in a readable cookie; Next.js middleware coarse guard; 401 → silent single-flight refresh.** |
+| D4 | State management | **Zustand for client/UI/auth state; SWR for server data.** |
+| D5 | Password rule | **Length only (12–200), == backend. Plus a no-dependency strength meter (soft guidance).** |
+| D6 | Response validation | **Types-only** (plain TS interfaces). Zod reserved for form inputs + env parsing. Accepted tradeoff: backend drift not caught at the boundary. |
 
 ---
 
-## 5. Schema 2 — Client-facing error envelope
+## 3. Architecture (layers + data flow)
 
-Every error response — regardless of source — comes out in exactly this shape:
-
-```jsonc
-{
-  "error": {
-    "code": "USER_NOT_FOUND",          // stable, machine-readable — clients branch on this
-    "message": "User not found",       // safe, human-readable (never a raw stack/driver msg)
-    "statusCode": 404,
-    "details": null,                    // optional; validation → { issues: [{ path, message }] }
-    "correlationId": "req_01J9X…",      // ties response to Pino log line + Sentry event
-    "timestamp": "2026-07-17T12:34:56.789Z",
-    "path": "/api/users/123"
-  }
-}
+```
+app/ (routes)
+  middleware.ts            coarse route guard — refresh-cookie presence only
+  <AuthGuard>/useRequireAuth  client guard — real validation + role gate
+        │ reads
+lib/state-management (Zustand — CLIENT state)
+  auth.store   accessToken (memory-mirrored), user, status, error
+  app.store    activeContext, UI flags, toasts
+        │ calls                                  ▲ selectors
+lib/services (thin API fns)          lib/hooks (SWR — SERVER state)
+  auth.service   (real /auth/*)        useSessions, useConversations, … (per feature)
+  agent.service  (real /agent/*)
+        │
+lib/http/api-client.ts (axios)
+  • baseURL = clientEnv.apiUrl        (NO /api prefix)
+  • Authorization: Bearer <accessToken>   (from token-store)
+  • 401 AUTH_TOKEN_EXPIRED → single-flight /auth/refresh → replay
+  • error envelope → ApiError { code, message, correlationId, details, fieldErrors }
+        │
+lib/config/env.ts   Zod-validated env (client + server split)
 ```
 
-- **Validation `details`** standardizes on `{ issues: [{ path, message }] }` (kills the two-shape split).
-- **INTERNAL (500) never leaks** raw message/stack — client gets the generic `INTERNAL_ERROR`
-  message; the true cause goes only to Pino + Sentry, keyed by `correlationId`.
-- `correlationId` = the `pino-http` request id (`req.id`). Also set as a Sentry tag.
+**Boundary rule:** Zustand owns client state (auth/session/UI). SWR owns server state
+(cached/deduped/refetched). They meet only at the token: the auth store holds the access token;
+the SWR fetcher reads it through the shared api-client.
+
+**Single source of truth for the current user:** the **auth store** owns `user` (set during
+bootstrap / login). SWR is used for *other* server data (sessions list, agent conversations), not
+for `user` — this avoids two competing sources.
+
+---
+
+## 4. Session & token lifecycle (the delicate part)
+
+- **Access token** → in-memory only. Source of truth is a module-level holder
+  `lib/http/token-store.ts` (synchronous, so interceptors can read it), mirrored into the auth
+  store for reactivity. Never persisted; lost on reload → rebuilt via refresh.
+- **Refresh token** → readable cookie `cbn_rt`, `SameSite=Lax`, `Secure` in production, `path=/`,
+  `expires` = 7 days (matches backend `JWT_REFRESH_TTL`). Read by both middleware (server) and the
+  api-client (client). **Rotation-aware:** every `/auth/refresh` returns a *new* refresh token, so
+  the cookie is overwritten on every refresh — otherwise the backend's theft-detection revokes the
+  whole family.
+- **`/auth/refresh` transport:** the refresh token is stored in a cookie for *storage/middleware*
+  purposes but is sent to the backend in the **JSON body** (`{ refreshToken }`), because the backend
+  is bearer/body-only and does not read cookies.
+
+### Bootstrap (runs once per app load, in `AuthProvider`)
+
+```
+refresh cookie present?
+ ├─ no  → status = 'unauthenticated'
+ └─ yes → POST /auth/refresh { refreshToken }
+             ├─ ok   → store access token + rewrite cookie
+             │          → GET /auth/me → user → status = 'authenticated'
+             └─ fail → clear cookie → status = 'unauthenticated'
+```
+
+### 401 auto-refresh (api-client response interceptor)
+
+```
+response 401 with code AUTH_TOKEN_EXPIRED?
+ └─ yes → single-flight refresh (concurrent 401s queue behind ONE refresh call)
+             ├─ ok   → update access token + cookie → replay original request(s)
+             └─ fail / AUTH_TOKEN_REUSE → hard logout → redirect /auth/login
+other 401 codes (AUTH_TOKEN_INVALID, UNAUTHORIZED) → hard logout
+```
+
+### Password change caveat
+
+`PATCH /auth/password` **revokes all sessions** server-side (the current refresh family included).
+After a successful change the frontend force-logs-out and redirects to `/auth/login` with a
+"Password changed — please sign in again" notice, so it does not look like a bug.
+
+---
+
+## 5. RBAC + route guards
+
+- **Roles:** `guest | user | admin | agent` (real backend enum). The fictional permissions/CASL
+  layer and 5-tier hierarchy are removed. For the human web app only `user` and `admin` matter;
+  `guest` = no token, `agent` = machine caller.
+- **`lib/hooks/use-permission.ts`** shrinks to role checks:
+  `useHasRole(role)`, `useHasAnyRole(roles[])`, `useIsAdmin()`.
+- **`middleware.ts` (coarse, cookie-presence only):**
+  - unauthenticated + protected route → `/auth/login?callbackUrl=<path>`
+  - authenticated + auth page → `/dashboard`
+  - It **cannot** check role (role is not trusted from a client cookie).
+- **Admin gating** = client-side `useRequireRole('admin')` **+ backend `RolesGuard` (authoritative).**
+  Middleware is a UX convenience, never the security boundary — the backend is.
+- **`lib/auth/route-policy.ts`** holds the single source of truth for public / protected / admin
+  route lists, shared by `middleware.ts` and the client guard so they never drift.
+- **Coarse-gate limitation (accepted):** a stale/expired refresh cookie lets a user past middleware;
+  the client bootstrap refresh then fails and redirects to login.
+
+---
+
+## 6. Schemas & types
+
+**Response types → plain TS** (`lib/interfaces/auth.interface.ts`, rewritten). No runtime parse (D6).
 
 ```ts
+export type Role = 'guest' | 'user' | 'admin' | 'agent'
+
+export interface TokenPair { accessToken: string; refreshToken: string; expiresIn: number }
+
+// GET /auth/me → { id, role }. email is added only if the JWT carries the claim.
+export interface CurrentUser {
+  id: string
+  role: Role
+  email?: string
+}
+
+// GET /auth/sessions → SessionSummary[] (account page: list + revoke).
+export interface SessionSummary {
+  id: string
+  createdAt: string
+  lastUsedAt: string | null
+  expiresAt: string
+  userAgent: string | null
+  ip: string | null
+}
+
+export interface Paginated<T> { data: T[]; total: number; page: number; limit: number }
+
 export interface ErrorEnvelope {
   error: {
-    code: ErrorCode;
-    message: string;
-    statusCode: number;
-    details?: unknown;
-    correlationId: string;
-    timestamp: string;      // ISO-8601
-    path: string;
-  };
-}
-```
-
----
-
-## 6. `AppException`
-
-```ts
-export class AppException extends HttpException {
-  readonly code: ErrorCode;
-  readonly kind: ErrorKind;
-  readonly details?: unknown;
-  constructor(code: ErrorCode, opts?: { message?: string; details?: unknown; cause?: unknown }) {
-    const spec = ERROR_REGISTRY[code];
-    super({ code, message: opts?.message ?? spec.message, details: opts?.details },
-          spec.status, { cause: opts?.cause });
-    this.code = code; this.kind = spec.kind; this.details = opts?.details;
+    code: string; message: string; statusCode: number
+    details: unknown | null; correlationId: string; timestamp: string; path: string
   }
 }
 ```
 
-Extends `HttpException` so it degrades gracefully even without the filter and behaves for any
-`instanceof HttpException` checks. Being a plain class, it also works in non-DI contexts
-(e.g. the Zod pipe constructed via `new`).
+`deriveDisplayName(user)` → `user.email?.split('@')[0] ?? 'User'`, so the UI has a stable label
+without a display-name field.
 
----
-
-## 7. `ExceptionService` (injectable throw API)
-
-`@Global`, **dependency-free** (no injected deps → no DI cycles even though everything depends on it).
+**Zod form schemas** (`lib/validations/auth.schema.ts`) — runtime, via `zodResolver`. Note: **no
+`registerSchema`** (login-only).
 
 ```ts
-@Injectable()
-export class ExceptionService {
-  /** Workhorse. `throw this.errors.create(ErrorCode.USER_NOT_FOUND, { details })`. */
-  create(code: ErrorCode, opts?: { message?: string; details?: unknown; cause?: unknown }): AppException;
+export const emailSchema    = z.string().trim().toLowerCase().email('Enter a valid email address')
+export const passwordSchema = z.string().min(12, 'At least 12 characters').max(200, 'At most 200 characters')
 
-  /** Convenience for validation — shapes `details.issues = [{ path, message }]`. */
-  validation(issues: Array<{ path: string; message: string }>, opts?: { message?: string }): AppException;
-
-  /** Normalize ANY thrown value into an AppException. The filter's single mapping brain. */
-  from(err: unknown): AppException;
-}
-```
-
-Methods **return** the exception (caller writes `throw`) to preserve TypeScript control-flow
-narrowing. Non-DI callers use `new AppException(...)` directly.
-
-### 7.1 `from()` resolution order
-
-1. `instanceof AppException` → pass through.
-2. `instanceof HttpException` (Nest built-ins incl. `ThrottlerException`→429, and the zod
-   pipe's 400) → map status→code; special-case a `{ message:'Validation failed', issues }`
-   body → `VALIDATION_FAILED` + details.
-3. `instanceof ZodError` → `VALIDATION_FAILED` + `issues`.
-4. `instanceof MastraError` → `mastra-error.mapper` (§8).
-5. Known infra errors → `infra-error.mapper` (§9).
-6. Fallback → `INTERNAL_ERROR` (500), raw message hidden, original kept as `cause`.
-
----
-
-## 8. Mastra error mapping (`mappers/mastra-error.mapper.ts`)
-
-`kind` is driven by `MastraError.category`; `code` is refined by `domain` so the chosen code's
-registry kind matches the category (keeps the registry invariant intact). `id`, `details`,
-and `cause` are preserved (`id` surfaced in `details.mastraId`).
-
-| category | domain | → code |
-|---|---|---|
-| `USER` | `TOOL` / `MCP` | `AGENT_REQUEST_INVALID` (400) |
-| `USER` | any other | `AGENT_REQUEST_INVALID` (400) |
-| `THIRD_PARTY` | `LLM` / `MODEL_ROUTER` | `LLM_PROVIDER_ERROR` (502) |
-| `THIRD_PARTY` | `STORAGE` / `MASTRA_MEMORY` / `MASTRA_VECTOR` | `DEPENDENCY_UNAVAILABLE` (503) |
-| `THIRD_PARTY` | any other | `LLM_PROVIDER_ERROR` (502) |
-| `SYSTEM` / `UNKNOWN` | `TOOL` / `MCP` | `TOOL_EXECUTION_FAILED` (500) |
-| `SYSTEM` / `UNKNOWN` | any other | `AGENT_RUN_FAILED` (500) |
-
-**Rate-limit / timeout sub-classification is best-effort in v1:** if the underlying provider
-error cheaply reveals a 429 or timeout (status/name/code sniff), map to `LLM_RATE_LIMITED` /
-`LLM_TIMEOUT`; otherwise `LLM_PROVIDER_ERROR`. Refinement deferred to v2.
-
----
-
-## 9. Infra error mapping (`mappers/infra-error.mapper.ts`)
-
-Central boundary normalization — **avoids sprinkling try/catch into every adapter**:
-
-| Source error | Detection | → code |
-|---|---|---|
-| Postgres unique violation | `err.code === '23505'` | `CONFLICT` |
-| Other pg driver / connection | `err.code` in pg class 08/57/53 or driver name | `DB_UNAVAILABLE` |
-| `SearchEngineError` | `instanceof` | `SEARCH_UNAVAILABLE` |
-| `NoActiveEmailConfigError` | `instanceof` | `MAIL_CONFIG_MISSING` |
-| Crypto (`Malformed encryption envelope` / GCM auth-tag) | message / name | `CRYPTO_DECRYPT_FAILED` |
-| Redis / ioredis connection | error name/class | `CACHE_UNAVAILABLE` |
-| MinIO / S3 (`NoSuchKey`) | code | `STORAGE_OBJECT_NOT_FOUND` |
-| MinIO / S3 connection / access | code/name | `STORAGE_UNAVAILABLE` |
-| Nodemailer send/verify | name/code | `EMAIL_SEND_FAILED` |
-
-Anything unmatched falls through to `INTERNAL_ERROR`. The mapper is intentionally small and
-pragmatic in v1; adapters that already translate (e.g. `search-record.service`) throw
-`AppException` directly, with the mapper as the safety net.
-
----
-
-## 10. `GlobalExceptionFilter` + wiring
-
-```ts
-@Catch()
-export class GlobalExceptionFilter implements ExceptionFilter {
-  constructor(private readonly errors: ExceptionService, private readonly logger: PinoLogger) {}
-  catch(exception: unknown, host: ArgumentsHost) {
-    const http = host.switchToHttp();
-    const req = http.getRequest();
-    const res = http.getResponse();
-    const appErr = this.errors.from(exception);
-    const correlationId = req.id ?? '—';
-
-    if (appErr.kind === ErrorKind.CLIENT) this.logger.debug({ code: appErr.code, correlationId });
-    else this.logger.error({ err: exception, code: appErr.code, correlationId });
-
-    if (appErr.kind !== ErrorKind.CLIENT) {
-      Sentry.captureException(appErr.cause ?? exception, { tags: { code: appErr.code, correlationId } });
-    }
-    res.status(appErr.getStatus()).json(buildEnvelope(appErr, correlationId, req.url));
-  }
-}
-```
-
-```ts
-@Global()
-@Module({
-  providers: [ExceptionService, { provide: APP_FILTER, useClass: GlobalExceptionFilter }],
-  exports: [ExceptionService],
+export const loginSchema = z.object({
+  email: emailSchema,
+  password: z.string().min(1, 'Password is required'),   // never reveal policy on login
 })
-export class ExceptionsModule {}
+
+export const forgotPasswordSchema = z.object({ email: emailSchema })
+
+export const resetPasswordSchema = z.object({
+  email: emailSchema,
+  code: z.string().regex(/^\d{6}$/, 'Enter the 6-digit code from your email'),
+  newPassword: passwordSchema,
+  confirmPassword: z.string(),
+}).refine(d => d.newPassword === d.confirmPassword, { path: ['confirmPassword'], message: 'Passwords do not match' })
+
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: passwordSchema,
+  confirmPassword: z.string(),
+})
+  .refine(d => d.newPassword === d.confirmPassword, { path: ['confirmPassword'], message: 'Passwords do not match' })
+  .refine(d => d.newPassword !== d.currentPassword, { path: ['newPassword'], message: 'New password must be different' })
 ```
 
-- Import `ExceptionsModule` in `AppModule` (after `LoggerModule`; `@Global` so location only
-  affects filter binding, not injectability).
-- **Remove** `SentryGlobalFilter` from `ObservabilityModule` (keep `SentryModule.forRoot()` +
-  `instrument.ts`). Our filter now owns Sentry capture, avoiding double reporting and adding
-  `code`/`correlationId` tags.
+**Password strength meter** (`lib/auth/password-strength.ts`) — no dependency. Heuristic score
+0–4 from length + character-class variety → label `weak | fair | good | strong`. Soft guidance
+only; never blocks a length-valid password.
 
-### Folder layout (`api/src/infrastructure/exceptions/`, files <500 lines)
+---
+
+## 7. Error handling
+
+`api-client` maps the backend error envelope to an `ApiError`:
+
+```ts
+class ApiError extends Error {
+  code: string            // e.g. AUTH_INVALID_CREDENTIALS
+  statusCode: number
+  correlationId?: string
+  details?: unknown
+  // Parsed from details.issues [{ path, message }] (confirmed backend shape).
+  get fieldErrors(): Record<string, string>   // path → message, ready for setError()
+}
+```
+
+- `details` for `VALIDATION_FAILED` is `{ issues: [{ path: string, message: string }] }`; `path` is
+  dot-joined (`"(root)"` for top-level). `fieldErrors` maps these straight onto react-hook-form fields.
+- Code-driven UX (`ERROR_CODES` constant): `AUTH_TOKEN_EXPIRED` → silent refresh;
+  `AUTH_TOKEN_REUSE`/`AUTH_TOKEN_INVALID` → hard logout; `AUTH_INVALID_CREDENTIALS` → "invalid email
+  or password"; `RATE_LIMITED` → back-off notice. `correlationId` is surfaced in toasts for support.
+
+---
+
+## 8. Environment module (`lib/config/env.ts`)
+
+Zod-validated, split so server vars never leak into the client bundle:
+
+- **`clientEnv`** — `NEXT_PUBLIC_API_URL` (url, required), `NEXT_PUBLIC_APP_NAME` (default
+  `'Cybernetics'`). Each `process.env.NEXT_PUBLIC_*` is referenced **statically** so Next inlines it.
+- **`serverEnv`** — `API_URL` (url, required; used by middleware + server components/route handlers).
+  Guarded so it is never evaluated on the client.
+- Parsing runs at module load and throws a clear, aggregated message listing missing/invalid vars.
+- Constants (cookie name `cbn_rt`, TTLs, storage keys) centralized in `lib/config/constants.ts`.
+- `.env.example` updated to the real keys.
+
+---
+
+## 9. Mastra / agent integration (scope for this pass)
+
+- Correct `lib/services/mastra.service.ts` → `agent.service.ts` to the **real** backend routes:
+  - `POST /agent/chat` `{ conversationId?, message }` → `{ conversationId, runId, text, pendingApprovals[] }` (**blocking**)
+  - `GET /agent/conversations?page&limit`
+  - `GET /agent/approvals`, `POST /agent/approvals/:id` `{ approved, note? }`
+  - `POST /agent/schedules` (admin), `DELETE /agent/schedules/:id`
+- Types mirror `mastra.types` unions: `RunStatus`, `ActionType`, `ApprovalStatus`, `DeliveryChannel`,
+  `PendingApproval`.
+- **Deferred (not this pass):** the rich streaming chat UI. When built, use the vendor streaming
+  adapter at `/api/agent-core/*` with `useChat` from `@ai-sdk/react` + `DefaultChatTransport`
+  (Mastra 1.0 `agent.stream()` is AI-SDK-v5/v6 compatible; the installed `ai@6` matches). The
+  existing `ai-elements` / `ai-chat-modal` UI is left in place but not wired in this pass.
+
+---
+
+## 10. Pruning (goal item 6) — confirm before deletion
+
+**Remove (fiction / wrong contract / unsupported by backend):**
+- `lib/state-management/*.store.ts`, `lib/services/*.service.ts`, `lib/interfaces/*.interface.ts`
+  **except** `auth`, `app`, `shared`, and the corrected `agent`/`mastra`.
+- `lib/sessionControl/` (vestigial — cookie is the single persistence layer).
+- Auth pages/flows: **`signup`**, `verify-email`, `resend-verification`, `callback` (OAuth).
+- The **"Login with Google"** button in `login-form`.
+- Mock-data pages: `app/dashboard/*` demo content (`data.json`, `calls/*`), `app/data-links`,
+  `app/data-links-modal`, `app/home-page`, `app/profile/settings` (replaced by the account page).
+- Demo components: `music-player`, `chart-area-interactive`, `section-cards`, `data-table` (demo),
+  `team-switcher`, `force-modal`, `signup-form`.
+
+**Keep / rewire:**
+- `components/ui/*`, `theme-provider`, `tooltip`.
+- `login-form` → rewired to the new store + `react-hook-form` + `zodResolver`, Google button removed.
+- `forgot-password` + `reset-password` pages → rewired to the real reset flow (email + 6-digit code).
+- **NEW account page** (`app/(protected)/account` or similar): change-password (`PATCH /auth/password`)
+  + active-sessions list & revoke (`GET /auth/sessions`, `POST /auth/logout-all`).
+- A minimal protected `/dashboard` shell to prove the guard end-to-end.
+- Sidebar/nav scaffolding → rewired to `route-policy`.
+- `lib/localControl`, `lib/routes/routes.tsx` (nav config) → reviewed and kept if still useful.
+
+**Also fix:** `app/layout.tsx` mounts `<Toaster />` (sonner) — currently missing though the app
+store dispatches to it. `IActiveContext.projectId` → `string` (backend ids are UUID strings, not numbers).
+
+---
+
+## 11. Folder structure (final — follows the existing pre-designed layout)
 
 ```
-exceptions.module.ts
-app-exception.ts
-error-codes.ts                 ErrorCode enum + ErrorKind enum
-error-registry.ts   (+spec)    ERROR_REGISTRY: code → {status,kind,message}
-error-envelope.ts              envelope type + builder
-exception.service.ts (+spec)   create / validation / from
-global-exception.filter.ts (+spec)
-mappers/mastra-error.mapper.ts (+spec)
-mappers/infra-error.mapper.ts  (+spec)
-index.ts                       barrel
+frontend/
+  middleware.ts                         NEW — coarse route guard
+  lib/
+    config/
+      env.ts                            NEW — typed/validated env (client + server split)
+      constants.ts                      NEW — cookie name, TTLs, storage keys
+    http/
+      api-client.ts                     rewritten — refresh, error envelope, no /api prefix
+      token-store.ts                    NEW — in-memory access-token holder
+    auth/
+      route-policy.ts                   NEW — public/protected/admin route lists
+      password-strength.ts              NEW — no-dep strength heuristic
+    interfaces/
+      auth.interface.ts                 rewritten — real response types (plain TS)
+      app.interface.ts, shared.interface.ts, mastra.interface.ts   kept/corrected
+    validations/
+      auth.schema.ts                    rewritten — Zod form schemas (login/forgot/reset/change-pw)
+    services/
+      auth.service.ts                   rewritten — login, refresh, logout, logoutAll, getMe,
+                                        getSessions, changePassword, forgotPassword, resetPassword
+      agent.service.ts                  rewritten from mastra.service — real /agent/*
+    hooks/
+      use-permission.ts                 role-only checks
+      swr-fetcher.ts                    NEW — SWR fetcher bound to api-client (+ example hook)
+    state-management/
+      auth.store.ts                     rewritten (login, logout, bootstrap, refresh, changePassword)
+      app.store.ts                      corrected (activeContext id: string)
+  components/
+    providers/
+      auth-provider.tsx                 rewritten — bootstrap()
+      swr-provider.tsx                  NEW — <SWRConfig> with api-client fetcher
 ```
 
 ---
 
-## 11. Conventions settled during design
+## 12. Out of scope / deferred
 
-1. **Ownership → 403 by default** (`FORBIDDEN`); keep deliberate 404-masking only where hiding
-   existence is the intent (file-processor) via explicit `FILE_NOT_FOUND` — masking becomes a
-   documented choice, not an accident.
-2. **Validation shape** is `{ issues: [{ path, message }] }` everywhere (Zod pipe +
-   `search-record.service`).
-3. **Best-effort/swallowed** side effects (§2.D) keep their current semantics — v1 does not
-   convert them to thrown exceptions.
-4. **HITL approval-required** stays a control signal, not an error.
+- **Public registration, self-profile editing, avatar** — not supported by the backend; excluded.
+- **Admin user-management screen** (create/list/edit/delete via existing `/users`) — deferred; a
+  future admin feature, not part of the v1 foundation.
+- Rich streaming AI chat UI (see §9).
+- Domain feature data layers (projects, tasks, contacts, etc.) — rebuilt per feature on the SWR pattern.
+- Email verification — backend does not support it.
 
----
+## 13. Open items to confirm during implementation
 
-## 12. Migration plan (full — every call site)
-
-1. **Build** the module (registry, `AppException`, `ExceptionService`, filter, mappers) + unit tests.
-2. **Wire**: import `ExceptionsModule` in `AppModule`; remove `SentryGlobalFilter`.
-3. **Feature modules** (auth, users, file-processor, search-service, system, mailbox, mastra):
-   replace every `throw new XxxException(...)` with `throw this.errors.create(ErrorCode.…)`,
-   injecting `ExceptionService`; add any missing domain codes to the registry.
-4. **Infra**: rely on `infra-error.mapper` at the boundary; convert the one existing explicit
-   translation (`search-record.service` `SearchEngineError`→503) to `AppException`.
-5. **Standardize validation** output (Zod pipe + `search-record.service`).
-6. **Apply convention fixes** (§11.1 403-vs-404).
-
----
-
-## 13. Testing
-
-Co-located `.spec.ts` (repo convention):
-
-- **Registry completeness** — every `ErrorCode` has exactly one spec; statuses are valid.
-- **`ExceptionService`** — `create`/`validation` produce correct status/kind/body; `from()`
-  mapping table (AppException / HttpException / ZodError / MastraError per category×domain /
-  pg-`23505` / `SearchEngineError` / crypto / unknown).
-- **`GlobalExceptionFilter`** — for each kind: correct HTTP status, exact envelope shape,
-  Sentry capture called only for DEPENDENCY/INTERNAL, raw message hidden for INTERNAL.
-- **Regression** — existing module specs still pass after migration (statuses unchanged where
-  behavior is intentionally preserved).
-
----
-
-## 14. Deferred to v2
-
-- Mastra approval-expiry implementation (the modeled-but-unused `'expired'` status).
-- Finer LLM error sub-classification (rate-limit/timeout precision across providers).
-- Optional persistent `error_log` table if in-app querying is later needed.
-- i18n of `message` (envelope already code-driven).
+1. Exact `/dashboard` shell scope (minimal placeholder vs. keep rewired sidebar).
+2. Account page: v1 includes both change-password and session management (both endpoints exist) —
+   confirm session-management UI is in scope for v1, or defer to change-password only.

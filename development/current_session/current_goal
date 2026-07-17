@@ -1,14 +1,14 @@
-# Goal: design and implement a centralized exeception handling module.
+# Goal: use the existing templated frontend, update the design / implementation, and make it usable for the current backend
 
-feature description: Centralize the definition and error handling of all execeptions, all other module will call this module(this can be a global module) to throw the execptions. So all exeception can be handled in one module(and different kind of execptions can be centralized, so clean and clear to deal with.)
+feature description: review the frontend professionally, especially the statemanagement(authentication, session, user role, user info, global envirables, and the router guards), Basically focusing on the foundational layers. To make it easier later when meaningful components, views and pages to be built on a solid foundation
 
 1. This design has to be a simple but production grade system design. This is the first version, it should be simple, clean and reliable.
 2. Design the schemas as well, discuss the schema with me, as this is the hardest part.
 3. Review the lastest API doc for Mastra AI, as it changing very fast.
-4. I have an pre-designed folder structure for you to start with in `src/features/mastra`
+4. I have an pre-designed folder structure for you to start with in `frontend`
 5. this is a complex module, so discuss with me if you need.
+6. remove any components / files / functions in the template frontend project(frontend)
   
-## Action:
 
-Check all existing modules, controllers, services, repos, to summarize the execption categories required first(in order to under stand the scope)
+## Actions to take
 Design the execption module and output the design to [development/current_session/current_design]

@@ -1,1509 +1,2661 @@
-# Centralized Exception Handling Module — Implementation Plan
+# Frontend Foundational Layer — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build one global exception module that all code throws through and that normalizes every error (ours, NestJS, Mastra, raw driver errors) into a single machine-readable HTTP envelope, then migrate every existing throw site onto it.
+**Goal:** Rebuild the `frontend/` foundational layer (auth, session, tokens, RBAC, env, router guards) against the real Cybernetics backend, so features can be built on a solid base.
 
-**Architecture:** A single `ERROR_REGISTRY` (code → status/kind/message) is the source of truth. `AppException` is a plain `HttpException` subclass built from a code. The `@Global` injectable `ExceptionService` is the throw API (`create`/`validation`) and the single normalizer (`from`). One `GlobalExceptionFilter` (`@Catch()`) calls `from()`, logs by kind via Pino, reports DEPENDENCY/INTERNAL to Sentry, and writes the envelope. Two mappers translate `MastraError` and raw infra errors.
+**Architecture:** Next.js 16 App Router + React 19. Zustand owns client/UI/auth state; SWR owns server data. JWT access token lives in memory (`token-store`); rotating refresh token lives in a readable cookie (`cbn_rt`). Axios `api-client` injects the bearer token and performs a single-flight silent refresh on `AUTH_TOKEN_EXPIRED`. A coarse `middleware.ts` gates routes by cookie presence; the backend `RolesGuard` is the authoritative authz boundary.
 
-**Tech Stack:** NestJS (Express), TypeScript, `nestjs-pino`, `@sentry/nestjs`, `zod`, Jest. Design source: `development/current_session/current_design.md`.
+**Tech Stack:** Next.js 16.1, React 19.2, TypeScript 5.9, Zustand 5, SWR, Axios 1.14, Zod 4, react-hook-form 7 + @hookform/resolvers, js-cookie, sonner. Tests: Vitest + Testing Library + jsdom + axios-mock-adapter.
+
+Design source of truth: `development/current_session/current_design.md`.
 
 ## Global Constraints
 
-- Keep every file under 500 lines (repo rule, `api/CLAUDE.md`).
-- Read a file before editing it; prefer editing existing files over new ones.
-- Never add a `Co-Authored-By` trailer to commits (repo rule).
-- Co-locate tests as `*.spec.ts` next to the file under test (repo convention).
-- Run from `api/`: build = `npm run build`, tests = `npm test` (Jest). Single spec: `npx jest <path>`.
-- All new module files live in `api/src/infrastructure/exceptions/`.
-- Preserve existing HTTP **statuses** during migration; preserve **messages** by passing `{ message }` overrides where a call site's message differs from the registry default.
-- `ExceptionService` must stay **dependency-free** (no injected providers) so nothing forms a DI cycle.
+- **HARD RULE — NO BACKEND CHANGES.** Do not modify anything under `api/`. The existing backend API is the single source of truth. If any task appears to require a backend change, STOP and raise it with the user; do not proceed.
+- **Backend contract (exact, verbatim):**
+  - Base URL = `NEXT_PUBLIC_API_URL` with **NO `/api` prefix** (root routes). CORS `credentials:false` (no cookies sent to API; tokens travel in JSON body / Authorization header).
+  - `POST /auth/login` `{email,password}` → `TokenPair` (200). `POST /auth/refresh` `{refreshToken}` → `TokenPair`. `POST /auth/logout` `{refreshToken}` → 204. `POST /auth/logout-all` → 204 (auth). `GET /auth/me` → `{id, role}` (auth). `GET /auth/sessions` → `SessionSummary[]` (auth). `PATCH /auth/password` `{currentPassword,newPassword}` → 204 (auth, revokes ALL sessions). `POST /auth/forgot-password` `{email}` → 204. `POST /auth/reset-password` `{email,code,newPassword}` → 204.
+  - `TokenPair = {accessToken:string; refreshToken:string; expiresIn:number}`. Access TTL 900s; refresh TTL 604800s (7d). Refresh rotates on every use; replaying a revoked refresh token → `AUTH_TOKEN_REUSE`.
+  - No success envelope (raw payloads). Error envelope: `{error:{code,message,statusCode,details,correlationId,timestamp,path}}`. `VALIDATION_FAILED` details = `{issues:[{path:string,message:string}]}` (`path` dot-joined, `"(root)"` for top-level).
+  - Roles: `guest | user | admin | agent`. Password bounds: **min 12, max 200**.
+- **No public registration, no OAuth, no email verification** — login-only. Remove those pages/flows.
+- **Response validation is types-only** (plain TS interfaces). Zod is used ONLY for form inputs + env parsing.
+- **Import alias:** `@/*` → `frontend/*` (per `tsconfig.json`).
+- **TDD + frequent commits.** Each task ends green (`npm run test`, `npm run typecheck`).
+- Commit message convention for this repo: end the body with `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>` (per session guidance). Run commits only within the steps shown.
 
 ---
 
 ## File Structure
 
-```
-api/src/infrastructure/exceptions/
-  error-codes.ts                    ErrorKind enum + ErrorCode enum
-  error-registry.ts                 ErrorSpec, ERROR_REGISTRY, STATUS_TO_CODE
-  error-registry.spec.ts            registry completeness invariant
-  app-exception.ts                  AppException class
-  app-exception.spec.ts
-  error-envelope.ts                 ErrorEnvelope type + buildEnvelope()
-  error-envelope.spec.ts
-  mappers/mastra-error.mapper.ts    isMastraError() + mapMastraError()
-  mappers/mastra-error.mapper.spec.ts
-  mappers/infra-error.mapper.ts     mapInfraError()
-  mappers/infra-error.mapper.spec.ts
-  exception.service.ts              ExceptionService (create/validation/from)
-  exception.service.spec.ts
-  global-exception.filter.ts        GlobalExceptionFilter
-  global-exception.filter.spec.ts
-  exceptions.module.ts              @Global module (ExceptionService + APP_FILTER)
-  index.ts                          barrel export
-```
+**New:**
+- `frontend/vitest.config.ts`, `frontend/vitest.setup.ts` — test tooling
+- `frontend/middleware.ts` — coarse route guard
+- `frontend/lib/config/constants.ts` — cookie name, TTLs, error codes
+- `frontend/lib/config/env.ts` — Zod-validated env (client + server)
+- `frontend/lib/http/token-store.ts` — in-memory access token
+- `frontend/lib/auth/session.ts` — refresh cookie + `refreshSession` + `applyTokenPair`
+- `frontend/lib/auth/route-policy.ts` — route lists + matchers
+- `frontend/lib/auth/password-strength.ts` — no-dep strength heuristic
+- `frontend/lib/auth/guards.tsx` — `useRequireAuth`, `useRequireRole`, `<AuthGuard>`
+- `frontend/lib/hooks/swr-fetcher.ts` — SWR fetcher bound to api-client
+- `frontend/lib/services/agent.service.ts` — real `/agent/*`
+- `frontend/components/providers/swr-provider.tsx` — `<SWRConfig>`
+- `frontend/app/(protected)/account/page.tsx` + account components
 
-Modified outside the module: `app.module.ts` (import module), `infrastructure/observability/sentry.module.ts` (drop `SentryGlobalFilter`), `common/pipes/zod-validation.pipe.ts`, and the 7 feature modules' service + spec files.
+**Rewritten:**
+- `frontend/lib/http/api-client.ts`, `frontend/lib/interfaces/auth.interface.ts`, `frontend/lib/interfaces/mastra.interface.ts`, `frontend/lib/validations/auth.schema.ts`, `frontend/lib/services/auth.service.ts`, `frontend/lib/state-management/auth.store.ts`, `frontend/lib/hooks/use-permission.ts`, `frontend/components/providers/auth-provider.tsx`, `frontend/components/login-form.tsx`, `frontend/app/layout.tsx`, `frontend/app/auth/forgot-password/page.tsx`, `frontend/app/auth/reset-password/page.tsx`
+
+**Corrected (small):**
+- `frontend/lib/interfaces/app.interface.ts` (`projectId: string`), `frontend/lib/state-management/app.store.ts`, `frontend/next.config.mjs` (remove `/verify-email` redirect), `frontend/.env.example`
+
+**Deleted (Task 18):** the fictional domain stores/services/interfaces, `lib/sessionControl/`, `mastra.service.ts`, removed auth pages, demo components/pages (full list in Task 18).
 
 ---
 
-## PHASE 1 — Core module
-
-### Task 1: Error codes, kinds, and registry
+## Task 1: Test tooling + dependencies
 
 **Files:**
-- Create: `api/src/infrastructure/exceptions/error-codes.ts`
-- Create: `api/src/infrastructure/exceptions/error-registry.ts`
-- Test: `api/src/infrastructure/exceptions/error-registry.spec.ts`
+- Create: `frontend/vitest.config.ts`, `frontend/vitest.setup.ts`, `frontend/lib/__tests__/smoke.test.ts`
+- Modify: `frontend/package.json`
 
 **Interfaces:**
-- Produces: `enum ErrorKind { CLIENT, DEPENDENCY, INTERNAL }`; `enum ErrorCode` (string members); `interface ErrorSpec { status: HttpStatus; kind: ErrorKind; message: string }`; `const ERROR_REGISTRY: Record<ErrorCode, ErrorSpec>`; `const STATUS_TO_CODE: Partial<Record<number, ErrorCode>>`.
+- Produces: `npm run test` (Vitest), the `@` import alias in tests, jsdom default environment.
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Install dependencies**
 
-`error-registry.spec.ts`:
-```ts
-import { HttpStatus } from '@nestjs/common';
-import { ErrorCode, ErrorKind } from './error-codes';
-import { ERROR_REGISTRY } from './error-registry';
-
-describe('ERROR_REGISTRY', () => {
-  it('has exactly one spec for every ErrorCode', () => {
-    for (const code of Object.values(ErrorCode)) {
-      expect(ERROR_REGISTRY[code]).toBeDefined();
-    }
-    expect(Object.keys(ERROR_REGISTRY).sort()).toEqual(
-      Object.values(ErrorCode).sort(),
-    );
-  });
-
-  it('every spec has a valid status, a known kind, and a non-empty message', () => {
-    for (const spec of Object.values(ERROR_REGISTRY)) {
-      expect(Object.values(HttpStatus)).toContain(spec.status);
-      expect(Object.values(ErrorKind)).toContain(spec.kind);
-      expect(spec.message.length).toBeGreaterThan(0);
-    }
-  });
-
-  it('CLIENT specs are 4xx; DEPENDENCY/INTERNAL are 5xx', () => {
-    for (const spec of Object.values(ERROR_REGISTRY)) {
-      if (spec.kind === ErrorKind.CLIENT) {
-        expect(spec.status).toBeGreaterThanOrEqual(400);
-        expect(spec.status).toBeLessThan(500);
-      } else {
-        expect(spec.status).toBeGreaterThanOrEqual(500);
-      }
-    }
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/error-registry.spec.ts`
-Expected: FAIL — cannot find module `./error-codes`.
-
-- [ ] **Step 3: Write `error-codes.ts`**
-
-```ts
-export enum ErrorKind {
-  CLIENT = 'CLIENT',
-  DEPENDENCY = 'DEPENDENCY',
-  INTERNAL = 'INTERNAL',
-}
-
-export enum ErrorCode {
-  // common
-  VALIDATION_FAILED = 'VALIDATION_FAILED',
-  NOT_FOUND = 'NOT_FOUND',
-  CONFLICT = 'CONFLICT',
-  UNAUTHORIZED = 'UNAUTHORIZED',
-  FORBIDDEN = 'FORBIDDEN',
-  RATE_LIMITED = 'RATE_LIMITED',
-  DEPENDENCY_UNAVAILABLE = 'DEPENDENCY_UNAVAILABLE',
-  INTERNAL_ERROR = 'INTERNAL_ERROR',
-  // auth
-  AUTH_INVALID_CREDENTIALS = 'AUTH_INVALID_CREDENTIALS',
-  AUTH_TOKEN_INVALID = 'AUTH_TOKEN_INVALID',
-  AUTH_TOKEN_EXPIRED = 'AUTH_TOKEN_EXPIRED',
-  AUTH_TOKEN_REUSE = 'AUTH_TOKEN_REUSE',
-  AUTH_RESET_CODE_INVALID = 'AUTH_RESET_CODE_INVALID',
-  AUTH_SERVICE_CREDENTIAL_INVALID = 'AUTH_SERVICE_CREDENTIAL_INVALID',
-  // user
-  USER_NOT_FOUND = 'USER_NOT_FOUND',
-  USER_EMAIL_TAKEN = 'USER_EMAIL_TAKEN',
-  // file
-  FILE_NOT_FOUND = 'FILE_NOT_FOUND',
-  FILE_INVALID_STATE = 'FILE_INVALID_STATE',
-  FILE_TOO_LARGE = 'FILE_TOO_LARGE',
-  FILE_MIME_NOT_ALLOWED = 'FILE_MIME_NOT_ALLOWED',
-  FILE_UPLOAD_MISSING = 'FILE_UPLOAD_MISSING',
-  // search
-  SEARCH_COLLECTION_NOT_FOUND = 'SEARCH_COLLECTION_NOT_FOUND',
-  SEARCH_COLLECTION_EXISTS = 'SEARCH_COLLECTION_EXISTS',
-  SEARCH_QUERY_INVALID = 'SEARCH_QUERY_INVALID',
-  SEARCH_RECORD_NOT_FOUND = 'SEARCH_RECORD_NOT_FOUND',
-  SEARCH_UNAVAILABLE = 'SEARCH_UNAVAILABLE',
-  // config / crypto
-  CONFIG_NOT_FOUND = 'CONFIG_NOT_FOUND',
-  MAIL_CONFIG_MISSING = 'MAIL_CONFIG_MISSING',
-  CRYPTO_DECRYPT_FAILED = 'CRYPTO_DECRYPT_FAILED',
-  CRYPTO_MISCONFIGURED = 'CRYPTO_MISCONFIGURED',
-  // mailbox
-  MAILBOX_MESSAGE_NOT_FOUND = 'MAILBOX_MESSAGE_NOT_FOUND',
-  MAILBOX_ATTACHMENT_NOT_FOUND = 'MAILBOX_ATTACHMENT_NOT_FOUND',
-  MAILBOX_ACCOUNT_UNRESOLVED = 'MAILBOX_ACCOUNT_UNRESOLVED',
-  MAILBOX_SYNC_FAILED = 'MAILBOX_SYNC_FAILED',
-  // agent / llm
-  AGENT_CONVERSATION_NOT_FOUND = 'AGENT_CONVERSATION_NOT_FOUND',
-  AGENT_APPROVAL_NOT_FOUND = 'AGENT_APPROVAL_NOT_FOUND',
-  AGENT_APPROVAL_CONFLICT = 'AGENT_APPROVAL_CONFLICT',
-  AGENT_APPROVAL_FORBIDDEN = 'AGENT_APPROVAL_FORBIDDEN',
-  AGENT_REQUEST_INVALID = 'AGENT_REQUEST_INVALID',
-  AGENT_RUN_FAILED = 'AGENT_RUN_FAILED',
-  TOOL_EXECUTION_FAILED = 'TOOL_EXECUTION_FAILED',
-  LLM_RATE_LIMITED = 'LLM_RATE_LIMITED',
-  LLM_TIMEOUT = 'LLM_TIMEOUT',
-  LLM_PROVIDER_ERROR = 'LLM_PROVIDER_ERROR',
-  // infra
-  DB_UNAVAILABLE = 'DB_UNAVAILABLE',
-  CACHE_UNAVAILABLE = 'CACHE_UNAVAILABLE',
-  QUEUE_UNAVAILABLE = 'QUEUE_UNAVAILABLE',
-  STORAGE_UNAVAILABLE = 'STORAGE_UNAVAILABLE',
-  STORAGE_OBJECT_NOT_FOUND = 'STORAGE_OBJECT_NOT_FOUND',
-  EMAIL_SEND_FAILED = 'EMAIL_SEND_FAILED',
-}
-```
-
-- [ ] **Step 4: Write `error-registry.ts`**
-
-```ts
-import { HttpStatus } from '@nestjs/common';
-import { ErrorCode, ErrorKind } from './error-codes';
-
-export interface ErrorSpec {
-  status: HttpStatus;
-  kind: ErrorKind;
-  message: string;
-}
-
-const C = ErrorKind.CLIENT;
-const D = ErrorKind.DEPENDENCY;
-const I = ErrorKind.INTERNAL;
-const S = HttpStatus;
-
-export const ERROR_REGISTRY: Record<ErrorCode, ErrorSpec> = {
-  [ErrorCode.VALIDATION_FAILED]: { status: S.BAD_REQUEST, kind: C, message: 'Validation failed' },
-  [ErrorCode.NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Resource not found' },
-  [ErrorCode.CONFLICT]: { status: S.CONFLICT, kind: C, message: 'Resource conflict' },
-  [ErrorCode.UNAUTHORIZED]: { status: S.UNAUTHORIZED, kind: C, message: 'Unauthorized' },
-  [ErrorCode.FORBIDDEN]: { status: S.FORBIDDEN, kind: C, message: 'Forbidden' },
-  [ErrorCode.RATE_LIMITED]: { status: S.TOO_MANY_REQUESTS, kind: C, message: 'Too many requests' },
-  [ErrorCode.DEPENDENCY_UNAVAILABLE]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'A dependency is temporarily unavailable' },
-  [ErrorCode.INTERNAL_ERROR]: { status: S.INTERNAL_SERVER_ERROR, kind: I, message: 'Internal server error' },
-
-  [ErrorCode.AUTH_INVALID_CREDENTIALS]: { status: S.UNAUTHORIZED, kind: C, message: 'Invalid credentials' },
-  [ErrorCode.AUTH_TOKEN_INVALID]: { status: S.UNAUTHORIZED, kind: C, message: 'Invalid refresh token' },
-  [ErrorCode.AUTH_TOKEN_EXPIRED]: { status: S.UNAUTHORIZED, kind: C, message: 'Refresh token expired' },
-  [ErrorCode.AUTH_TOKEN_REUSE]: { status: S.UNAUTHORIZED, kind: C, message: 'Refresh token reuse detected' },
-  [ErrorCode.AUTH_RESET_CODE_INVALID]: { status: S.UNAUTHORIZED, kind: C, message: 'Invalid or expired reset code' },
-  [ErrorCode.AUTH_SERVICE_CREDENTIAL_INVALID]: { status: S.UNAUTHORIZED, kind: C, message: 'Invalid service credential' },
-
-  [ErrorCode.USER_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'User not found' },
-  [ErrorCode.USER_EMAIL_TAKEN]: { status: S.CONFLICT, kind: C, message: 'Email already registered' },
-
-  [ErrorCode.FILE_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'File not found' },
-  [ErrorCode.FILE_INVALID_STATE]: { status: S.CONFLICT, kind: C, message: 'File is not in a valid state for this operation' },
-  [ErrorCode.FILE_TOO_LARGE]: { status: S.BAD_REQUEST, kind: C, message: 'File exceeds the maximum allowed size' },
-  [ErrorCode.FILE_MIME_NOT_ALLOWED]: { status: S.BAD_REQUEST, kind: C, message: 'File type is not allowed' },
-  [ErrorCode.FILE_UPLOAD_MISSING]: { status: S.BAD_REQUEST, kind: C, message: 'Upload not found in storage; upload the file before completing' },
-
-  [ErrorCode.SEARCH_COLLECTION_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Collection not found' },
-  [ErrorCode.SEARCH_COLLECTION_EXISTS]: { status: S.CONFLICT, kind: C, message: 'Collection already exists' },
-  [ErrorCode.SEARCH_QUERY_INVALID]: { status: S.BAD_REQUEST, kind: C, message: 'Invalid search query' },
-  [ErrorCode.SEARCH_RECORD_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Record not found' },
-  [ErrorCode.SEARCH_UNAVAILABLE]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'Search is temporarily unavailable' },
-
-  [ErrorCode.CONFIG_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Configuration not found' },
-  [ErrorCode.MAIL_CONFIG_MISSING]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'No active email configuration is set' },
-  [ErrorCode.CRYPTO_DECRYPT_FAILED]: { status: S.INTERNAL_SERVER_ERROR, kind: I, message: 'Internal server error' },
-  [ErrorCode.CRYPTO_MISCONFIGURED]: { status: S.INTERNAL_SERVER_ERROR, kind: I, message: 'Internal server error' },
-
-  [ErrorCode.MAILBOX_MESSAGE_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Message not found' },
-  [ErrorCode.MAILBOX_ATTACHMENT_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Attachment not found' },
-  [ErrorCode.MAILBOX_ACCOUNT_UNRESOLVED]: { status: S.BAD_REQUEST, kind: C, message: 'No mailbox account specified and no default is configured' },
-  [ErrorCode.MAILBOX_SYNC_FAILED]: { status: S.BAD_GATEWAY, kind: D, message: 'Mailbox sync failed' },
-
-  [ErrorCode.AGENT_CONVERSATION_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Conversation not found' },
-  [ErrorCode.AGENT_APPROVAL_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Approval not found' },
-  [ErrorCode.AGENT_APPROVAL_CONFLICT]: { status: S.CONFLICT, kind: C, message: 'Approval already decided' },
-  [ErrorCode.AGENT_APPROVAL_FORBIDDEN]: { status: S.FORBIDDEN, kind: C, message: 'Not your approval' },
-  [ErrorCode.AGENT_REQUEST_INVALID]: { status: S.BAD_REQUEST, kind: C, message: 'Invalid agent request' },
-  [ErrorCode.AGENT_RUN_FAILED]: { status: S.INTERNAL_SERVER_ERROR, kind: I, message: 'The agent run failed' },
-  [ErrorCode.TOOL_EXECUTION_FAILED]: { status: S.INTERNAL_SERVER_ERROR, kind: I, message: 'A tool failed to execute' },
-  [ErrorCode.LLM_RATE_LIMITED]: { status: S.TOO_MANY_REQUESTS, kind: C, message: 'The model is rate limited; try again shortly' },
-  [ErrorCode.LLM_TIMEOUT]: { status: S.GATEWAY_TIMEOUT, kind: D, message: 'The model request timed out' },
-  [ErrorCode.LLM_PROVIDER_ERROR]: { status: S.BAD_GATEWAY, kind: D, message: 'The model provider returned an error' },
-
-  [ErrorCode.DB_UNAVAILABLE]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'A dependency is temporarily unavailable' },
-  [ErrorCode.CACHE_UNAVAILABLE]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'A dependency is temporarily unavailable' },
-  [ErrorCode.QUEUE_UNAVAILABLE]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'A dependency is temporarily unavailable' },
-  [ErrorCode.STORAGE_UNAVAILABLE]: { status: S.SERVICE_UNAVAILABLE, kind: D, message: 'Object storage is temporarily unavailable' },
-  [ErrorCode.STORAGE_OBJECT_NOT_FOUND]: { status: S.NOT_FOUND, kind: C, message: 'Object not found' },
-  [ErrorCode.EMAIL_SEND_FAILED]: { status: S.BAD_GATEWAY, kind: D, message: 'Failed to send email' },
-};
-
-/** Maps a raw HTTP status (from framework-thrown HttpExceptions) to a generic code. */
-export const STATUS_TO_CODE: Partial<Record<number, ErrorCode>> = {
-  [S.BAD_REQUEST]: ErrorCode.VALIDATION_FAILED,
-  [S.UNAUTHORIZED]: ErrorCode.UNAUTHORIZED,
-  [S.FORBIDDEN]: ErrorCode.FORBIDDEN,
-  [S.NOT_FOUND]: ErrorCode.NOT_FOUND,
-  [S.CONFLICT]: ErrorCode.CONFLICT,
-  [S.TOO_MANY_REQUESTS]: ErrorCode.RATE_LIMITED,
-  [S.SERVICE_UNAVAILABLE]: ErrorCode.DEPENDENCY_UNAVAILABLE,
-};
-```
-
-- [ ] **Step 5: Run test to verify it passes**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/error-registry.spec.ts`
-Expected: PASS (3 tests).
-
-- [ ] **Step 6: Commit**
-
+Run:
 ```bash
-git add api/src/infrastructure/exceptions/error-codes.ts api/src/infrastructure/exceptions/error-registry.ts api/src/infrastructure/exceptions/error-registry.spec.ts
-git commit -m "feat(exceptions): add error-code taxonomy and registry"
+cd frontend
+npm install swr
+npm install -D vitest @vitejs/plugin-react jsdom @testing-library/react @testing-library/dom @testing-library/jest-dom @testing-library/user-event axios-mock-adapter
 ```
+Expected: installs succeed; `swr` in dependencies, the rest in devDependencies.
 
----
-
-### Task 2: `AppException`
-
-**Files:**
-- Create: `api/src/infrastructure/exceptions/app-exception.ts`
-- Test: `api/src/infrastructure/exceptions/app-exception.spec.ts`
-
-**Interfaces:**
-- Consumes: `ErrorCode`, `ErrorKind` (Task 1), `ERROR_REGISTRY` (Task 1).
-- Produces: `class AppException extends HttpException` with readonly `code: ErrorCode`, `kind: ErrorKind`, `details?: unknown`, and constructor `(code: ErrorCode, opts?: { message?: string; details?: unknown; cause?: unknown })`.
-
-- [ ] **Step 1: Write the failing test**
-
-`app-exception.spec.ts`:
-```ts
-import { HttpException } from '@nestjs/common';
-import { AppException } from './app-exception';
-import { ErrorCode, ErrorKind } from './error-codes';
-
-describe('AppException', () => {
-  it('derives status, kind, and default message from the registry', () => {
-    const err = new AppException(ErrorCode.USER_NOT_FOUND);
-    expect(err).toBeInstanceOf(HttpException);
-    expect(err.getStatus()).toBe(404);
-    expect(err.code).toBe(ErrorCode.USER_NOT_FOUND);
-    expect(err.kind).toBe(ErrorKind.CLIENT);
-    expect(err.message).toBe('User not found');
-  });
-
-  it('honours a message override and stores details + cause', () => {
-    const cause = new Error('root');
-    const err = new AppException(ErrorCode.FILE_INVALID_STATE, {
-      message: 'File is not awaiting upload (status=AVAILABLE)',
-      details: { status: 'AVAILABLE' },
-      cause,
-    });
-    expect(err.message).toBe('File is not awaiting upload (status=AVAILABLE)');
-    expect(err.details).toEqual({ status: 'AVAILABLE' });
-    expect(err.cause).toBe(cause);
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/app-exception.spec.ts`
-Expected: FAIL — cannot find module `./app-exception`.
-
-- [ ] **Step 3: Write `app-exception.ts`**
+- [ ] **Step 2: Create `frontend/vitest.config.ts`**
 
 ```ts
-import { HttpException } from '@nestjs/common';
-import { ErrorCode, ErrorKind } from './error-codes';
-import { ERROR_REGISTRY } from './error-registry';
+import { defineConfig } from 'vitest/config'
+import react from '@vitejs/plugin-react'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
 
-export interface AppExceptionOptions {
-  message?: string;
-  details?: unknown;
-  cause?: unknown;
-}
+const rootDir = path.dirname(fileURLToPath(import.meta.url))
 
-/**
- * The single exception type the application throws. A plain class (constructable
- * without DI), so it works in non-DI contexts (pipes, standalone functions) as
- * well as via `ExceptionService`.
- */
-export class AppException extends HttpException {
-  readonly code: ErrorCode;
-  readonly kind: ErrorKind;
-  readonly details?: unknown;
-
-  constructor(code: ErrorCode, opts: AppExceptionOptions = {}) {
-    const spec = ERROR_REGISTRY[code];
-    super(
-      { code, message: opts.message ?? spec.message, details: opts.details },
-      spec.status,
-      { cause: opts.cause },
-    );
-    this.code = code;
-    this.kind = spec.kind;
-    this.details = opts.details;
-  }
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/app-exception.spec.ts`
-Expected: PASS (2 tests).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add api/src/infrastructure/exceptions/app-exception.ts api/src/infrastructure/exceptions/app-exception.spec.ts
-git commit -m "feat(exceptions): add AppException base class"
-```
-
----
-
-### Task 3: Error envelope + builder
-
-**Files:**
-- Create: `api/src/infrastructure/exceptions/error-envelope.ts`
-- Test: `api/src/infrastructure/exceptions/error-envelope.spec.ts`
-
-**Interfaces:**
-- Consumes: `AppException` (Task 2), `ErrorKind` (Task 1), `ERROR_REGISTRY` (Task 1).
-- Produces: `interface ErrorEnvelope { error: { code, message, statusCode, details, correlationId, timestamp, path } }`; `function buildEnvelope(err: AppException, correlationId: string, path: string): ErrorEnvelope`.
-
-- [ ] **Step 1: Write the failing test**
-
-`error-envelope.spec.ts`:
-```ts
-import { AppException } from './app-exception';
-import { ErrorCode } from './error-codes';
-import { buildEnvelope } from './error-envelope';
-
-describe('buildEnvelope', () => {
-  it('serializes a CLIENT error with its real message and details', () => {
-    const err = new AppException(ErrorCode.USER_NOT_FOUND);
-    const env = buildEnvelope(err, 'req-1', '/users/1');
-    expect(env.error).toMatchObject({
-      code: ErrorCode.USER_NOT_FOUND,
-      message: 'User not found',
-      statusCode: 404,
-      correlationId: 'req-1',
-      path: '/users/1',
-    });
-    expect(typeof env.error.timestamp).toBe('string');
-  });
-
-  it('hides the raw message of INTERNAL errors behind the safe registry message', () => {
-    const err = new AppException(ErrorCode.AGENT_RUN_FAILED, { message: 'stacktrace: secret' });
-    const env = buildEnvelope(err, 'req-2', '/chat');
-    expect(env.error.statusCode).toBe(500);
-    expect(env.error.message).toBe('The agent run failed');
-    expect(env.error.message).not.toContain('secret');
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/error-envelope.spec.ts`
-Expected: FAIL — cannot find module `./error-envelope`.
-
-- [ ] **Step 3: Write `error-envelope.ts`**
-
-```ts
-import { AppException } from './app-exception';
-import { ErrorCode, ErrorKind } from './error-codes';
-import { ERROR_REGISTRY } from './error-registry';
-
-export interface ErrorEnvelope {
-  error: {
-    code: ErrorCode;
-    message: string;
-    statusCode: number;
-    details: unknown;
-    correlationId: string;
-    timestamp: string;
-    path: string;
-  };
-}
-
-/**
- * Renders an AppException into the single public error shape. INTERNAL errors
- * never expose their (possibly sensitive) constructed message — they fall back
- * to the curated registry message.
- */
-export function buildEnvelope(
-  err: AppException,
-  correlationId: string,
-  path: string,
-): ErrorEnvelope {
-  const spec = ERROR_REGISTRY[err.code];
-  const message = err.kind === ErrorKind.INTERNAL ? spec.message : err.message;
-  return {
-    error: {
-      code: err.code,
-      message,
-      statusCode: spec.status,
-      details: err.details ?? null,
-      correlationId,
-      timestamp: new Date().toISOString(),
-      path,
+export default defineConfig({
+  plugins: [react()],
+  resolve: { alias: { '@': rootDir } },
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./vitest.setup.ts'],
+    // Ensure eager env parsing (lib/config/env.ts) succeeds under test.
+    env: {
+      NEXT_PUBLIC_API_URL: 'http://localhost:3000',
+      NEXT_PUBLIC_APP_NAME: 'Cybernetics',
+      API_URL: 'http://localhost:3000',
     },
-  };
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/error-envelope.spec.ts`
-Expected: PASS (2 tests).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add api/src/infrastructure/exceptions/error-envelope.ts api/src/infrastructure/exceptions/error-envelope.spec.ts
-git commit -m "feat(exceptions): add error envelope + builder"
-```
-
----
-
-### Task 4: Mastra error mapper
-
-**Files:**
-- Create: `api/src/infrastructure/exceptions/mappers/mastra-error.mapper.ts`
-- Test: `api/src/infrastructure/exceptions/mappers/mastra-error.mapper.spec.ts`
-
-**Interfaces:**
-- Consumes: `AppException` (Task 2), `ErrorCode` (Task 1).
-- Produces: `function isMastraError(err: unknown): boolean`; `function mapMastraError(err: unknown): AppException`.
-
-**Note:** detection is **structural** (duck-typed on `id`/`domain`/`category`) — no import from `@mastra/core` — so it can't break if Mastra ships multiple copies of the class or renames the export path.
-
-- [ ] **Step 1: Write the failing test**
-
-`mappers/mastra-error.mapper.spec.ts`:
-```ts
-import { ErrorCode } from '../error-codes';
-import { isMastraError, mapMastraError } from './mastra-error.mapper';
-
-function mastra(domain: string, category: string, id = 'X_FAILED') {
-  return Object.assign(new Error('mastra boom'), { id, domain, category, details: { runId: 'r1' } });
-}
-
-describe('mastra-error.mapper', () => {
-  it('detects Mastra-shaped errors and ignores plain errors', () => {
-    expect(isMastraError(mastra('LLM', 'THIRD_PARTY'))).toBe(true);
-    expect(isMastraError(new Error('plain'))).toBe(false);
-    expect(isMastraError({})).toBe(false);
-  });
-
-  it.each([
-    ['USER', 'TOOL', ErrorCode.AGENT_REQUEST_INVALID],
-    ['USER', 'LLM', ErrorCode.AGENT_REQUEST_INVALID],
-    ['THIRD_PARTY', 'LLM', ErrorCode.LLM_PROVIDER_ERROR],
-    ['THIRD_PARTY', 'MODEL_ROUTER', ErrorCode.LLM_PROVIDER_ERROR],
-    ['THIRD_PARTY', 'STORAGE', ErrorCode.DEPENDENCY_UNAVAILABLE],
-    ['THIRD_PARTY', 'MASTRA_MEMORY', ErrorCode.DEPENDENCY_UNAVAILABLE],
-    ['SYSTEM', 'TOOL', ErrorCode.TOOL_EXECUTION_FAILED],
-    ['SYSTEM', 'MCP', ErrorCode.TOOL_EXECUTION_FAILED],
-    ['SYSTEM', 'AGENT', ErrorCode.AGENT_RUN_FAILED],
-    ['UNKNOWN', 'MASTRA_WORKFLOW', ErrorCode.AGENT_RUN_FAILED],
-  ])('maps category=%s domain=%s to %s', (category, domain, expected) => {
-    const err = mapMastraError(mastra(domain, category, 'BOOM_ID'));
-    expect(err.code).toBe(expected);
-    expect(err.details).toMatchObject({ runId: 'r1', mastraId: 'BOOM_ID' });
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/mappers/mastra-error.mapper.spec.ts`
-Expected: FAIL — cannot find module `./mastra-error.mapper`.
-
-- [ ] **Step 3: Write `mappers/mastra-error.mapper.ts`**
-
-```ts
-import { AppException } from '../app-exception';
-import { ErrorCode } from '../error-codes';
-
-interface MastraLikeError extends Error {
-  id: string;
-  domain: string;
-  category: string;
-  details?: Record<string, unknown>;
-}
-
-export function isMastraError(err: unknown): err is MastraLikeError {
-  return (
-    err instanceof Error &&
-    typeof (err as Partial<MastraLikeError>).id === 'string' &&
-    typeof (err as Partial<MastraLikeError>).domain === 'string' &&
-    typeof (err as Partial<MastraLikeError>).category === 'string'
-  );
-}
-
-const STORAGE_DOMAINS = new Set(['STORAGE', 'MASTRA_MEMORY', 'MASTRA_VECTOR']);
-const TOOL_DOMAINS = new Set(['TOOL', 'MCP']);
-
-export function mapMastraError(err: unknown): AppException {
-  if (!isMastraError(err)) {
-    return new AppException(ErrorCode.AGENT_RUN_FAILED, { cause: err });
-  }
-  const { category, domain, id, details } = err;
-  let code: ErrorCode;
-  if (category === 'USER') {
-    code = ErrorCode.AGENT_REQUEST_INVALID;
-  } else if (category === 'THIRD_PARTY') {
-    code = STORAGE_DOMAINS.has(domain)
-      ? ErrorCode.DEPENDENCY_UNAVAILABLE
-      : ErrorCode.LLM_PROVIDER_ERROR;
-  } else {
-    code = TOOL_DOMAINS.has(domain)
-      ? ErrorCode.TOOL_EXECUTION_FAILED
-      : ErrorCode.AGENT_RUN_FAILED;
-  }
-  return new AppException(code, { details: { ...(details ?? {}), mastraId: id }, cause: err });
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/mappers/mastra-error.mapper.spec.ts`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add api/src/infrastructure/exceptions/mappers/mastra-error.mapper.ts api/src/infrastructure/exceptions/mappers/mastra-error.mapper.spec.ts
-git commit -m "feat(exceptions): add Mastra error mapper"
-```
-
----
-
-### Task 5: Infra error mapper
-
-**Files:**
-- Create: `api/src/infrastructure/exceptions/mappers/infra-error.mapper.ts`
-- Test: `api/src/infrastructure/exceptions/mappers/infra-error.mapper.spec.ts`
-
-**Interfaces:**
-- Consumes: `AppException` (Task 2), `ErrorCode` (Task 1), `SearchEngineError` (`../../search-engine/search-engine.interface`), `NoActiveEmailConfigError` (`../../email/email.types`).
-- Produces: `function mapInfraError(err: unknown): AppException | null` (null = not a recognized infra error → caller falls back to INTERNAL_ERROR).
-
-- [ ] **Step 1: Write the failing test**
-
-`mappers/infra-error.mapper.spec.ts`:
-```ts
-import { ErrorCode } from '../error-codes';
-import { mapInfraError } from './infra-error.mapper';
-import { SearchEngineError } from '../../search-engine/search-engine.interface';
-import { NoActiveEmailConfigError } from '../../email/email.types';
-
-describe('mapInfraError', () => {
-  it('maps a Postgres unique violation to CONFLICT', () => {
-    const err = Object.assign(new Error('dup'), { code: '23505' });
-    expect(mapInfraError(err)?.code).toBe(ErrorCode.CONFLICT);
-  });
-
-  it('maps a Postgres connection-class error to DB_UNAVAILABLE', () => {
-    const err = Object.assign(new Error('down'), { code: '08006' });
-    expect(mapInfraError(err)?.code).toBe(ErrorCode.DB_UNAVAILABLE);
-  });
-
-  it('maps SearchEngineError to SEARCH_UNAVAILABLE', () => {
-    expect(mapInfraError(new SearchEngineError('meili down'))?.code).toBe(ErrorCode.SEARCH_UNAVAILABLE);
-  });
-
-  it('maps NoActiveEmailConfigError to MAIL_CONFIG_MISSING', () => {
-    expect(mapInfraError(new NoActiveEmailConfigError('IMAP'))?.code).toBe(ErrorCode.MAIL_CONFIG_MISSING);
-  });
-
-  it('maps crypto envelope failures to CRYPTO_DECRYPT_FAILED', () => {
-    expect(mapInfraError(new Error('Malformed encryption envelope.'))?.code).toBe(ErrorCode.CRYPTO_DECRYPT_FAILED);
-    expect(mapInfraError(new Error('Unsupported state or unable to authenticate data'))?.code).toBe(ErrorCode.CRYPTO_DECRYPT_FAILED);
-  });
-
-  it('maps object-not-found and network errors', () => {
-    expect(mapInfraError(Object.assign(new Error(), { code: 'NoSuchKey' }))?.code).toBe(ErrorCode.STORAGE_OBJECT_NOT_FOUND);
-    expect(mapInfraError(Object.assign(new Error(), { code: 'ECONNREFUSED' }))?.code).toBe(ErrorCode.DEPENDENCY_UNAVAILABLE);
-  });
-
-  it('returns null for unrecognized errors', () => {
-    expect(mapInfraError(new Error('mystery'))).toBeNull();
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/mappers/infra-error.mapper.spec.ts`
-Expected: FAIL — cannot find module `./infra-error.mapper`.
-
-- [ ] **Step 3: Write `mappers/infra-error.mapper.ts`**
-
-```ts
-import { AppException } from '../app-exception';
-import { ErrorCode } from '../error-codes';
-import { SearchEngineError } from '../../search-engine/search-engine.interface';
-import { NoActiveEmailConfigError } from '../../email/email.types';
-
-const NETWORK_CODES = new Set(['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'ECONNRESET']);
-const REDIS_ERROR_NAMES = new Set(['MaxRetriesPerRequestError', 'ClusterAllFailedError']);
-
-/**
- * Normalizes raw driver/SDK errors at the boundary. Returns null when the error
- * is not a recognized infrastructure failure (the caller then falls back to
- * INTERNAL_ERROR). Detection is deliberately conservative and heuristic; precise
- * per-dependency attribution is a v2 concern.
- */
-export function mapInfraError(err: unknown): AppException | null {
-  if (err instanceof SearchEngineError) {
-    return new AppException(ErrorCode.SEARCH_UNAVAILABLE, { cause: err });
-  }
-  if (err instanceof NoActiveEmailConfigError) {
-    return new AppException(ErrorCode.MAIL_CONFIG_MISSING, { cause: err });
-  }
-
-  const anyErr = err as { code?: unknown; name?: unknown };
-  const code = typeof anyErr?.code === 'string' ? anyErr.code : undefined;
-  const name = typeof anyErr?.name === 'string' ? anyErr.name : undefined;
-
-  // Postgres (pg driver SQLSTATE codes)
-  if (code === '23505') return new AppException(ErrorCode.CONFLICT, { cause: err });
-  if (code && (code.startsWith('08') || code.startsWith('53') || code.startsWith('57'))) {
-    return new AppException(ErrorCode.DB_UNAVAILABLE, { cause: err });
-  }
-
-  // Object storage (MinIO / S3)
-  if (code === 'NoSuchKey' || code === 'NotFound') {
-    return new AppException(ErrorCode.STORAGE_OBJECT_NOT_FOUND, { cause: err });
-  }
-
-  // Redis / ioredis
-  if (name && REDIS_ERROR_NAMES.has(name)) {
-    return new AppException(ErrorCode.CACHE_UNAVAILABLE, { cause: err });
-  }
-
-  // Crypto (AES-GCM)
-  if (err instanceof Error &&
-      (/Malformed encryption envelope/i.test(err.message) ||
-       /unable to authenticate data/i.test(err.message))) {
-    return new AppException(ErrorCode.CRYPTO_DECRYPT_FAILED, { cause: err });
-  }
-
-  // Generic network failure to a backing service
-  if (code && NETWORK_CODES.has(code)) {
-    return new AppException(ErrorCode.DEPENDENCY_UNAVAILABLE, { cause: err });
-  }
-
-  return null;
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/mappers/infra-error.mapper.spec.ts`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add api/src/infrastructure/exceptions/mappers/infra-error.mapper.ts api/src/infrastructure/exceptions/mappers/infra-error.mapper.spec.ts
-git commit -m "feat(exceptions): add infra error mapper"
-```
-
----
-
-### Task 6: `ExceptionService`
-
-**Files:**
-- Create: `api/src/infrastructure/exceptions/exception.service.ts`
-- Test: `api/src/infrastructure/exceptions/exception.service.spec.ts`
-
-**Interfaces:**
-- Consumes: everything from Tasks 1–5.
-- Produces: `@Injectable() class ExceptionService` with:
-  - `create(code: ErrorCode, opts?: { message?: string; details?: unknown; cause?: unknown }): AppException`
-  - `validation(issues: Array<{ path: string; message: string }>, opts?: { message?: string }): AppException`
-  - `from(err: unknown): AppException`
-
-- [ ] **Step 1: Write the failing test**
-
-`exception.service.spec.ts`:
-```ts
-import { BadRequestException, NotFoundException, HttpException } from '@nestjs/common';
-import { ZodError, z } from 'zod';
-import { AppException } from './app-exception';
-import { ErrorCode } from './error-codes';
-import { ExceptionService } from './exception.service';
-
-describe('ExceptionService', () => {
-  const svc = new ExceptionService();
-
-  it('create() builds an AppException from a code', () => {
-    const err = svc.create(ErrorCode.USER_NOT_FOUND);
-    expect(err).toBeInstanceOf(AppException);
-    expect(err.getStatus()).toBe(404);
-  });
-
-  it('validation() shapes details.issues', () => {
-    const err = svc.validation([{ path: 'email', message: 'required' }]);
-    expect(err.code).toBe(ErrorCode.VALIDATION_FAILED);
-    expect(err.details).toEqual({ issues: [{ path: 'email', message: 'required' }] });
-  });
-
-  describe('from()', () => {
-    it('passes an AppException through unchanged', () => {
-      const orig = svc.create(ErrorCode.USER_NOT_FOUND);
-      expect(svc.from(orig)).toBe(orig);
-    });
-
-    it('maps a Nest HttpException by status', () => {
-      expect(svc.from(new NotFoundException('nope')).code).toBe(ErrorCode.NOT_FOUND);
-    });
-
-    it('maps a zod-pipe validation body to VALIDATION_FAILED with issues', () => {
-      const body = { message: 'Validation failed', issues: [{ path: 'a', message: 'bad' }] };
-      const mapped = svc.from(new BadRequestException(body));
-      expect(mapped.code).toBe(ErrorCode.VALIDATION_FAILED);
-      expect(mapped.details).toEqual({ issues: [{ path: 'a', message: 'bad' }] });
-    });
-
-    it('maps a ZodError to VALIDATION_FAILED', () => {
-      let zerr: ZodError;
-      try { z.object({ a: z.string() }).parse({}); } catch (e) { zerr = e as ZodError; }
-      const mapped = svc.from(zerr!);
-      expect(mapped.code).toBe(ErrorCode.VALIDATION_FAILED);
-      expect(Array.isArray((mapped.details as any).issues)).toBe(true);
-    });
-
-    it('maps a Mastra-shaped error', () => {
-      const m = Object.assign(new Error('x'), { id: 'I', domain: 'LLM', category: 'THIRD_PARTY' });
-      expect(svc.from(m).code).toBe(ErrorCode.LLM_PROVIDER_ERROR);
-    });
-
-    it('maps a pg unique violation to CONFLICT', () => {
-      expect(svc.from(Object.assign(new Error(), { code: '23505' })).code).toBe(ErrorCode.CONFLICT);
-    });
-
-    it('falls back to INTERNAL_ERROR for unknown errors, keeping the cause', () => {
-      const raw = new Error('mystery');
-      const mapped = svc.from(raw);
-      expect(mapped.code).toBe(ErrorCode.INTERNAL_ERROR);
-      expect(mapped.cause).toBe(raw);
-    });
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/exception.service.spec.ts`
-Expected: FAIL — cannot find module `./exception.service`.
-
-- [ ] **Step 3: Write `exception.service.ts`**
-
-```ts
-import { HttpException, Injectable } from '@nestjs/common';
-import { ZodError } from 'zod';
-import { AppException, AppExceptionOptions } from './app-exception';
-import { ErrorCode } from './error-codes';
-import { STATUS_TO_CODE } from './error-registry';
-import { isMastraError, mapMastraError } from './mappers/mastra-error.mapper';
-import { mapInfraError } from './mappers/infra-error.mapper';
-
-export interface ValidationIssue {
-  path: string;
-  message: string;
-}
-
-@Injectable()
-export class ExceptionService {
-  /** Build an AppException from any registered code. Caller writes `throw`. */
-  create(code: ErrorCode, opts?: AppExceptionOptions): AppException {
-    return new AppException(code, opts);
-  }
-
-  /** Build a VALIDATION_FAILED error with the standard `{ issues }` details shape. */
-  validation(issues: ValidationIssue[], opts?: { message?: string }): AppException {
-    return new AppException(ErrorCode.VALIDATION_FAILED, {
-      message: opts?.message,
-      details: { issues },
-    });
-  }
-
-  /** Normalize ANY thrown value into an AppException. The filter's mapping brain. */
-  from(err: unknown): AppException {
-    if (err instanceof AppException) return err;
-    if (err instanceof HttpException) return this.fromHttpException(err);
-    if (err instanceof ZodError) {
-      return this.validation(
-        err.issues.map((i) => ({
-          path: i.path.join('.') || '(root)',
-          message: i.message,
-        })),
-      );
-    }
-    if (isMastraError(err)) return mapMastraError(err);
-    const infra = mapInfraError(err);
-    if (infra) return infra;
-    return new AppException(ErrorCode.INTERNAL_ERROR, { cause: err });
-  }
-
-  private fromHttpException(err: HttpException): AppException {
-    const status = err.getStatus();
-    const res = err.getResponse();
-    const body: Record<string, unknown> =
-      typeof res === 'object' && res !== null
-        ? (res as Record<string, unknown>)
-        : { message: res };
-
-    // The Zod validation pipe throws BadRequest with an `issues` array.
-    if (status === 400 && Array.isArray(body.issues)) {
-      return new AppException(ErrorCode.VALIDATION_FAILED, {
-        details: { issues: body.issues },
-        cause: err,
-      });
-    }
-
-    const code = STATUS_TO_CODE[status] ?? ErrorCode.INTERNAL_ERROR;
-    const message = typeof body.message === 'string' ? body.message : undefined;
-    return new AppException(code, { message, cause: err });
-  }
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/exception.service.spec.ts`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add api/src/infrastructure/exceptions/exception.service.ts api/src/infrastructure/exceptions/exception.service.spec.ts
-git commit -m "feat(exceptions): add ExceptionService (create/validation/from)"
-```
-
----
-
-### Task 7: `GlobalExceptionFilter`
-
-**Files:**
-- Create: `api/src/infrastructure/exceptions/global-exception.filter.ts`
-- Test: `api/src/infrastructure/exceptions/global-exception.filter.spec.ts`
-
-**Interfaces:**
-- Consumes: `ExceptionService` (Task 6), `buildEnvelope` (Task 3), `ErrorKind` (Task 1), `PinoLogger` (`nestjs-pino`), `Sentry` (`@sentry/nestjs`).
-- Produces: `@Catch() class GlobalExceptionFilter implements ExceptionFilter` with `catch(exception, host)`.
-
-- [ ] **Step 1: Write the failing test**
-
-`global-exception.filter.spec.ts`:
-```ts
-import { ArgumentsHost } from '@nestjs/common';
-import * as Sentry from '@sentry/nestjs';
-import { ExceptionService } from './exception.service';
-import { ErrorCode } from './error-codes';
-import { GlobalExceptionFilter } from './global-exception.filter';
-
-jest.mock('@sentry/nestjs', () => ({ captureException: jest.fn() }));
-
-function hostFor(url = '/x', id = 'req-1') {
-  const json = jest.fn();
-  const status = jest.fn(() => ({ json }));
-  const host = {
-    switchToHttp: () => ({
-      getRequest: () => ({ id, url }),
-      getResponse: () => ({ status }),
-    }),
-  } as unknown as ArgumentsHost;
-  return { host, status, json };
-}
-
-describe('GlobalExceptionFilter', () => {
-  const logger = { debug: jest.fn(), error: jest.fn() } as any;
-  const filter = new GlobalExceptionFilter(new ExceptionService(), logger);
-  beforeEach(() => jest.clearAllMocks());
-
-  it('writes the envelope with the mapped status for a CLIENT error (no Sentry)', () => {
-    const { host, status, json } = hostFor('/users/1');
-    filter.catch(new (require('@nestjs/common').NotFoundException)('nf'), host);
-    expect(status).toHaveBeenCalledWith(404);
-    expect(json).toHaveBeenCalledWith(
-      expect.objectContaining({ error: expect.objectContaining({ code: ErrorCode.NOT_FOUND, statusCode: 404 }) }),
-    );
-    expect(Sentry.captureException).not.toHaveBeenCalled();
-    expect(logger.debug).toHaveBeenCalled();
-  });
-
-  it('reports INTERNAL errors to Sentry and hides the raw message', () => {
-    const { host, status, json } = hostFor('/chat');
-    filter.catch(new Error('secret stack'), host);
-    expect(status).toHaveBeenCalledWith(500);
-    const env = json.mock.calls[0][0];
-    expect(env.error.code).toBe(ErrorCode.INTERNAL_ERROR);
-    expect(env.error.message).not.toContain('secret');
-    expect(Sentry.captureException).toHaveBeenCalledTimes(1);
-    expect(logger.error).toHaveBeenCalled();
-  });
-});
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/global-exception.filter.spec.ts`
-Expected: FAIL — cannot find module `./global-exception.filter`.
-
-- [ ] **Step 3: Write `global-exception.filter.ts`**
-
-```ts
-import { ArgumentsHost, Catch, ExceptionFilter } from '@nestjs/common';
-import { InjectPinoLogger, PinoLogger } from 'nestjs-pino';
-import * as Sentry from '@sentry/nestjs';
-import { ExceptionService } from './exception.service';
-import { ErrorKind } from './error-codes';
-import { buildEnvelope } from './error-envelope';
-
-interface RequestLike { id?: string; url?: string }
-interface ResponseLike { status(code: number): { json(body: unknown): unknown } }
-
-@Catch()
-export class GlobalExceptionFilter implements ExceptionFilter {
-  constructor(
-    private readonly errors: ExceptionService,
-    @InjectPinoLogger(GlobalExceptionFilter.name) private readonly logger: PinoLogger,
-  ) {}
-
-  catch(exception: unknown, host: ArgumentsHost): void {
-    const http = host.switchToHttp();
-    const req = http.getRequest<RequestLike>();
-    const res = http.getResponse<ResponseLike>();
-
-    const appErr = this.errors.from(exception);
-    const correlationId = req.id ?? '-';
-    const envelope = buildEnvelope(appErr, correlationId, req.url ?? '');
-
-    if (appErr.kind === ErrorKind.CLIENT) {
-      this.logger.debug({ code: appErr.code, correlationId }, appErr.message);
-    } else {
-      this.logger.error({ err: exception, code: appErr.code, correlationId }, appErr.message);
-      Sentry.captureException(appErr.cause ?? exception, {
-        tags: { code: appErr.code, correlationId },
-      });
-    }
-
-    res.status(envelope.error.statusCode).json(envelope);
-  }
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd api && npx jest src/infrastructure/exceptions/global-exception.filter.spec.ts`
-Expected: PASS (2 tests).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add api/src/infrastructure/exceptions/global-exception.filter.ts api/src/infrastructure/exceptions/global-exception.filter.spec.ts
-git commit -m "feat(exceptions): add GlobalExceptionFilter"
-```
-
----
-
-### Task 8: Module, barrel, and app wiring
-
-**Files:**
-- Create: `api/src/infrastructure/exceptions/exceptions.module.ts`
-- Create: `api/src/infrastructure/exceptions/index.ts`
-- Modify: `api/src/app.module.ts`
-- Modify: `api/src/infrastructure/observability/sentry.module.ts`
-
-**Interfaces:**
-- Consumes: `ExceptionService` (Task 6), `GlobalExceptionFilter` (Task 7).
-- Produces: `@Global() class ExceptionsModule` (provides `ExceptionService` + `APP_FILTER`, exports `ExceptionService`); barrel `index.ts` re-exporting `ErrorCode`, `ErrorKind`, `AppException`, `ExceptionService`, `ErrorEnvelope`.
-
-- [ ] **Step 1: Write `exceptions.module.ts`**
-
-```ts
-import { Global, Module } from '@nestjs/common';
-import { APP_FILTER } from '@nestjs/core';
-import { ExceptionService } from './exception.service';
-import { GlobalExceptionFilter } from './global-exception.filter';
-
-/**
- * Global exception handling. Provides the injectable throw API (ExceptionService)
- * everywhere, and registers the single global filter that normalizes every error
- * into the standard envelope.
- */
-@Global()
-@Module({
-  providers: [
-    ExceptionService,
-    { provide: APP_FILTER, useClass: GlobalExceptionFilter },
-  ],
-  exports: [ExceptionService],
+  },
 })
-export class ExceptionsModule {}
 ```
 
-- [ ] **Step 2: Write `index.ts` barrel**
+- [ ] **Step 3: Create `frontend/vitest.setup.ts`**
 
 ```ts
-export { ErrorCode, ErrorKind } from './error-codes';
-export { AppException } from './app-exception';
-export type { AppExceptionOptions } from './app-exception';
-export { ExceptionService } from './exception.service';
-export type { ValidationIssue } from './exception.service';
-export type { ErrorEnvelope } from './error-envelope';
-export { ExceptionsModule } from './exceptions.module';
+import '@testing-library/jest-dom/vitest'
+import { afterEach } from 'vitest'
+import { cleanup } from '@testing-library/react'
+
+afterEach(() => cleanup())
 ```
 
-- [ ] **Step 3: Remove `SentryGlobalFilter` from `sentry.module.ts`**
+- [ ] **Step 4: Add scripts to `frontend/package.json`**
 
-Replace the whole file with (keeps Sentry SDK setup, drops the filter — our filter now owns capture):
+Add to `"scripts"`:
+```json
+"test": "vitest run",
+"test:watch": "vitest"
+```
+
+- [ ] **Step 5: Write the smoke test `frontend/lib/__tests__/smoke.test.ts`**
+
 ```ts
-import { Module } from '@nestjs/common';
-import { SentryModule as SentryCoreModule } from '@sentry/nestjs/setup';
+import { describe, it, expect } from 'vitest'
 
-/**
- * Wires Sentry into the Nest request lifecycle.
- *
- * `SentryModule.forRoot()` is imported from `@sentry/nestjs/setup` (NOT the
- * package root) so `@nestjs/common` is loaded after OpenTelemetry patches it.
- * The actual `Sentry.init()` lives in `src/instrument.ts`.
- *
- * Error reporting to Sentry is owned by `GlobalExceptionFilter`
- * (`infrastructure/exceptions`), which captures DEPENDENCY/INTERNAL errors with
- * `code` + `correlationId` tags — so no `SentryGlobalFilter` is registered here.
- */
-@Module({
-  imports: [SentryCoreModule.forRoot()],
+describe('test tooling', () => {
+  it('runs', () => {
+    expect(1 + 1).toBe(2)
+  })
 })
-export class ObservabilityModule {}
 ```
 
-- [ ] **Step 4: Import `ExceptionsModule` in `app.module.ts`**
+- [ ] **Step 6: Run and verify pass**
 
-Add the import line near the other infrastructure imports:
-```ts
-import { ExceptionsModule } from './infrastructure/exceptions';
-```
-Add `ExceptionsModule` to the `imports` array immediately after `LoggerModule` (so the filter can inject `PinoLogger`):
-```ts
-    LoggerModule,
-    ExceptionsModule,
-    DatabaseModule,
-```
-
-- [ ] **Step 5: Build to verify wiring compiles**
-
-Run: `cd api && npm run build`
-Expected: build succeeds (no TS errors).
-
-- [ ] **Step 6: Run the full module test suite**
-
-Run: `cd api && npx jest src/infrastructure/exceptions`
-Expected: all exception-module specs PASS.
+Run: `npm run test`
+Expected: 1 passing test.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add api/src/infrastructure/exceptions/exceptions.module.ts api/src/infrastructure/exceptions/index.ts api/src/app.module.ts api/src/infrastructure/observability/sentry.module.ts
-git commit -m "feat(exceptions): register global module, take over Sentry capture"
+git add frontend/package.json frontend/package-lock.json frontend/vitest.config.ts frontend/vitest.setup.ts frontend/lib/__tests__/smoke.test.ts
+git commit -m "chore(frontend): set up vitest + testing-library, add swr"
 ```
 
 ---
 
-## PHASE 2 — Migrate call sites
-
-**Migration recipe (applies to every Task 9–16):**
-1. Add `import { ErrorCode } from '../../infrastructure/exceptions';` (adjust depth) and inject `private readonly errors: ExceptionService` into the service constructor. Remove now-unused `@nestjs/common` exception imports.
-2. Replace each `throw new XxxException(msg)` per the task's table. Where the original message differs from the registry default, pass `{ message: '<original>' }` to preserve behavior.
-3. Update the co-located `.spec.ts`: pass `new ExceptionService()` as the new constructor arg, and change assertions from `.toThrow(XxxException)` to code/status checks (pattern below).
-4. Run the module's specs; then commit.
-
-**Spec assertion pattern** (replaces `rejects.toThrow(NotFoundException)`):
-```ts
-import { AppException, ErrorCode } from '../../infrastructure/exceptions';
-await expect(service.doThing()).rejects.toMatchObject({
-  code: ErrorCode.USER_NOT_FOUND,
-});
-// or, to assert status:
-await expect(service.doThing()).rejects.toSatisfy(
-  (e: AppException) => e.getStatus() === 404,
-);
-```
-(If `toSatisfy` is unavailable, wrap in try/catch and assert on the caught `AppException`.)
-
----
-
-### Task 9: Standardize the Zod validation pipe
+## Task 2: Config — constants + env
 
 **Files:**
-- Modify: `api/src/common/pipes/zod-validation.pipe.ts`
-- Test: `api/src/common/pipes/zod-validation.pipe.spec.ts` (create if absent)
+- Create: `frontend/lib/config/constants.ts`, `frontend/lib/config/env.ts`
+- Test: `frontend/lib/config/__tests__/env.test.ts`
 
-The pipe is constructed via `new` (not DI), so it throws `AppException` directly.
+**Interfaces:**
+- Produces:
+  - `constants.ts`: `REFRESH_COOKIE = 'cbn_rt'`, `REFRESH_COOKIE_MAX_AGE_DAYS = 7`, `ACCESS_TTL_FALLBACK_S = 900`, `ERROR_CODES` (string map).
+  - `env.ts`: `clientEnv: { apiUrl: string; appName: string }`, `serverEnv: () => { apiUrl: string }`, `parseClientEnv(src)`, `parseServerEnv(src)`.
 
-- [ ] **Step 1: Write/adjust the failing test**
+- [ ] **Step 1: Create `frontend/lib/config/constants.ts`**
 
-`zod-validation.pipe.spec.ts`:
 ```ts
-import { z } from 'zod';
-import { AppException, ErrorCode } from '../../infrastructure/exceptions';
-import { ZodValidationPipe } from './zod-validation.pipe';
+/** Name of the readable cookie holding the rotating refresh token. */
+export const REFRESH_COOKIE = 'cbn_rt'
+/** Refresh-cookie lifetime in days (matches backend JWT_REFRESH_TTL = 7d). */
+export const REFRESH_COOKIE_MAX_AGE_DAYS = 7
+/** Fallback access-token TTL (seconds) if the server omits expiresIn. */
+export const ACCESS_TTL_FALLBACK_S = 900
 
-describe('ZodValidationPipe', () => {
-  const pipe = new ZodValidationPipe(z.object({ email: z.string().email() }));
+/** Backend error codes the frontend branches on. */
+export const ERROR_CODES = {
+  VALIDATION_FAILED: 'VALIDATION_FAILED',
+  UNAUTHORIZED: 'UNAUTHORIZED',
+  AUTH_INVALID_CREDENTIALS: 'AUTH_INVALID_CREDENTIALS',
+  AUTH_TOKEN_EXPIRED: 'AUTH_TOKEN_EXPIRED',
+  AUTH_TOKEN_INVALID: 'AUTH_TOKEN_INVALID',
+  AUTH_TOKEN_REUSE: 'AUTH_TOKEN_REUSE',
+  FORBIDDEN: 'FORBIDDEN',
+  USER_NOT_FOUND: 'USER_NOT_FOUND',
+  RATE_LIMITED: 'RATE_LIMITED',
+} as const
 
-  it('passes valid input through', () => {
-    expect(pipe.transform({ email: 'a@b.co' })).toEqual({ email: 'a@b.co' });
-  });
-
-  it('throws an AppException(VALIDATION_FAILED) with issues on invalid input', () => {
-    try {
-      pipe.transform({ email: 'nope' });
-      fail('should have thrown');
-    } catch (e) {
-      expect(e).toBeInstanceOf(AppException);
-      expect((e as AppException).code).toBe(ErrorCode.VALIDATION_FAILED);
-      expect((e as AppException).details).toHaveProperty('issues');
-    }
-  });
-});
+export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES]
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Write the failing test `frontend/lib/config/__tests__/env.test.ts`**
 
-Run: `cd api && npx jest src/common/pipes/zod-validation.pipe.spec.ts`
-Expected: FAIL (still throws `BadRequestException`, not `AppException`).
-
-- [ ] **Step 3: Rewrite the pipe's catch block**
-
-Replace the `@nestjs/common` `BadRequestException` import and the `catch` body:
 ```ts
-import { Injectable, type PipeTransform } from '@nestjs/common';
-import { z, ZodError, type ZodType } from 'zod';
-import { AppException, ErrorCode } from '../../infrastructure/exceptions';
+import { describe, it, expect } from 'vitest'
+import { parseClientEnv, parseServerEnv } from '@/lib/config/env'
 
-@Injectable()
-export class ZodValidationPipe<S extends ZodType> implements PipeTransform<unknown, z.infer<S>> {
-  constructor(private readonly schema: S) {}
+describe('parseClientEnv', () => {
+  it('parses a valid client env', () => {
+    const env = parseClientEnv({
+      NEXT_PUBLIC_API_URL: 'http://localhost:3000',
+      NEXT_PUBLIC_APP_NAME: 'App',
+    })
+    expect(env).toEqual({ apiUrl: 'http://localhost:3000', appName: 'App' })
+  })
 
-  transform(value: unknown): z.infer<S> {
-    try {
-      return this.schema.parse(value) as z.infer<S>;
-    } catch (error) {
-      if (error instanceof ZodError) {
-        throw new AppException(ErrorCode.VALIDATION_FAILED, {
-          details: {
-            issues: error.issues.map((issue) => ({
-              path: issue.path.join('.') || '(root)',
-              message: issue.message,
-            })),
-          },
-        });
-      }
-      throw error;
-    }
+  it('defaults appName when absent', () => {
+    const env = parseClientEnv({ NEXT_PUBLIC_API_URL: 'http://localhost:3000' })
+    expect(env.appName).toBe('Cybernetics')
+  })
+
+  it('throws a clear error when NEXT_PUBLIC_API_URL is missing', () => {
+    expect(() => parseClientEnv({})).toThrow(/NEXT_PUBLIC_API_URL/)
+  })
+})
+
+describe('parseServerEnv', () => {
+  it('parses a valid server env', () => {
+    expect(parseServerEnv({ API_URL: 'http://localhost:3000' })).toEqual({
+      apiUrl: 'http://localhost:3000',
+    })
+  })
+})
+```
+
+- [ ] **Step 3: Run test to verify it fails**
+
+Run: `npm run test -- env`
+Expected: FAIL (`env` module not found / exports missing).
+
+- [ ] **Step 4: Create `frontend/lib/config/env.ts`**
+
+```ts
+import { z } from 'zod'
+
+const clientSchema = z.object({
+  NEXT_PUBLIC_API_URL: z.string().url('NEXT_PUBLIC_API_URL must be a valid URL'),
+  NEXT_PUBLIC_APP_NAME: z.string().default('Cybernetics'),
+})
+
+const serverSchema = z.object({
+  API_URL: z.string().url('API_URL must be a valid URL'),
+})
+
+function formatIssues(err: z.ZodError): string {
+  return err.issues.map((i) => `  - ${i.path.join('.') || '(root)'}: ${i.message}`).join('\n')
+}
+
+export function parseClientEnv(src: Record<string, string | undefined>) {
+  const parsed = clientSchema.safeParse(src)
+  if (!parsed.success) {
+    throw new Error(`[env] Invalid client environment:\n${formatIssues(parsed.error)}`)
   }
+  return { apiUrl: parsed.data.NEXT_PUBLIC_API_URL, appName: parsed.data.NEXT_PUBLIC_APP_NAME }
+}
+
+export function parseServerEnv(src: Record<string, string | undefined>) {
+  const parsed = serverSchema.safeParse(src)
+  if (!parsed.success) {
+    throw new Error(`[env] Invalid server environment:\n${formatIssues(parsed.error)}`)
+  }
+  return { apiUrl: parsed.data.API_URL }
+}
+
+// Client env is evaluated eagerly. NEXT_PUBLIC_* must be referenced statically
+// so Next.js inlines them into the client bundle.
+export const clientEnv = parseClientEnv({
+  NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
+  NEXT_PUBLIC_APP_NAME: process.env.NEXT_PUBLIC_APP_NAME,
+})
+
+// Server env is lazy so it never evaluates in the client bundle.
+export function serverEnv() {
+  return parseServerEnv({ API_URL: process.env.API_URL })
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 5: Run test to verify it passes**
 
-Run: `cd api && npx jest src/common/pipes/zod-validation.pipe.spec.ts`
+Run: `npm run test -- env`
+Expected: PASS (4 tests).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add frontend/lib/config/
+git commit -m "feat(frontend): add validated env module + constants"
+```
+
+---
+
+## Task 3: Response types + Zod form schemas
+
+**Files:**
+- Rewrite: `frontend/lib/interfaces/auth.interface.ts`, `frontend/lib/validations/auth.schema.ts`
+- Test: `frontend/lib/validations/__tests__/auth.schema.test.ts`
+
+**Interfaces:**
+- Produces (types): `Role`, `AuthStatus`, `TokenPair`, `CurrentUser`, `SessionSummary`, `Paginated<T>`, `ErrorEnvelope`, `IAuthState`.
+- Produces (schemas): `loginSchema`, `forgotPasswordSchema`, `resetPasswordSchema`, `changePasswordSchema`, and inferred `LoginFormValues`, `ForgotPasswordFormValues`, `ResetPasswordFormValues`, `ChangePasswordFormValues`, plus `emailSchema`, `passwordSchema`.
+
+- [ ] **Step 1: Rewrite `frontend/lib/interfaces/auth.interface.ts`**
+
+```ts
+export type Role = 'guest' | 'user' | 'admin' | 'agent'
+export type AuthStatus = 'idle' | 'loading' | 'authenticated' | 'unauthenticated'
+
+export interface TokenPair {
+  accessToken: string
+  refreshToken: string
+  expiresIn: number
+}
+
+/** GET /auth/me → { id, role }. `email` is populated only if the JWT carries the claim. */
+export interface CurrentUser {
+  id: string
+  role: Role
+  email?: string
+}
+
+/** GET /auth/sessions → SessionSummary[] */
+export interface SessionSummary {
+  id: string
+  createdAt: string
+  lastUsedAt: string | null
+  expiresAt: string
+  userAgent: string | null
+  ip: string | null
+}
+
+export interface Paginated<T> {
+  data: T[]
+  total: number
+  page: number
+  limit: number
+}
+
+export interface ErrorEnvelope {
+  error: {
+    code: string
+    message: string
+    statusCode: number
+    details: unknown | null
+    correlationId: string
+    timestamp: string
+    path: string
+  }
+}
+
+export interface ILoginInput {
+  email: string
+  password: string
+}
+
+export interface IResetPasswordInput {
+  email: string
+  code: string
+  newPassword: string
+}
+
+export interface IAuthState {
+  user: CurrentUser | null
+  status: AuthStatus
+  isLoading: boolean
+  error: string | null
+
+  login: (input: ILoginInput) => Promise<void>
+  logout: () => Promise<void>
+  logoutAll: () => Promise<void>
+  bootstrap: () => Promise<void>
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>
+  forgotPassword: (email: string) => Promise<void>
+  resetPassword: (input: IResetPasswordInput) => Promise<void>
+  clearError: () => void
+}
+```
+
+- [ ] **Step 2: Write the failing test `frontend/lib/validations/__tests__/auth.schema.test.ts`**
+
+```ts
+import { describe, it, expect } from 'vitest'
+import {
+  loginSchema,
+  resetPasswordSchema,
+  changePasswordSchema,
+  passwordSchema,
+} from '@/lib/validations/auth.schema'
+
+describe('loginSchema', () => {
+  it('lowercases + trims email', () => {
+    const r = loginSchema.parse({ email: '  Foo@Bar.COM ', password: 'x' })
+    expect(r.email).toBe('foo@bar.com')
+  })
+  it('requires a non-empty password without revealing policy', () => {
+    const r = loginSchema.safeParse({ email: 'a@b.com', password: '' })
+    expect(r.success).toBe(false)
+  })
+})
+
+describe('passwordSchema', () => {
+  it('rejects < 12 chars', () => {
+    expect(passwordSchema.safeParse('short').success).toBe(false)
+  })
+  it('accepts exactly 12 chars', () => {
+    expect(passwordSchema.safeParse('a'.repeat(12)).success).toBe(true)
+  })
+})
+
+describe('resetPasswordSchema', () => {
+  it('requires a 6-digit code and matching passwords', () => {
+    const ok = resetPasswordSchema.safeParse({
+      email: 'a@b.com', code: '123456',
+      newPassword: 'a'.repeat(12), confirmPassword: 'a'.repeat(12),
+    })
+    expect(ok.success).toBe(true)
+    const badCode = resetPasswordSchema.safeParse({
+      email: 'a@b.com', code: '12', newPassword: 'a'.repeat(12), confirmPassword: 'a'.repeat(12),
+    })
+    expect(badCode.success).toBe(false)
+  })
+})
+
+describe('changePasswordSchema', () => {
+  it('rejects when new == current', () => {
+    const r = changePasswordSchema.safeParse({
+      currentPassword: 'a'.repeat(12), newPassword: 'a'.repeat(12), confirmPassword: 'a'.repeat(12),
+    })
+    expect(r.success).toBe(false)
+  })
+})
+```
+
+- [ ] **Step 3: Run to verify it fails**
+
+Run: `npm run test -- auth.schema`
+Expected: FAIL (schema exports missing).
+
+- [ ] **Step 4: Rewrite `frontend/lib/validations/auth.schema.ts`**
+
+```ts
+import { z } from 'zod'
+
+export const emailSchema = z.string().trim().toLowerCase().email('Enter a valid email address')
+export const passwordSchema = z
+  .string()
+  .min(12, 'At least 12 characters')
+  .max(200, 'At most 200 characters')
+
+export const loginSchema = z.object({
+  email: emailSchema,
+  password: z.string().min(1, 'Password is required'),
+})
+
+export const forgotPasswordSchema = z.object({ email: emailSchema })
+
+export const resetPasswordSchema = z
+  .object({
+    email: emailSchema,
+    code: z.string().regex(/^\d{6}$/, 'Enter the 6-digit code from your email'),
+    newPassword: passwordSchema,
+    confirmPassword: z.string(),
+  })
+  .refine((d) => d.newPassword === d.confirmPassword, {
+    path: ['confirmPassword'],
+    message: 'Passwords do not match',
+  })
+
+export const changePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1, 'Current password is required'),
+    newPassword: passwordSchema,
+    confirmPassword: z.string(),
+  })
+  .refine((d) => d.newPassword === d.confirmPassword, {
+    path: ['confirmPassword'],
+    message: 'Passwords do not match',
+  })
+  .refine((d) => d.newPassword !== d.currentPassword, {
+    path: ['newPassword'],
+    message: 'New password must be different',
+  })
+
+export type LoginFormValues = z.infer<typeof loginSchema>
+export type ForgotPasswordFormValues = z.infer<typeof forgotPasswordSchema>
+export type ResetPasswordFormValues = z.infer<typeof resetPasswordSchema>
+export type ChangePasswordFormValues = z.infer<typeof changePasswordSchema>
+```
+
+- [ ] **Step 5: Run to verify it passes + typecheck**
+
+Run: `npm run test -- auth.schema && npm run typecheck`
+Expected: tests PASS; typecheck clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add frontend/lib/interfaces/auth.interface.ts frontend/lib/validations/
+git commit -m "feat(frontend): real auth response types + zod form schemas"
+```
+
+---
+
+## Task 4: Password strength heuristic
+
+**Files:**
+- Create: `frontend/lib/auth/password-strength.ts`
+- Test: `frontend/lib/auth/__tests__/password-strength.test.ts`
+
+**Interfaces:**
+- Produces: `scorePassword(pw: string): { score: 0|1|2|3|4; label: 'weak'|'fair'|'good'|'strong' }`.
+
+- [ ] **Step 1: Write the failing test `frontend/lib/auth/__tests__/password-strength.test.ts`**
+
+```ts
+import { describe, it, expect } from 'vitest'
+import { scorePassword } from '@/lib/auth/password-strength'
+
+describe('scorePassword', () => {
+  it('scores empty as weak/0', () => {
+    expect(scorePassword('')).toEqual({ score: 0, label: 'weak' })
+  })
+  it('scores a long varied password as strong', () => {
+    const r = scorePassword('Abcdef123!@#xyz')
+    expect(r.score).toBe(4)
+    expect(r.label).toBe('strong')
+  })
+  it('scores a long but single-class password below strong', () => {
+    expect(scorePassword('a'.repeat(16)).score).toBeLessThan(4)
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `npm run test -- password-strength`
+Expected: FAIL.
+
+- [ ] **Step 3: Create `frontend/lib/auth/password-strength.ts`**
+
+```ts
+export type StrengthLabel = 'weak' | 'fair' | 'good' | 'strong'
+export interface PasswordStrength {
+  score: 0 | 1 | 2 | 3 | 4
+  label: StrengthLabel
+}
+
+const LABELS: StrengthLabel[] = ['weak', 'weak', 'fair', 'good', 'strong']
+
+/**
+ * No-dependency heuristic. Soft guidance only — never used to block a
+ * length-valid password (the hard rule lives in passwordSchema).
+ */
+export function scorePassword(pw: string): PasswordStrength {
+  if (!pw) return { score: 0, label: 'weak' }
+
+  const classes =
+    Number(/[a-z]/.test(pw)) +
+    Number(/[A-Z]/.test(pw)) +
+    Number(/[0-9]/.test(pw)) +
+    Number(/[^A-Za-z0-9]/.test(pw))
+
+  let raw = 0
+  if (pw.length >= 12) raw += 1
+  if (pw.length >= 16) raw += 1
+  if (classes >= 2) raw += 1
+  if (classes >= 4) raw += 1
+
+  const score = Math.min(4, raw) as PasswordStrength['score']
+  return { score, label: LABELS[score] }
+}
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `npm run test -- password-strength`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add api/src/common/pipes/zod-validation.pipe.ts api/src/common/pipes/zod-validation.pipe.spec.ts
-git commit -m "refactor(validation): zod pipe throws AppException(VALIDATION_FAILED)"
+git add frontend/lib/auth/password-strength.ts frontend/lib/auth/__tests__/
+git commit -m "feat(frontend): password strength heuristic"
 ```
 
 ---
 
-### Task 10: Migrate the auth module
+## Task 5: In-memory access-token store
 
 **Files:**
-- Modify: `api/src/features/auth/auth.service.ts`, `password-reset.service.ts`, `service-credential.service.ts` (+ their `.spec.ts`)
+- Create: `frontend/lib/http/token-store.ts`
+- Test: `frontend/lib/http/__tests__/token-store.test.ts`
 
-**Replacement table:**
+**Interfaces:**
+- Produces: `getAccessToken(): string | null`, `setAccessToken(t: string | null): void`.
 
-| File:line | Old | New (code) | Message override? |
-|---|---|---|---|
-| auth.service.ts:36 | `UnauthorizedException('Invalid credentials')` | `AUTH_INVALID_CREDENTIALS` | no (default matches) |
-| auth.service.ts:42 | `UnauthorizedException('Invalid credentials')` | `AUTH_INVALID_CREDENTIALS` | no |
-| auth.service.ts:56 | `UnauthorizedException('Invalid refresh token')` | `AUTH_TOKEN_INVALID` | no |
-| auth.service.ts:61 | `UnauthorizedException('Refresh token reuse detected')` | `AUTH_TOKEN_REUSE` | no |
-| auth.service.ts:64 | `UnauthorizedException('Refresh token expired')` | `AUTH_TOKEN_EXPIRED` | no |
-| auth.service.ts:68 | `UnauthorizedException('Invalid refresh token')` | `AUTH_TOKEN_INVALID` | no |
-| auth.service.ts:94 | `UnauthorizedException('Current password is incorrect')` | `AUTH_INVALID_CREDENTIALS` | **yes**: `{ message: 'Current password is incorrect' }` |
-| password-reset.service.ts (fail helper) | `UnauthorizedException('Invalid or expired reset code')` | `AUTH_RESET_CODE_INVALID` | no |
-| service-credential.service.ts:61 | `UnauthorizedException('Invalid service credential')` | `AUTH_SERVICE_CREDENTIAL_INVALID` | no |
+- [ ] **Step 1: Write the failing test `frontend/lib/http/__tests__/token-store.test.ts`**
 
-- [ ] **Step 1:** Update `auth.service.spec.ts`, `password-reset.service.spec.ts`, `service-credential.service.spec.ts` — inject `new ExceptionService()`; convert `toThrow(UnauthorizedException)` assertions to `toMatchObject({ code: ErrorCode.AUTH_... })` (use the codes above). Run them to confirm they FAIL.
-   Run: `cd api && npx jest src/features/auth`
-- [ ] **Step 2:** Apply the migration recipe + replacement table to the three service files. Example (auth.service.ts constructor + one throw):
 ```ts
-import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
-// constructor: add `private readonly errors: ExceptionService,`
-// site :61
-throw this.errors.create(ErrorCode.AUTH_TOKEN_REUSE);
-```
-- [ ] **Step 3:** Run tests.
-   Run: `cd api && npx jest src/features/auth`
-   Expected: PASS.
-- [ ] **Step 4:** Commit.
-```bash
-git add api/src/features/auth
-git commit -m "refactor(auth): throw via ExceptionService"
-```
+import { describe, it, expect, beforeEach } from 'vitest'
+import { getAccessToken, setAccessToken } from '@/lib/http/token-store'
 
----
+describe('token-store', () => {
+  beforeEach(() => setAccessToken(null))
 
-### Task 11: Migrate the users module
-
-**Files:** Modify `api/src/features/users/users.service.ts` + `users.service.spec.ts`.
-
-**Replacement table:**
-
-| File:line | Old | New | Override? |
-|---|---|---|---|
-| users.service.ts:43 | `ConflictException('Email already registered')` | `USER_EMAIL_TAKEN` | no |
-| users.service.ts:57 | `NotFoundException('User not found')` | `USER_NOT_FOUND` | no |
-| users.service.ts:74 | `NotFoundException('User not found')` | `USER_NOT_FOUND` | no |
-
-- [ ] **Step 1:** Update `users.service.spec.ts`: constructor becomes `new UsersService(repo, passwords, new ExceptionService())`; change the duplicate-email + not-found assertions to `toMatchObject({ code: ErrorCode.USER_EMAIL_TAKEN })` / `{ code: ErrorCode.USER_NOT_FOUND }`. Run → FAIL.
-   Run: `cd api && npx jest src/features/users/users.service.spec.ts`
-- [ ] **Step 2:** Edit `users.service.ts`: add `import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';`, add `private readonly errors: ExceptionService,` to the constructor, remove `ConflictException`/`NotFoundException` imports, and apply the table (e.g. `throw this.errors.create(ErrorCode.USER_EMAIL_TAKEN);`).
-- [ ] **Step 3:** Run tests → PASS.
-   Run: `cd api && npx jest src/features/users/users.service.spec.ts`
-- [ ] **Step 4:** Commit.
-```bash
-git add api/src/features/users
-git commit -m "refactor(users): throw via ExceptionService"
+  it('starts null', () => {
+    expect(getAccessToken()).toBeNull()
+  })
+  it('stores and clears the access token', () => {
+    setAccessToken('abc')
+    expect(getAccessToken()).toBe('abc')
+    setAccessToken(null)
+    expect(getAccessToken()).toBeNull()
+  })
+})
 ```
 
----
+- [ ] **Step 2: Run to verify it fails**
 
-### Task 12: Migrate the file-processor module
+Run: `npm run test -- token-store`
+Expected: FAIL.
 
-**Files:** Modify `api/src/features/file-processor/file.service.ts` + spec.
+- [ ] **Step 3: Create `frontend/lib/http/token-store.ts`**
 
-**Replacement table** (note: ownership stays 404 by design — `loadOwned` → `FILE_NOT_FOUND`):
-
-| File:line | Old | New | Override? |
-|---|---|---|---|
-| file.service.ts:141 | `ConflictException('File is not awaiting upload (status=…)')` | `FILE_INVALID_STATE` | **yes** (dynamic status message) |
-| file.service.ts:147 | `BadRequestException('Upload not found in storage; …')` | `FILE_UPLOAD_MISSING` | no |
-| file.service.ts:159 | `BadRequestException('Uploaded file size … exceeds …')` | `FILE_TOO_LARGE` | **yes** (dynamic sizes) |
-| file.service.ts:168 | `NotFoundException('File not found')` | `FILE_NOT_FOUND` | no |
-| file.service.ts:213 | `ConflictException('File is not available (status=…)')` | `FILE_INVALID_STATE` | **yes** |
-| file.service.ts:279 | `ConflictException('File is not available (status=…)')` | `FILE_INVALID_STATE` | **yes** |
-| file.service.ts:294 | `BadRequestException('MIME type "…" is not allowed')` | `FILE_MIME_NOT_ALLOWED` | **yes** |
-| file.service.ts:297 | `BadRequestException('File size … exceeds …')` | `FILE_TOO_LARGE` | **yes** |
-| file.service.ts:307 | `NotFoundException('File not found')` (loadOwned, masks ownership) | `FILE_NOT_FOUND` | no |
-
-- [ ] **Step 1:** Update `file.service.spec.ts`: inject `new ExceptionService()`; convert assertions to the codes above (`toMatchObject({ code })`). Run → FAIL.
-   Run: `cd api && npx jest src/features/file-processor`
-- [ ] **Step 2:** Apply the migration recipe + table. Example for a dynamic-message site:
 ```ts
-throw this.errors.create(ErrorCode.FILE_INVALID_STATE, {
-  message: `File is not awaiting upload (status=${row.status})`,
-});
+// Access token lives ONLY in memory (never persisted). Module-level so axios
+// interceptors can read it synchronously. Lost on reload; rebuilt via refresh.
+let accessToken: string | null = null
+
+export function getAccessToken(): string | null {
+  return accessToken
+}
+
+export function setAccessToken(token: string | null): void {
+  accessToken = token
+}
 ```
-- [ ] **Step 3:** Run tests → PASS.
-   Run: `cd api && npx jest src/features/file-processor`
-- [ ] **Step 4:** Commit.
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `npm run test -- token-store`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
 ```bash
-git add api/src/features/file-processor
-git commit -m "refactor(file-processor): throw via ExceptionService (ownership stays 404 explicitly)"
+git add frontend/lib/http/token-store.ts frontend/lib/http/__tests__/token-store.test.ts
+git commit -m "feat(frontend): in-memory access-token store"
 ```
 
 ---
 
-### Task 13: Migrate the search-service module
+## Task 6: Session module (refresh cookie + refresh call)
 
-**Files:** Modify `api/src/features/search-service/search-record.service.ts`, `collection.service.ts` (+ specs). **Do NOT** change `search-indexing.processor.ts:143` (a BullMQ job-payload `Error` — not HTTP-facing; out of scope, keep as-is for retry semantics).
+**Files:**
+- Create: `frontend/lib/auth/session.ts`
+- Test: `frontend/lib/auth/__tests__/session.test.ts`
 
-**Replacement table:**
+**Interfaces:**
+- Consumes: `token-store` (`setAccessToken`), `constants` (`REFRESH_COOKIE`), `clientEnv.apiUrl`, `TokenPair`.
+- Produces:
+  - `getRefreshToken(): string | undefined`
+  - `applyTokenPair(pair: TokenPair): void`  — sets access token (memory) + refresh cookie
+  - `clearSession(): void` — clears access token + cookie
+  - `refreshSession(): Promise<TokenPair>` — raw POST `/auth/refresh`, applies pair, returns it (throws if no refresh token)
+  - `refreshClient` (exported for tests only) — the raw axios instance used for refresh
 
-| File:line | Old | New | Override? |
-|---|---|---|---|
-| search-record.service.ts:82 | `BadRequestException({ message, issues: string[] })` | `this.errors.validation(errors.map((m,) => ({ path: \`records[${i}]\`, message: m })), { message: \`Record ${i} failed validation\` })` | — (standardizes shape) |
-| search-record.service.ts:144 | `NotFoundException('Record not found')` | `SEARCH_RECORD_NOT_FOUND` | no |
-| search-record.service.ts:197 | catch `SearchEngineError` → `ServiceUnavailableException('Search is temporarily unavailable')` | `throw this.errors.create(ErrorCode.SEARCH_UNAVAILABLE, { cause: e });` (keep the `instanceof SearchEngineError` guard; rethrow others) | no |
-| search-record.service.ts:205 | `NotFoundException('Unknown collection "…"')` | `SEARCH_COLLECTION_NOT_FOUND` | **yes** |
-| search-record.service.ts:216 | `BadRequestException('Unknown filter field "…"')` | `SEARCH_QUERY_INVALID` | **yes** |
-| search-record.service.ts:231 | `BadRequestException('Invalid sort "…"')` | `SEARCH_QUERY_INVALID` | **yes** |
-| search-record.service.ts:246 | `BadRequestException('Unknown facet(s): …')` | `SEARCH_QUERY_INVALID` | **yes** |
-| collection.service.ts:83 | `ConflictException('Collection "…" already exists')` | `SEARCH_COLLECTION_EXISTS` | **yes** |
-| collection.service.ts:104/113/125/140 | `NotFoundException('Unknown collection "…"')` | `SEARCH_COLLECTION_NOT_FOUND` | **yes** |
+- [ ] **Step 1: Write the failing test `frontend/lib/auth/__tests__/session.test.ts`**
 
-- [ ] **Step 1:** Update both specs: inject `new ExceptionService()`; convert assertions to the codes above. For the SearchEngineError→503 path, keep the existing behavior test but assert `code === ErrorCode.SEARCH_UNAVAILABLE` and status 503. Run → FAIL.
-   Run: `cd api && npx jest src/features/search-service`
-- [ ] **Step 2:** Apply the migration recipe + table. For the validation site, ensure the `issues` become `{ path, message }[]`.
-- [ ] **Step 3:** Run tests → PASS.
-   Run: `cd api && npx jest src/features/search-service`
-- [ ] **Step 4:** Commit.
+```ts
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import MockAdapter from 'axios-mock-adapter'
+import Cookies from 'js-cookie'
+import {
+  getRefreshToken, applyTokenPair, clearSession, refreshSession, refreshClient,
+} from '@/lib/auth/session'
+import { getAccessToken, setAccessToken } from '@/lib/http/token-store'
+import { REFRESH_COOKIE } from '@/lib/config/constants'
+
+const mock = new MockAdapter(refreshClient)
+
+beforeEach(() => {
+  mock.reset()
+  setAccessToken(null)
+  Cookies.remove(REFRESH_COOKIE, { path: '/' })
+})
+
+describe('applyTokenPair / getRefreshToken / clearSession', () => {
+  it('applies a token pair to memory + cookie', () => {
+    applyTokenPair({ accessToken: 'a', refreshToken: 'r', expiresIn: 900 })
+    expect(getAccessToken()).toBe('a')
+    expect(getRefreshToken()).toBe('r')
+  })
+  it('clears both', () => {
+    applyTokenPair({ accessToken: 'a', refreshToken: 'r', expiresIn: 900 })
+    clearSession()
+    expect(getAccessToken()).toBeNull()
+    expect(getRefreshToken()).toBeUndefined()
+  })
+})
+
+describe('refreshSession', () => {
+  it('posts the current refresh token and applies the rotated pair', async () => {
+    applyTokenPair({ accessToken: 'old-a', refreshToken: 'old-r', expiresIn: 900 })
+    mock.onPost('/auth/refresh').reply((config) => {
+      expect(JSON.parse(config.data)).toEqual({ refreshToken: 'old-r' })
+      return [200, { accessToken: 'new-a', refreshToken: 'new-r', expiresIn: 900 }]
+    })
+    const pair = await refreshSession()
+    expect(pair.accessToken).toBe('new-a')
+    expect(getAccessToken()).toBe('new-a')
+    expect(getRefreshToken()).toBe('new-r')
+  })
+  it('throws when there is no refresh token', async () => {
+    await expect(refreshSession()).rejects.toThrow(/no refresh token/i)
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `npm run test -- session`
+Expected: FAIL.
+
+- [ ] **Step 3: Create `frontend/lib/auth/session.ts`**
+
+```ts
+import axios from 'axios'
+import Cookies from 'js-cookie'
+import { clientEnv } from '@/lib/config/env'
+import { REFRESH_COOKIE, REFRESH_COOKIE_MAX_AGE_DAYS } from '@/lib/config/constants'
+import { setAccessToken } from '@/lib/http/token-store'
+import type { TokenPair } from '@/lib/interfaces/auth.interface'
+
+// Raw axios instance — deliberately NOT the intercepted api-client, so refresh
+// can never recurse through the 401 interceptor.
+export const refreshClient = axios.create({
+  baseURL: clientEnv.apiUrl,
+  headers: { 'Content-Type': 'application/json' },
+})
+
+export function getRefreshToken(): string | undefined {
+  return Cookies.get(REFRESH_COOKIE)
+}
+
+function setRefreshCookie(token: string): void {
+  Cookies.set(REFRESH_COOKIE, token, {
+    expires: REFRESH_COOKIE_MAX_AGE_DAYS,
+    path: '/',
+    sameSite: 'lax',
+    secure: process.env.NODE_ENV === 'production',
+  })
+}
+
+export function applyTokenPair(pair: TokenPair): void {
+  setAccessToken(pair.accessToken)
+  setRefreshCookie(pair.refreshToken)
+}
+
+export function clearSession(): void {
+  setAccessToken(null)
+  Cookies.remove(REFRESH_COOKIE, { path: '/' })
+}
+
+export async function refreshSession(): Promise<TokenPair> {
+  const refreshToken = getRefreshToken()
+  if (!refreshToken) throw new Error('No refresh token')
+  const res = await refreshClient.post<TokenPair>('/auth/refresh', { refreshToken })
+  applyTokenPair(res.data)
+  return res.data
+}
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `npm run test -- session`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
 ```bash
-git add api/src/features/search-service
-git commit -m "refactor(search): throw via ExceptionService; standardize validation issues"
+git add frontend/lib/auth/session.ts frontend/lib/auth/__tests__/session.test.ts
+git commit -m "feat(frontend): session module — refresh cookie + rotation-aware refresh"
 ```
 
 ---
 
-### Task 14: Migrate the system module
+## Task 7: API client (ApiError + interceptors + single-flight refresh)
 
-**Files:** Modify `api/src/features/system/integration-credential.service.ts`, `imap-config.service.ts`, `smtp-config.service.ts`, `system-settings.service.ts` (+ specs). **Do NOT** change `encryption.service.ts` (constructor misconfig is a boot-time fatal — correct as a plain `Error`; runtime decrypt failures are normalized by the infra mapper). **Do NOT** change `system-audit.service.ts` (audit failures stay swallowed).
+**Files:**
+- Rewrite: `frontend/lib/http/api-client.ts`
+- Test: `frontend/lib/http/__tests__/api-client.test.ts`
 
-**Replacement table:**
+**Interfaces:**
+- Consumes: `clientEnv.apiUrl`, `token-store.getAccessToken`, `session` (`refreshSession`, `clearSession`), `ERROR_CODES`, `ErrorEnvelope`.
+- Produces:
+  - `class ApiError extends Error { code; statusCode; correlationId?; details?; get fieldErrors(): Record<string,string> }`
+  - `apiClient: AxiosInstance`
+  - `setUnauthorizedHandler(fn: () => void)` (defaults to `window.location.href = '/auth/login'`; the auth store overrides it in Task 9)
 
-| File:line | Old | New | Override? |
-|---|---|---|---|
-| integration-credential.service.ts:58 | `NotFoundException('Integration credential not found')` | `CONFIG_NOT_FOUND` | **yes** |
-| integration-credential.service.ts:67 | `ConflictException('A credential named "…" already exists for …')` | `CONFLICT` | **yes** |
-| integration-credential.service.ts:114 | `ConflictException(same)` | `CONFLICT` | **yes** |
-| integration-credential.service.ts:133 | `NotFoundException('Integration credential not found')` | `CONFIG_NOT_FOUND` | **yes** |
-| imap-config.service.ts:53/108/133 | `NotFoundException('IMAP config not found')` | `CONFIG_NOT_FOUND` | **yes**: `{ message: 'IMAP config not found' }` |
-| smtp-config.service.ts:57/116/141 | `NotFoundException('SMTP config not found')` | `CONFIG_NOT_FOUND` | **yes**: `{ message: 'SMTP config not found' }` |
-| system-settings.service.ts:60/98 | `NotFoundException('Setting "…" not found')` | `CONFIG_NOT_FOUND` | **yes** |
+- [ ] **Step 1: Write the failing test `frontend/lib/http/__tests__/api-client.test.ts`**
 
-- [ ] **Step 1:** Update the four specs: inject `new ExceptionService()`; convert assertions to `CONFIG_NOT_FOUND` / `CONFLICT` with the preserved messages. Run → FAIL.
-   Run: `cd api && npx jest src/features/system`
-- [ ] **Step 2:** Apply the migration recipe + table.
-- [ ] **Step 3:** Run tests → PASS.
-   Run: `cd api && npx jest src/features/system`
-- [ ] **Step 4:** Commit.
+```ts
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import MockAdapter from 'axios-mock-adapter'
+import { apiClient, ApiError, setUnauthorizedHandler } from '@/lib/http/api-client'
+import { refreshClient, applyTokenPair, clearSession } from '@/lib/auth/session'
+import { getAccessToken, setAccessToken } from '@/lib/http/token-store'
+
+const api = new MockAdapter(apiClient)
+const refresh = new MockAdapter(refreshClient)
+
+beforeEach(() => {
+  api.reset(); refresh.reset(); clearSession(); setAccessToken(null)
+  setUnauthorizedHandler(() => {})
+})
+
+describe('ApiError mapping', () => {
+  it('maps the backend error envelope', async () => {
+    api.onGet('/x').reply(400, {
+      error: {
+        code: 'VALIDATION_FAILED', message: 'bad', statusCode: 400,
+        details: { issues: [{ path: 'email', message: 'Invalid' }] },
+        correlationId: 'cid', timestamp: 't', path: '/x',
+      },
+    })
+    await expect(apiClient.get('/x')).rejects.toMatchObject({
+      code: 'VALIDATION_FAILED', statusCode: 400, correlationId: 'cid',
+    })
+    try {
+      await apiClient.get('/x')
+    } catch (e) {
+      expect((e as ApiError).fieldErrors).toEqual({ email: 'Invalid' })
+    }
+  })
+})
+
+describe('single-flight refresh on AUTH_TOKEN_EXPIRED', () => {
+  it('refreshes once and replays the original request', async () => {
+    applyTokenPair({ accessToken: 'expired', refreshToken: 'r', expiresIn: 900 })
+    let calls = 0
+    api.onGet('/me').reply(() => {
+      calls += 1
+      if (calls === 1) {
+        return [401, { error: { code: 'AUTH_TOKEN_EXPIRED', message: 'x', statusCode: 401, details: null, correlationId: 'c', timestamp: 't', path: '/me' } }]
+      }
+      return [200, { id: 'u1', role: 'user' }]
+    })
+    refresh.onPost('/auth/refresh').reply(200, { accessToken: 'fresh', refreshToken: 'r2', expiresIn: 900 })
+
+    const res = await apiClient.get('/me')
+    expect(res.data).toEqual({ id: 'u1', role: 'user' })
+    expect(getAccessToken()).toBe('fresh')
+  })
+
+  it('hard-logs-out when refresh fails', async () => {
+    applyTokenPair({ accessToken: 'expired', refreshToken: 'r', expiresIn: 900 })
+    const onUnauthorized = vi.fn()
+    setUnauthorizedHandler(onUnauthorized)
+    api.onGet('/me').reply(401, { error: { code: 'AUTH_TOKEN_EXPIRED', message: 'x', statusCode: 401, details: null, correlationId: 'c', timestamp: 't', path: '/me' } })
+    refresh.onPost('/auth/refresh').reply(401, { error: { code: 'AUTH_TOKEN_REUSE', message: 'x', statusCode: 401, details: null, correlationId: 'c', timestamp: 't', path: '/auth/refresh' } })
+
+    await expect(apiClient.get('/me')).rejects.toBeInstanceOf(ApiError)
+    expect(onUnauthorized).toHaveBeenCalled()
+    expect(getAccessToken()).toBeNull()
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `npm run test -- api-client`
+Expected: FAIL.
+
+- [ ] **Step 3: Rewrite `frontend/lib/http/api-client.ts`**
+
+```ts
+import axios, { AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
+import { clientEnv } from '@/lib/config/env'
+import { ERROR_CODES } from '@/lib/config/constants'
+import { getAccessToken } from '@/lib/http/token-store'
+import { refreshSession, clearSession } from '@/lib/auth/session'
+import type { ErrorEnvelope } from '@/lib/interfaces/auth.interface'
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly code: string,
+    public readonly statusCode: number,
+    public readonly correlationId?: string,
+    public readonly details?: unknown,
+  ) {
+    super(message)
+    this.name = 'ApiError'
+  }
+
+  /** Field-level messages parsed from a VALIDATION_FAILED envelope. path → message. */
+  get fieldErrors(): Record<string, string> {
+    const out: Record<string, string> = {}
+    const d = this.details as { issues?: { path: string; message: string }[] } | null | undefined
+    if (d && Array.isArray(d.issues)) {
+      for (const issue of d.issues) {
+        const key = issue.path && issue.path !== '(root)' ? issue.path : '_root'
+        if (!(key in out)) out[key] = issue.message
+      }
+    }
+    return out
+  }
+}
+
+// Overridable so the auth store can wire "hard logout + redirect", and tests
+// can assert it without touching window.location.
+let onUnauthorized: () => void = () => {
+  if (typeof window !== 'undefined') window.location.href = '/auth/login'
+}
+export function setUnauthorizedHandler(fn: () => void): void {
+  onUnauthorized = fn
+}
+
+export const apiClient: AxiosInstance = axios.create({
+  baseURL: clientEnv.apiUrl, // NO /api prefix — backend routes are root-level
+  headers: { 'Content-Type': 'application/json' },
+})
+
+// ── Request: inject bearer token ────────────────────────────────────────────
+apiClient.interceptors.request.use((config) => {
+  const token = getAccessToken()
+  if (token) config.headers.Authorization = `Bearer ${token}`
+  return config
+})
+
+// ── Response: normalize errors + single-flight refresh ──────────────────────
+function toApiError(error: AxiosError<ErrorEnvelope>): ApiError {
+  const env = error.response?.data?.error
+  if (env) return new ApiError(env.message, env.code, env.statusCode, env.correlationId, env.details)
+  return new ApiError(error.message || 'Network error', 'NETWORK_ERROR', error.response?.status ?? 0)
+}
+
+let refreshPromise: Promise<unknown> | null = null
+
+apiClient.interceptors.response.use(
+  (r) => r,
+  async (error: AxiosError<ErrorEnvelope>) => {
+    const apiError = toApiError(error)
+    const original = error.config as (InternalAxiosRequestConfig & { _retry?: boolean }) | undefined
+
+    const isExpired = apiError.code === ERROR_CODES.AUTH_TOKEN_EXPIRED
+    if (isExpired && original && !original._retry) {
+      original._retry = true
+      try {
+        refreshPromise = refreshPromise ?? refreshSession().finally(() => { refreshPromise = null })
+        await refreshPromise
+        return apiClient(original) // replay; request interceptor re-adds the fresh bearer
+      } catch {
+        clearSession()
+        onUnauthorized()
+        return Promise.reject(apiError)
+      }
+    }
+
+    // Non-refreshable auth failures → hard logout.
+    if (apiError.statusCode === 401 && apiError.code !== ERROR_CODES.AUTH_INVALID_CREDENTIALS) {
+      clearSession()
+      onUnauthorized()
+    }
+    return Promise.reject(apiError)
+  },
+)
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `npm run test -- api-client`
+Expected: PASS (3 tests).
+
+- [ ] **Step 5: Commit**
+
 ```bash
-git add api/src/features/system
-git commit -m "refactor(system): throw via ExceptionService"
+git add frontend/lib/http/api-client.ts frontend/lib/http/__tests__/api-client.test.ts
+git commit -m "feat(frontend): api-client with error envelope + single-flight refresh"
 ```
 
 ---
 
-### Task 15: Migrate the mailbox module
+## Task 8: Auth service
 
-**Files:** Modify `api/src/features/mailbox/mailbox.service.ts` + spec. **Do NOT** change the ingest/scheduler swallow-and-log paths (best-effort semantics preserved); `NoActiveEmailConfigError` reaching an HTTP request is normalized by the infra mapper.
+**Files:**
+- Rewrite: `frontend/lib/services/auth.service.ts`
+- Test: `frontend/lib/services/__tests__/auth.service.test.ts`
 
-**Replacement table:**
+**Interfaces:**
+- Consumes: `apiClient`, `CurrentUser`, `SessionSummary`, `TokenPair`, `ILoginInput`, `IResetPasswordInput`.
+- Produces `authService` with: `login(input): Promise<TokenPair>`, `logout(refreshToken): Promise<void>`, `logoutAll(): Promise<void>`, `getMe(): Promise<CurrentUser>`, `getSessions(): Promise<SessionSummary[]>`, `changePassword(currentPassword, newPassword): Promise<void>`, `forgotPassword(email): Promise<void>`, `resetPassword(input): Promise<void>`.
 
-| File:line | Old | New | Override? |
-|---|---|---|---|
-| mailbox.service.ts:77 | `BadRequestException('No mailbox account specified and MAILBOX_DEFAULT_ACCOUNT_ID is unset')` | `MAILBOX_ACCOUNT_UNRESOLVED` | **yes**: `{ message: 'No mailbox account specified and MAILBOX_DEFAULT_ACCOUNT_ID is unset' }` |
-| mailbox.service.ts:108 | `NotFoundException('Message not found')` | `MAILBOX_MESSAGE_NOT_FOUND` | no |
-| mailbox.service.ts:131 | `NotFoundException('Attachment not found')` | `MAILBOX_ATTACHMENT_NOT_FOUND` | no |
-| mailbox.service.ts:137 | `NotFoundException('Message not found')` | `MAILBOX_MESSAGE_NOT_FOUND` | no |
+- [ ] **Step 1: Write the failing test `frontend/lib/services/__tests__/auth.service.test.ts`**
 
-- [ ] **Step 1:** Update `mailbox.service.spec.ts`: inject `new ExceptionService()`; convert assertions. Run → FAIL.
-   Run: `cd api && npx jest src/features/mailbox`
-- [ ] **Step 2:** Apply the migration recipe + table.
-- [ ] **Step 3:** Run tests → PASS.
-   Run: `cd api && npx jest src/features/mailbox`
-- [ ] **Step 4:** Commit.
+```ts
+import { describe, it, expect, beforeEach } from 'vitest'
+import MockAdapter from 'axios-mock-adapter'
+import { apiClient } from '@/lib/http/api-client'
+import { authService } from '@/lib/services/auth.service'
+
+const mock = new MockAdapter(apiClient)
+beforeEach(() => mock.reset())
+
+describe('authService', () => {
+  it('login posts credentials and returns the token pair', async () => {
+    mock.onPost('/auth/login').reply(200, { accessToken: 'a', refreshToken: 'r', expiresIn: 900 })
+    const pair = await authService.login({ email: 'a@b.com', password: 'pw' })
+    expect(pair.accessToken).toBe('a')
+  })
+  it('getMe returns the current user', async () => {
+    mock.onGet('/auth/me').reply(200, { id: 'u1', role: 'admin' })
+    expect(await authService.getMe()).toEqual({ id: 'u1', role: 'admin' })
+  })
+  it('getSessions returns the session list', async () => {
+    mock.onGet('/auth/sessions').reply(200, [{ id: 's1', createdAt: 't', lastUsedAt: null, expiresAt: 't', userAgent: null, ip: null }])
+    expect(await authService.getSessions()).toHaveLength(1)
+  })
+  it('changePassword PATCHes the password endpoint', async () => {
+    mock.onPatch('/auth/password').reply(204)
+    await expect(authService.changePassword('old', 'newnewnewnew')).resolves.toBeUndefined()
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `npm run test -- auth.service`
+Expected: FAIL.
+
+- [ ] **Step 3: Rewrite `frontend/lib/services/auth.service.ts`**
+
+```ts
+import { apiClient } from '@/lib/http/api-client'
+import type {
+  CurrentUser, SessionSummary, TokenPair, ILoginInput, IResetPasswordInput,
+} from '@/lib/interfaces/auth.interface'
+
+export const authService = {
+  login(input: ILoginInput): Promise<TokenPair> {
+    return apiClient.post<TokenPair>('/auth/login', input).then((r) => r.data)
+  },
+  logout(refreshToken: string): Promise<void> {
+    return apiClient.post('/auth/logout', { refreshToken }).then(() => undefined)
+  },
+  logoutAll(): Promise<void> {
+    return apiClient.post('/auth/logout-all').then(() => undefined)
+  },
+  getMe(): Promise<CurrentUser> {
+    return apiClient.get<CurrentUser>('/auth/me').then((r) => r.data)
+  },
+  getSessions(): Promise<SessionSummary[]> {
+    return apiClient.get<SessionSummary[]>('/auth/sessions').then((r) => r.data)
+  },
+  changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    return apiClient.patch('/auth/password', { currentPassword, newPassword }).then(() => undefined)
+  },
+  forgotPassword(email: string): Promise<void> {
+    return apiClient.post('/auth/forgot-password', { email }).then(() => undefined)
+  },
+  resetPassword(input: IResetPasswordInput): Promise<void> {
+    return apiClient.post('/auth/reset-password', input).then(() => undefined)
+  },
+}
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `npm run test -- auth.service`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
 ```bash
-git add api/src/features/mailbox
-git commit -m "refactor(mailbox): throw via ExceptionService"
+git add frontend/lib/services/auth.service.ts frontend/lib/services/__tests__/auth.service.test.ts
+git commit -m "feat(frontend): auth service on real /auth/* routes"
 ```
 
 ---
 
-### Task 16: Migrate the mastra module
+## Task 9: Auth store (Zustand)
 
-**Files:** Modify `api/src/features/mastra/services/approval.service.ts`, `conversation.service.ts` (+ specs). **Do NOT** change the raw `Error` invariants in `action-log.repository.ts:25`, `mastra-adapters.ts:183`, `agent-run.processor.ts:170` (internal invariants / BullMQ-retry, not HTTP-facing). Raw `MastraError` from `agent.generate()` reaching HTTP is normalized by the Mastra mapper.
+**Files:**
+- Rewrite: `frontend/lib/state-management/auth.store.ts`
+- Test: `frontend/lib/state-management/__tests__/auth.store.test.ts`
 
-**Replacement table:**
+**Interfaces:**
+- Consumes: `authService`, `session` (`applyTokenPair`, `clearSession`, `getRefreshToken`, `refreshSession`), `setUnauthorizedHandler`, `IAuthState`, `ApiError`.
+- Produces: `useAuthStore` and selector hooks `useUser`, `useAuthStatus`, `useIsAuthenticated`, `useAuthLoading`, `useAuthError`, `useUserRole`. Also `wireAuthUnauthorizedHandler()` (idempotent) that registers the store's hard-logout with `setUnauthorizedHandler`.
 
-| File:line | Old | New | Override? |
-|---|---|---|---|
-| approval.service.ts:45 | `NotFoundException('Approval not found')` | `AGENT_APPROVAL_NOT_FOUND` | no |
-| approval.service.ts:47 | `ConflictException('Approval already decided')` | `AGENT_APPROVAL_CONFLICT` | no |
-| approval.service.ts:56 | `ForbiddenException('Not your approval')` | `AGENT_APPROVAL_FORBIDDEN` | no |
-| conversation.service.ts:33 | `NotFoundException('Conversation not found')` | `AGENT_CONVERSATION_NOT_FOUND` | no |
-| conversation.service.ts:39 | `ForbiddenException('Not your conversation')` | `FORBIDDEN` | **yes**: `{ message: 'Not your conversation' }` |
-| conversation.service.ts:59 | `NotFoundException('Conversation not found')` | `AGENT_CONVERSATION_NOT_FOUND` | no |
-| conversation.service.ts:61 | `ForbiddenException('Not your conversation')` | `FORBIDDEN` | **yes**: `{ message: 'Not your conversation' }` |
+- [ ] **Step 1: Write the failing test `frontend/lib/state-management/__tests__/auth.store.test.ts`**
 
-- [ ] **Step 1:** Update `approval.service.spec.ts`, `conversation.service.spec.ts`: inject `new ExceptionService()`; convert assertions. Run → FAIL.
-   Run: `cd api && npx jest src/features/mastra`
-- [ ] **Step 2:** Apply the migration recipe + table (import depth here is `../../../infrastructure/exceptions`).
-- [ ] **Step 3:** Run tests → PASS.
-   Run: `cd api && npx jest src/features/mastra`
-- [ ] **Step 4:** Commit.
+```ts
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+
+vi.mock('@/lib/services/auth.service', () => ({
+  authService: {
+    login: vi.fn(),
+    getMe: vi.fn(),
+    logout: vi.fn(),
+  },
+}))
+vi.mock('@/lib/auth/session', () => ({
+  applyTokenPair: vi.fn(),
+  clearSession: vi.fn(),
+  getRefreshToken: vi.fn(),
+  refreshSession: vi.fn(),
+}))
+
+import { useAuthStore } from '@/lib/state-management/auth.store'
+import { authService } from '@/lib/services/auth.service'
+import { applyTokenPair, getRefreshToken, refreshSession } from '@/lib/auth/session'
+
+beforeEach(() => {
+  vi.clearAllMocks()
+  useAuthStore.setState({ user: null, status: 'idle', isLoading: false, error: null })
+})
+
+describe('auth.store', () => {
+  it('login stores the token pair and hydrates the user', async () => {
+    ;(authService.login as any).mockResolvedValue({ accessToken: 'a', refreshToken: 'r', expiresIn: 900 })
+    ;(authService.getMe as any).mockResolvedValue({ id: 'u1', role: 'user' })
+
+    await useAuthStore.getState().login({ email: 'a@b.com', password: 'pw' })
+
+    expect(applyTokenPair).toHaveBeenCalledWith({ accessToken: 'a', refreshToken: 'r', expiresIn: 900 })
+    expect(useAuthStore.getState().user).toEqual({ id: 'u1', role: 'user' })
+    expect(useAuthStore.getState().status).toBe('authenticated')
+  })
+
+  it('bootstrap with no refresh token → unauthenticated', async () => {
+    ;(getRefreshToken as any).mockReturnValue(undefined)
+    await useAuthStore.getState().bootstrap()
+    expect(useAuthStore.getState().status).toBe('unauthenticated')
+    expect(refreshSession).not.toHaveBeenCalled()
+  })
+
+  it('bootstrap with a refresh token refreshes then loads the user', async () => {
+    ;(getRefreshToken as any).mockReturnValue('r')
+    ;(refreshSession as any).mockResolvedValue({ accessToken: 'a', refreshToken: 'r2', expiresIn: 900 })
+    ;(authService.getMe as any).mockResolvedValue({ id: 'u1', role: 'admin' })
+    await useAuthStore.getState().bootstrap()
+    expect(useAuthStore.getState().status).toBe('authenticated')
+    expect(useAuthStore.getState().user?.role).toBe('admin')
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `npm run test -- auth.store`
+Expected: FAIL.
+
+- [ ] **Step 3: Rewrite `frontend/lib/state-management/auth.store.ts`**
+
+```ts
+'use client'
+
+import { create } from 'zustand'
+import { devtools } from 'zustand/middleware'
+import { ApiError, setUnauthorizedHandler } from '@/lib/http/api-client'
+import { authService } from '@/lib/services/auth.service'
+import {
+  applyTokenPair, clearSession, getRefreshToken, refreshSession,
+} from '@/lib/auth/session'
+import type { IAuthState, IResetPasswordInput, Role } from '@/lib/interfaces/auth.interface'
+
+const INITIAL = {
+  user: null,
+  status: 'idle' as const,
+  isLoading: false,
+  error: null,
+}
+
+function messageOf(err: unknown, fallback: string): string {
+  return err instanceof ApiError ? err.message : fallback
+}
+
+export const useAuthStore = create<IAuthState>()(
+  devtools(
+    (set, get) => ({
+      ...INITIAL,
+
+      clearError: () => set({ error: null }, false, 'auth/clearError'),
+
+      login: async (input) => {
+        set({ isLoading: true, error: null }, false, 'auth/login/pending')
+        try {
+          const pair = await authService.login(input)
+          applyTokenPair(pair)
+          const user = await authService.getMe()
+          set({ user, status: 'authenticated', isLoading: false }, false, 'auth/login/ok')
+        } catch (err) {
+          set({ error: messageOf(err, 'Login failed'), isLoading: false }, false, 'auth/login/err')
+          throw err
+        }
+      },
+
+      logout: async () => {
+        const rt = getRefreshToken()
+        try {
+          if (rt) await authService.logout(rt)
+        } catch {
+          // best-effort; continue local cleanup
+        } finally {
+          clearSession()
+          set({ ...INITIAL, status: 'unauthenticated' }, false, 'auth/logout')
+        }
+      },
+
+      logoutAll: async () => {
+        try {
+          await authService.logoutAll()
+        } finally {
+          clearSession()
+          set({ ...INITIAL, status: 'unauthenticated' }, false, 'auth/logoutAll')
+        }
+      },
+
+      bootstrap: async () => {
+        if (!getRefreshToken()) {
+          set({ status: 'unauthenticated' }, false, 'auth/bootstrap/anon')
+          return
+        }
+        set({ status: 'loading' }, false, 'auth/bootstrap/pending')
+        try {
+          await refreshSession()
+          const user = await authService.getMe()
+          set({ user, status: 'authenticated' }, false, 'auth/bootstrap/ok')
+        } catch {
+          clearSession()
+          set({ ...INITIAL, status: 'unauthenticated' }, false, 'auth/bootstrap/fail')
+        }
+      },
+
+      changePassword: async (currentPassword, newPassword) => {
+        set({ isLoading: true, error: null }, false, 'auth/changePassword/pending')
+        try {
+          await authService.changePassword(currentPassword, newPassword)
+          // Backend revokes ALL sessions → force a clean re-login.
+          clearSession()
+          set({ ...INITIAL, status: 'unauthenticated' }, false, 'auth/changePassword/ok')
+        } catch (err) {
+          set({ error: messageOf(err, 'Password change failed'), isLoading: false }, false, 'auth/changePassword/err')
+          throw err
+        }
+      },
+
+      forgotPassword: async (email) => {
+        set({ isLoading: true, error: null }, false, 'auth/forgotPassword/pending')
+        try {
+          await authService.forgotPassword(email)
+          set({ isLoading: false }, false, 'auth/forgotPassword/ok')
+        } catch (err) {
+          set({ error: messageOf(err, 'Request failed'), isLoading: false }, false, 'auth/forgotPassword/err')
+          throw err
+        }
+      },
+
+      resetPassword: async (input: IResetPasswordInput) => {
+        set({ isLoading: true, error: null }, false, 'auth/resetPassword/pending')
+        try {
+          await authService.resetPassword(input)
+          set({ isLoading: false }, false, 'auth/resetPassword/ok')
+        } catch (err) {
+          set({ error: messageOf(err, 'Password reset failed'), isLoading: false }, false, 'auth/resetPassword/err')
+          throw err
+        }
+      },
+    }),
+    { name: 'AuthStore', enabled: process.env.NODE_ENV === 'development' },
+  ),
+)
+
+// Register the hard-logout handler the api-client calls on unrecoverable 401s.
+let wired = false
+export function wireAuthUnauthorizedHandler(): void {
+  if (wired) return
+  wired = true
+  setUnauthorizedHandler(() => {
+    clearSession()
+    useAuthStore.setState({ user: null, status: 'unauthenticated', isLoading: false })
+    if (typeof window !== 'undefined') window.location.href = '/auth/login'
+  })
+}
+
+// ── selectors ───────────────────────────────────────────────────────────────
+export const useUser = () => useAuthStore((s) => s.user)
+export const useAuthStatus = () => useAuthStore((s) => s.status)
+export const useIsAuthenticated = () => useAuthStore((s) => s.status === 'authenticated')
+export const useAuthLoading = () => useAuthStore((s) => s.isLoading)
+export const useAuthError = () => useAuthStore((s) => s.error)
+export const useUserRole = (): Role | undefined => useAuthStore((s) => s.user?.role)
+```
+
+- [ ] **Step 4: Run to verify it passes + typecheck**
+
+Run: `npm run test -- auth.store && npm run typecheck`
+Expected: tests PASS; typecheck clean.
+
+- [ ] **Step 5: Commit**
+
 ```bash
-git add api/src/features/mastra
-git commit -m "refactor(mastra): throw via ExceptionService"
+git add frontend/lib/state-management/auth.store.ts frontend/lib/state-management/__tests__/auth.store.test.ts
+git commit -m "feat(frontend): rewrite auth store (login/logout/bootstrap/change-password)"
 ```
 
 ---
 
-## PHASE 3 — Verify end-to-end
+## Task 10: Role hooks + route policy
 
-### Task 17: Full build, test suite, and manual envelope check
+**Files:**
+- Rewrite: `frontend/lib/hooks/use-permission.ts`
+- Create: `frontend/lib/auth/route-policy.ts`
+- Test: `frontend/lib/auth/__tests__/route-policy.test.ts`
 
-**Files:** none (verification only).
+**Interfaces:**
+- Produces (`use-permission.ts`): `useHasRole(role: Role): boolean`, `useHasAnyRole(roles: Role[]): boolean`, `useIsAdmin(): boolean`.
+- Produces (`route-policy.ts`): `AUTH_ROUTES: string[]`, `ADMIN_ROUTES: string[]`, `isAuthRoute(pathname): boolean`, `isProtectedRoute(pathname): boolean`, `isAdminRoute(pathname): boolean`, `LOGIN_PATH = '/auth/login'`, `DEFAULT_AUTHED_PATH = '/dashboard'`.
 
-- [ ] **Step 1: Full build**
+- [ ] **Step 1: Write the failing test `frontend/lib/auth/__tests__/route-policy.test.ts`**
 
-Run: `cd api && npm run build`
-Expected: success, zero TS errors.
+```ts
+import { describe, it, expect } from 'vitest'
+import { isAuthRoute, isProtectedRoute, isAdminRoute } from '@/lib/auth/route-policy'
 
-- [ ] **Step 2: Full test suite**
-
-Run: `cd api && npm test`
-Expected: all suites PASS. Investigate any spec still asserting a removed Nest exception class and fix it to the code/status pattern.
-
-- [ ] **Step 3: Lint**
-
-Run: `cd api && npx eslint src/infrastructure/exceptions --max-warnings=0`
-Expected: clean (no unused `@nestjs/common` exception imports left behind in migrated files — extend the path if lint flags others).
-
-- [ ] **Step 4: Manual end-to-end envelope check**
-
-Boot the app and hit one route per kind, confirming the envelope + status:
-```bash
-cd api && npm run start:dev   # in one shell (uses .env datastore ports)
-# CLIENT 404:
-curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/users/00000000-0000-0000-0000-000000000000   # expect 404
-curl -s http://localhost:3000/users/00000000-0000-0000-0000-000000000000 | jq .   # expect { "error": { "code": "USER_NOT_FOUND", ... } }
-# VALIDATION 400 (post an invalid body to any zod-validated route) → { "error": { "code": "VALIDATION_FAILED", "details": { "issues": [...] } } }
+describe('route-policy', () => {
+  it('recognizes auth routes', () => {
+    expect(isAuthRoute('/auth/login')).toBe(true)
+    expect(isAuthRoute('/auth/reset-password')).toBe(true)
+    expect(isAuthRoute('/dashboard')).toBe(false)
+  })
+  it('treats non-public app routes as protected', () => {
+    expect(isProtectedRoute('/dashboard')).toBe(true)
+    expect(isProtectedRoute('/account')).toBe(true)
+    expect(isProtectedRoute('/auth/login')).toBe(false)
+    expect(isProtectedRoute('/')).toBe(false)
+  })
+  it('recognizes admin routes', () => {
+    expect(isAdminRoute('/admin/users')).toBe(true)
+    expect(isAdminRoute('/dashboard')).toBe(false)
+  })
+})
 ```
-Expected: every response is the standard envelope; `correlationId` present; no stack traces leak on 500s.
 
-- [ ] **Step 5: Final commit (if any spec/lint fixes were needed)**
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `npm run test -- route-policy`
+Expected: FAIL.
+
+- [ ] **Step 3: Create `frontend/lib/auth/route-policy.ts`**
+
+```ts
+export const LOGIN_PATH = '/auth/login'
+export const DEFAULT_AUTHED_PATH = '/dashboard'
+
+/** Routes reachable WITHOUT a session (the auth flow). */
+export const AUTH_ROUTES = ['/auth/login', '/auth/forgot-password', '/auth/reset-password']
+
+/** Public routes that are neither auth nor protected (e.g. the marketing landing). */
+export const PUBLIC_ROUTES = ['/']
+
+/** Admin-only route prefixes (client gate; backend RolesGuard is authoritative). */
+export const ADMIN_ROUTES = ['/admin']
+
+const startsWithAny = (pathname: string, prefixes: string[]) =>
+  prefixes.some((p) => pathname === p || pathname.startsWith(`${p}/`))
+
+export function isAuthRoute(pathname: string): boolean {
+  return startsWithAny(pathname, AUTH_ROUTES)
+}
+
+export function isAdminRoute(pathname: string): boolean {
+  return startsWithAny(pathname, ADMIN_ROUTES)
+}
+
+/** Everything that is not public and not an auth route requires a session. */
+export function isProtectedRoute(pathname: string): boolean {
+  if (PUBLIC_ROUTES.includes(pathname)) return false
+  if (isAuthRoute(pathname)) return false
+  return true
+}
+```
+
+- [ ] **Step 4: Rewrite `frontend/lib/hooks/use-permission.ts`**
+
+```ts
+import { useAuthStore } from '@/lib/state-management/auth.store'
+import type { Role } from '@/lib/interfaces/auth.interface'
+
+export function useHasRole(role: Role): boolean {
+  return useAuthStore((s) => s.user?.role === role)
+}
+
+export function useHasAnyRole(roles: Role[]): boolean {
+  return useAuthStore((s) => (s.user ? roles.includes(s.user.role) : false))
+}
+
+export function useIsAdmin(): boolean {
+  return useHasRole('admin')
+}
+```
+
+- [ ] **Step 5: Run to verify it passes + typecheck**
+
+Run: `npm run test -- route-policy && npm run typecheck`
+Expected: PASS; typecheck clean.
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add -A
-git commit -m "test(exceptions): finalize migration; full build + suite green"
+git add frontend/lib/auth/route-policy.ts frontend/lib/auth/__tests__/route-policy.test.ts frontend/lib/hooks/use-permission.ts
+git commit -m "feat(frontend): role hooks + shared route policy"
 ```
 
 ---
 
-## Self-Review (completed by plan author)
+## Task 11: Route-guard middleware
 
-- **Spec coverage:** design §4 (registry) → Task 1; §5 (envelope) → Task 3; §6 (AppException) → Task 2; §7 (ExceptionService/from) → Task 6; §8 (Mastra map) → Task 4; §9 (infra map) → Task 5; §10 (filter + wiring + Sentry removal) → Tasks 7–8; §11.2 (validation shape) → Tasks 9,13; §11.1 (403-vs-404) → Task 12; §12 (full migration) → Tasks 9–16; §13 (testing) → every task + Task 17. Covered.
-- **Placeholder scan:** none — every code/test/command is concrete.
-- **Type consistency:** `ErrorCode`/`ErrorKind`/`ERROR_REGISTRY`/`STATUS_TO_CODE`/`AppException(code, opts)`/`ExceptionService.create|validation|from`/`buildEnvelope(err, correlationId, path)`/`isMastraError`/`mapMastraError`/`mapInfraError` names are used identically across all tasks.
-- **Out-of-scope (intentional, documented in-task):** BullMQ/processor job-payload `Error`s, internal invariants, boot-time crypto misconfig, and best-effort swallow-and-log paths are explicitly left unchanged.
+**Files:**
+- Create: `frontend/middleware.ts`
+- Test: `frontend/__tests__/middleware.test.ts`
+
+**Interfaces:**
+- Consumes: `route-policy` (`isProtectedRoute`, `isAuthRoute`, `LOGIN_PATH`, `DEFAULT_AUTHED_PATH`), `REFRESH_COOKIE`.
+- Produces: `default middleware(req)`, `config.matcher`.
+
+- [ ] **Step 1: Write the failing test `frontend/__tests__/middleware.test.ts`**
+
+```ts
+// @vitest-environment node
+import { describe, it, expect } from 'vitest'
+import { NextRequest } from 'next/server'
+import middleware from '@/middleware'
+import { REFRESH_COOKIE } from '@/lib/config/constants'
+
+function req(path: string, opts?: { authed?: boolean }) {
+  const r = new NextRequest(new URL(`http://localhost${path}`))
+  if (opts?.authed) r.cookies.set(REFRESH_COOKIE, 'r')
+  return r
+}
+
+describe('middleware', () => {
+  it('redirects unauthenticated users away from protected routes', () => {
+    const res = middleware(req('/dashboard'))
+    expect(res.status).toBe(307)
+    const loc = res.headers.get('location')!
+    expect(loc).toContain('/auth/login')
+    expect(loc).toContain('callbackUrl=%2Fdashboard')
+  })
+  it('lets authenticated users into protected routes', () => {
+    const res = middleware(req('/dashboard', { authed: true }))
+    expect(res.headers.get('location')).toBeNull()
+  })
+  it('redirects authenticated users away from auth pages', () => {
+    const res = middleware(req('/auth/login', { authed: true }))
+    expect(res.headers.get('location')).toContain('/dashboard')
+  })
+  it('leaves the public landing alone', () => {
+    const res = middleware(req('/'))
+    expect(res.headers.get('location')).toBeNull()
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `npm run test -- middleware`
+Expected: FAIL.
+
+- [ ] **Step 3: Create `frontend/middleware.ts`**
+
+```ts
+import { NextResponse, type NextRequest } from 'next/server'
+import { REFRESH_COOKIE } from '@/lib/config/constants'
+import {
+  isAuthRoute, isProtectedRoute, LOGIN_PATH, DEFAULT_AUTHED_PATH,
+} from '@/lib/auth/route-policy'
+
+export default function middleware(req: NextRequest) {
+  const { pathname } = req.nextUrl
+  const hasSession = req.cookies.has(REFRESH_COOKIE)
+
+  // Authenticated users should not sit on auth pages.
+  if (hasSession && isAuthRoute(pathname)) {
+    return NextResponse.redirect(new URL(DEFAULT_AUTHED_PATH, req.url))
+  }
+
+  // Unauthenticated users cannot reach protected pages.
+  if (!hasSession && isProtectedRoute(pathname)) {
+    const url = new URL(LOGIN_PATH, req.url)
+    url.searchParams.set('callbackUrl', pathname)
+    return NextResponse.redirect(url)
+  }
+
+  return NextResponse.next()
+}
+
+export const config = {
+  // Exclude Next internals, the API-core proxy, and static assets.
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\.(?:png|jpg|jpeg|svg|ico|webp)$).*)'],
+}
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `npm run test -- middleware`
+Expected: PASS (4 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add frontend/middleware.ts frontend/__tests__/middleware.test.ts
+git commit -m "feat(frontend): coarse route-guard middleware"
+```
+
+---
+
+## Task 12: Providers + layout + SWR fetcher
+
+**Files:**
+- Rewrite: `frontend/components/providers/auth-provider.tsx`
+- Create: `frontend/components/providers/swr-provider.tsx`, `frontend/lib/hooks/swr-fetcher.ts`
+- Modify: `frontend/app/layout.tsx`, `frontend/lib/interfaces/app.interface.ts`, `frontend/lib/state-management/app.store.ts`, `frontend/next.config.mjs`
+- Test: `frontend/components/providers/__tests__/auth-provider.test.tsx`
+
+**Interfaces:**
+- Consumes: `useAuthStore.bootstrap`, `wireAuthUnauthorizedHandler`, `apiClient`.
+- Produces: `<AuthProvider>`, `<SwrProvider>`, `swrFetcher(url)`.
+
+- [ ] **Step 1: Create `frontend/lib/hooks/swr-fetcher.ts`**
+
+```ts
+import { apiClient } from '@/lib/http/api-client'
+
+/** Default SWR fetcher — GET through the shared api-client (bearer + refresh). */
+export const swrFetcher = <T>(url: string): Promise<T> =>
+  apiClient.get<T>(url).then((r) => r.data)
+```
+
+- [ ] **Step 2: Create `frontend/components/providers/swr-provider.tsx`**
+
+```tsx
+'use client'
+
+import { SWRConfig } from 'swr'
+import { swrFetcher } from '@/lib/hooks/swr-fetcher'
+
+export function SwrProvider({ children }: { children: React.ReactNode }) {
+  return (
+    <SWRConfig value={{ fetcher: swrFetcher, revalidateOnFocus: false, shouldRetryOnError: false }}>
+      {children}
+    </SWRConfig>
+  )
+}
+```
+
+- [ ] **Step 3: Rewrite `frontend/components/providers/auth-provider.tsx`**
+
+```tsx
+'use client'
+
+import { useEffect, useRef } from 'react'
+import { useAuthStore, wireAuthUnauthorizedHandler } from '@/lib/state-management/auth.store'
+
+/** Wires the unauthorized handler and bootstraps the session once per load. */
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const started = useRef(false)
+  const bootstrap = useAuthStore((s) => s.bootstrap)
+
+  useEffect(() => {
+    if (started.current) return
+    started.current = true
+    wireAuthUnauthorizedHandler()
+    void bootstrap()
+  }, [bootstrap])
+
+  return <>{children}</>
+}
+```
+
+- [ ] **Step 4: Write the failing test `frontend/components/providers/__tests__/auth-provider.test.tsx`**
+
+```tsx
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render } from '@testing-library/react'
+import { AuthProvider } from '@/components/providers/auth-provider'
+import { useAuthStore } from '@/lib/state-management/auth.store'
+
+beforeEach(() => {
+  useAuthStore.setState({ status: 'idle' })
+})
+
+describe('AuthProvider', () => {
+  it('calls bootstrap once on mount', () => {
+    const spy = vi.spyOn(useAuthStore.getState(), 'bootstrap').mockResolvedValue()
+    render(<AuthProvider><div>child</div></AuthProvider>)
+    expect(spy).toHaveBeenCalledTimes(1)
+  })
+})
+```
+
+- [ ] **Step 5: Run to verify it fails, then passes after Steps 1-3**
+
+Run: `npm run test -- auth-provider`
+Expected: PASS (module exists after Steps 1-3).
+
+- [ ] **Step 6: Update `frontend/app/layout.tsx`** (mount providers + Toaster)
+
+Replace the body/provider tree with:
+```tsx
+import { Geist, Geist_Mono } from 'next/font/google'
+import './globals.css'
+import { ThemeProvider } from '@/components/theme-provider'
+import { cn } from '@/lib/utils'
+import { TooltipProvider } from '@/components/ui/tooltip'
+import { AuthProvider } from '@/components/providers/auth-provider'
+import { SwrProvider } from '@/components/providers/swr-provider'
+import { Toaster } from 'sonner'
+
+const geist = Geist({ subsets: ['latin'], variable: '--font-sans' })
+const fontMono = Geist_Mono({ subsets: ['latin'], variable: '--font-mono' })
+
+export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
+  return (
+    <html lang="en" suppressHydrationWarning className={cn('antialiased', fontMono.variable, 'font-sans', geist.variable)}>
+      <body>
+        <ThemeProvider>
+          <SwrProvider>
+            <AuthProvider>
+              <TooltipProvider>{children}</TooltipProvider>
+            </AuthProvider>
+          </SwrProvider>
+          <Toaster richColors position="top-right" />
+        </ThemeProvider>
+      </body>
+    </html>
+  )
+}
+```
+
+- [ ] **Step 7: Correct `app.interface.ts` + `app.store.ts`**
+
+In `frontend/lib/interfaces/app.interface.ts`, change `projectId: number | null` → `projectId: string | null`.
+In `frontend/lib/state-management/app.store.ts`, `INITIAL_ACTIVE_CONTEXT.projectId` stays `null` (already correct); no other change needed beyond the type.
+
+- [ ] **Step 8: Remove the stale redirect in `frontend/next.config.mjs`**
+
+Replace the file with:
+```js
+/** @type {import('next').NextConfig} */
+const nextConfig = {}
+
+export default nextConfig
+```
+
+- [ ] **Step 9: Run tests + typecheck**
+
+Run: `npm run test && npm run typecheck`
+Expected: all PASS; typecheck clean.
+
+- [ ] **Step 10: Commit**
+
+```bash
+git add frontend/components/providers/ frontend/lib/hooks/swr-fetcher.ts frontend/app/layout.tsx frontend/lib/interfaces/app.interface.ts frontend/lib/state-management/app.store.ts frontend/next.config.mjs
+git commit -m "feat(frontend): auth + swr providers, mount toaster, drop stale redirect"
+```
+
+---
+
+## Task 13: Client guards
+
+**Files:**
+- Create: `frontend/lib/auth/guards.tsx`
+- Test: `frontend/lib/auth/__tests__/guards.test.tsx`
+
+**Interfaces:**
+- Consumes: `useAuthStore`, `useUserRole`, `next/navigation` (`useRouter`, `usePathname`), `route-policy`.
+- Produces: `useRequireAuth(): { ready: boolean }`, `useRequireRole(role: Role): { ready: boolean; allowed: boolean }`, `<AuthGuard>` (renders children only when authenticated), `<RoleGuard role>`.
+
+- [ ] **Step 1: Write the failing test `frontend/lib/auth/__tests__/guards.test.tsx`**
+
+```tsx
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import { AuthGuard } from '@/lib/auth/guards'
+import { useAuthStore } from '@/lib/state-management/auth.store'
+
+const replace = vi.fn()
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ replace }),
+  usePathname: () => '/dashboard',
+}))
+
+beforeEach(() => {
+  replace.mockClear()
+  useAuthStore.setState({ user: null, status: 'idle', isLoading: false, error: null })
+})
+
+describe('AuthGuard', () => {
+  it('renders nothing while status is loading', () => {
+    useAuthStore.setState({ status: 'loading' })
+    const { container } = render(<AuthGuard><div>secret</div></AuthGuard>)
+    expect(container.textContent).not.toContain('secret')
+  })
+  it('renders children when authenticated', () => {
+    useAuthStore.setState({ status: 'authenticated', user: { id: 'u', role: 'user' } })
+    render(<AuthGuard><div>secret</div></AuthGuard>)
+    expect(screen.getByText('secret')).toBeInTheDocument()
+  })
+  it('redirects to login when unauthenticated', () => {
+    useAuthStore.setState({ status: 'unauthenticated' })
+    render(<AuthGuard><div>secret</div></AuthGuard>)
+    expect(replace).toHaveBeenCalledWith(expect.stringContaining('/auth/login'))
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `npm run test -- guards`
+Expected: FAIL.
+
+- [ ] **Step 3: Create `frontend/lib/auth/guards.tsx`**
+
+```tsx
+'use client'
+
+import { useEffect } from 'react'
+import { useRouter, usePathname } from 'next/navigation'
+import { useAuthStore, useUserRole } from '@/lib/state-management/auth.store'
+import { LOGIN_PATH, DEFAULT_AUTHED_PATH } from '@/lib/auth/route-policy'
+import type { Role } from '@/lib/interfaces/auth.interface'
+
+export function useRequireAuth(): { ready: boolean } {
+  const status = useAuthStore((s) => s.status)
+  const router = useRouter()
+  const pathname = usePathname()
+
+  useEffect(() => {
+    if (status === 'unauthenticated') {
+      const url = `${LOGIN_PATH}?callbackUrl=${encodeURIComponent(pathname)}`
+      router.replace(url)
+    }
+  }, [status, router, pathname])
+
+  return { ready: status === 'authenticated' }
+}
+
+export function useRequireRole(role: Role): { ready: boolean; allowed: boolean } {
+  const { ready } = useRequireAuth()
+  const currentRole = useUserRole()
+  const router = useRouter()
+  const allowed = currentRole === role
+
+  useEffect(() => {
+    if (ready && !allowed) router.replace(DEFAULT_AUTHED_PATH)
+  }, [ready, allowed, router])
+
+  return { ready: ready && allowed, allowed }
+}
+
+export function AuthGuard({ children }: { children: React.ReactNode }) {
+  const { ready } = useRequireAuth()
+  if (!ready) return null
+  return <>{children}</>
+}
+
+export function RoleGuard({ role, children }: { role: Role; children: React.ReactNode }) {
+  const { ready } = useRequireRole(role)
+  if (!ready) return null
+  return <>{children}</>
+}
+```
+
+- [ ] **Step 4: Run to verify it passes**
+
+Run: `npm run test -- guards`
+Expected: PASS (3 tests).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add frontend/lib/auth/guards.tsx frontend/lib/auth/__tests__/guards.test.tsx
+git commit -m "feat(frontend): client auth + role guards"
+```
+
+---
+
+## Task 14: Auth pages — login, forgot-password, reset-password
+
+**Files:**
+- Rewrite: `frontend/components/login-form.tsx`, `frontend/app/auth/forgot-password/page.tsx`, `frontend/app/auth/reset-password/page.tsx`
+- Test: `frontend/components/__tests__/login-form.test.tsx`
+
+**Interfaces:**
+- Consumes: `useAuthStore` (`login`, `forgotPassword`, `resetPassword`), the Zod schemas, `react-hook-form`, `@hookform/resolvers/zod`, `ApiError`, `scorePassword`.
+- Produces: rewired `<LoginForm>` (no Google button), forgot/reset pages backed by the real flow.
+
+- [ ] **Step 1: Write the failing test `frontend/components/__tests__/login-form.test.tsx`**
+
+```tsx
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { LoginForm } from '@/components/login-form'
+import { useAuthStore } from '@/lib/state-management/auth.store'
+
+vi.mock('next/navigation', () => ({
+  useSearchParams: () => new URLSearchParams(''),
+  useRouter: () => ({ replace: vi.fn(), push: vi.fn() }),
+}))
+
+beforeEach(() => {
+  useAuthStore.setState({ status: 'idle', isLoading: false, error: null })
+})
+
+describe('LoginForm', () => {
+  it('has no Google login button', () => {
+    render(<LoginForm />)
+    expect(screen.queryByText(/Google/i)).not.toBeInTheDocument()
+  })
+  it('validates email format before calling login', async () => {
+    const login = vi.spyOn(useAuthStore.getState(), 'login').mockResolvedValue()
+    render(<LoginForm />)
+    await userEvent.type(screen.getByLabelText(/email/i), 'not-an-email')
+    await userEvent.type(screen.getByLabelText(/password/i), 'secret')
+    await userEvent.click(screen.getByRole('button', { name: /login/i }))
+    expect(login).not.toHaveBeenCalled()
+    expect(await screen.findByText(/valid email/i)).toBeInTheDocument()
+  })
+  it('calls login with valid credentials', async () => {
+    const login = vi.spyOn(useAuthStore.getState(), 'login').mockResolvedValue()
+    render(<LoginForm />)
+    await userEvent.type(screen.getByLabelText(/email/i), 'a@b.com')
+    await userEvent.type(screen.getByLabelText(/password/i), 'secret')
+    await userEvent.click(screen.getByRole('button', { name: /login/i }))
+    expect(login).toHaveBeenCalledWith({ email: 'a@b.com', password: 'secret' })
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `npm run test -- login-form`
+Expected: FAIL (old form still has Google button / raw useState).
+
+- [ ] **Step 3: Rewrite `frontend/components/login-form.tsx`**
+
+```tsx
+'use client'
+
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { useSearchParams } from 'next/navigation'
+import { toast } from 'sonner'
+import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
+import { useAuthStore } from '@/lib/state-management/auth.store'
+import { loginSchema, type LoginFormValues } from '@/lib/validations/auth.schema'
+import { ApiError } from '@/lib/http/api-client'
+
+export function LoginForm({ className, ...props }: React.ComponentProps<'div'>) {
+  const searchParams = useSearchParams()
+  const login = useAuthStore((s) => s.login)
+
+  const form = useForm<LoginFormValues>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: { email: '', password: '' },
+  })
+
+  const onSubmit = async (values: LoginFormValues) => {
+    try {
+      await login(values)
+      const callbackUrl = searchParams.get('callbackUrl') ?? '/dashboard'
+      // Hard navigation so the fresh refresh cookie reaches the middleware.
+      window.location.href = callbackUrl
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Invalid email or password.'
+      toast.error(message)
+    }
+  }
+
+  const { isSubmitting } = form.formState
+
+  return (
+    <div className={cn('flex flex-col gap-6', className)} {...props}>
+      <Card>
+        <CardHeader className="text-center">
+          <CardTitle className="text-xl">Welcome back</CardTitle>
+          <CardDescription>Sign in with your email and password</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={form.handleSubmit(onSubmit)} noValidate>
+            <FieldGroup>
+              <Field data-invalid={form.formState.errors.email ? 'true' : undefined}>
+                <FieldLabel htmlFor="email">Email</FieldLabel>
+                <Input id="email" type="email" autoComplete="email"
+                  placeholder="m@example.com" {...form.register('email')} />
+                {form.formState.errors.email && <FieldError>{form.formState.errors.email.message}</FieldError>}
+              </Field>
+
+              <Field data-invalid={form.formState.errors.password ? 'true' : undefined}>
+                <div className="flex items-center">
+                  <FieldLabel htmlFor="password">Password</FieldLabel>
+                  <a href="/auth/forgot-password" className="ml-auto text-sm underline-offset-4 hover:underline">
+                    Forgot your password?
+                  </a>
+                </div>
+                <Input id="password" type="password" autoComplete="current-password"
+                  {...form.register('password')} />
+                {form.formState.errors.password && <FieldError>{form.formState.errors.password.message}</FieldError>}
+              </Field>
+
+              <Field>
+                <Button type="submit" disabled={isSubmitting}>
+                  {isSubmitting ? 'Signing in…' : 'Login'}
+                </Button>
+                <FieldDescription className="text-center">
+                  Accounts are provisioned by an administrator.
+                </FieldDescription>
+              </Field>
+            </FieldGroup>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+```
+
+- [ ] **Step 4: Rewrite `frontend/app/auth/forgot-password/page.tsx`**
+
+```tsx
+'use client'
+
+import { useState } from 'react'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { toast } from 'sonner'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Field, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
+import { useAuthStore } from '@/lib/state-management/auth.store'
+import { forgotPasswordSchema, type ForgotPasswordFormValues } from '@/lib/validations/auth.schema'
+
+export default function ForgotPasswordPage() {
+  const forgotPassword = useAuthStore((s) => s.forgotPassword)
+  const [sent, setSent] = useState(false)
+  const form = useForm<ForgotPasswordFormValues>({
+    resolver: zodResolver(forgotPasswordSchema),
+    defaultValues: { email: '' },
+  })
+
+  const onSubmit = async (values: ForgotPasswordFormValues) => {
+    // Backend always returns 204 (no account enumeration); show the same message either way.
+    try { await forgotPassword(values.email) } catch { /* swallow */ }
+    setSent(true)
+    toast.success('If that email exists, a reset code has been sent.')
+  }
+
+  return (
+    <div className="flex min-h-svh flex-col items-center justify-center gap-6 bg-muted p-6 md:p-10">
+      <div className="w-full max-w-sm">
+        <Card>
+          <CardHeader className="text-center">
+            <CardTitle className="text-xl">Reset your password</CardTitle>
+            <CardDescription>We&apos;ll email you a 6-digit code</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {sent ? (
+              <p className="text-sm text-muted-foreground">
+                Check your inbox for a reset code, then{' '}
+                <a className="underline" href="/auth/reset-password">enter it here</a>.
+              </p>
+            ) : (
+              <form onSubmit={form.handleSubmit(onSubmit)} noValidate>
+                <FieldGroup>
+                  <Field data-invalid={form.formState.errors.email ? 'true' : undefined}>
+                    <FieldLabel htmlFor="email">Email</FieldLabel>
+                    <Input id="email" type="email" autoComplete="email" {...form.register('email')} />
+                    {form.formState.errors.email && <FieldError>{form.formState.errors.email.message}</FieldError>}
+                  </Field>
+                  <Button type="submit" disabled={form.formState.isSubmitting}>Send reset code</Button>
+                </FieldGroup>
+              </form>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  )
+}
+```
+
+- [ ] **Step 5: Rewrite `frontend/app/auth/reset-password/page.tsx`**
+
+```tsx
+'use client'
+
+import { Suspense } from 'react'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { useRouter, useSearchParams } from 'next/navigation'
+import { toast } from 'sonner'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Field, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
+import { useAuthStore } from '@/lib/state-management/auth.store'
+import { resetPasswordSchema, type ResetPasswordFormValues } from '@/lib/validations/auth.schema'
+import { scorePassword } from '@/lib/auth/password-strength'
+import { ApiError } from '@/lib/http/api-client'
+
+function ResetPasswordForm() {
+  const router = useRouter()
+  const searchParams = useSearchParams()
+  const resetPassword = useAuthStore((s) => s.resetPassword)
+
+  const form = useForm<ResetPasswordFormValues>({
+    resolver: zodResolver(resetPasswordSchema),
+    defaultValues: { email: searchParams.get('email') ?? '', code: '', newPassword: '', confirmPassword: '' },
+  })
+
+  const pw = form.watch('newPassword')
+  const strength = scorePassword(pw)
+
+  const onSubmit = async (values: ResetPasswordFormValues) => {
+    try {
+      await resetPassword({ email: values.email, code: values.code, newPassword: values.newPassword })
+      toast.success('Password reset. Please sign in.')
+      router.replace('/auth/login')
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Reset failed. Check your code and try again.')
+    }
+  }
+
+  return (
+    <form onSubmit={form.handleSubmit(onSubmit)} noValidate>
+      <FieldGroup>
+        <Field data-invalid={form.formState.errors.email ? 'true' : undefined}>
+          <FieldLabel htmlFor="email">Email</FieldLabel>
+          <Input id="email" type="email" autoComplete="email" {...form.register('email')} />
+          {form.formState.errors.email && <FieldError>{form.formState.errors.email.message}</FieldError>}
+        </Field>
+        <Field data-invalid={form.formState.errors.code ? 'true' : undefined}>
+          <FieldLabel htmlFor="code">6-digit code</FieldLabel>
+          <Input id="code" inputMode="numeric" maxLength={6} {...form.register('code')} />
+          {form.formState.errors.code && <FieldError>{form.formState.errors.code.message}</FieldError>}
+        </Field>
+        <Field data-invalid={form.formState.errors.newPassword ? 'true' : undefined}>
+          <FieldLabel htmlFor="newPassword">New password</FieldLabel>
+          <Input id="newPassword" type="password" autoComplete="new-password" {...form.register('newPassword')} />
+          {pw && <p className="text-xs text-muted-foreground">Strength: {strength.label}</p>}
+          {form.formState.errors.newPassword && <FieldError>{form.formState.errors.newPassword.message}</FieldError>}
+        </Field>
+        <Field data-invalid={form.formState.errors.confirmPassword ? 'true' : undefined}>
+          <FieldLabel htmlFor="confirmPassword">Confirm password</FieldLabel>
+          <Input id="confirmPassword" type="password" autoComplete="new-password" {...form.register('confirmPassword')} />
+          {form.formState.errors.confirmPassword && <FieldError>{form.formState.errors.confirmPassword.message}</FieldError>}
+        </Field>
+        <Button type="submit" disabled={form.formState.isSubmitting}>Reset password</Button>
+      </FieldGroup>
+    </form>
+  )
+}
+
+export default function ResetPasswordPage() {
+  return (
+    <div className="flex min-h-svh flex-col items-center justify-center gap-6 bg-muted p-6 md:p-10">
+      <div className="w-full max-w-sm">
+        <Card>
+          <CardHeader className="text-center">
+            <CardTitle className="text-xl">Set a new password</CardTitle>
+            <CardDescription>Enter the code we emailed you</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Suspense><ResetPasswordForm /></Suspense>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  )
+}
+```
+
+- [ ] **Step 6: Run tests + typecheck**
+
+Run: `npm run test -- login-form && npm run typecheck`
+Expected: tests PASS; typecheck clean.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add frontend/components/login-form.tsx frontend/app/auth/forgot-password/page.tsx frontend/app/auth/reset-password/page.tsx frontend/components/__tests__/login-form.test.tsx
+git commit -m "feat(frontend): rewire login + forgot/reset password to real flow"
+```
+
+---
+
+## Task 15: Account page (change password + sessions)
+
+> Per design §13 open item 2, session management is in v1. If the user later defers it, keep only the change-password card.
+
+**Files:**
+- Create: `frontend/app/(protected)/account/page.tsx`, `frontend/app/(protected)/layout.tsx`, `frontend/components/account/change-password-card.tsx`, `frontend/components/account/sessions-card.tsx`, `frontend/lib/hooks/use-sessions.ts`
+- Test: `frontend/components/account/__tests__/change-password-card.test.tsx`
+
+**Interfaces:**
+- Consumes: `useAuthStore.changePassword`, `authService.getSessions`/`logoutAll`, SWR, `AuthGuard`, `scorePassword`.
+- Produces: `useSessions()` (SWR hook) returning `{ sessions, isLoading, mutate }`.
+
+- [ ] **Step 1: Create `frontend/app/(protected)/layout.tsx`** (guarded segment)
+
+```tsx
+'use client'
+import { AuthGuard } from '@/lib/auth/guards'
+
+export default function ProtectedLayout({ children }: { children: React.ReactNode }) {
+  return <AuthGuard>{children}</AuthGuard>
+}
+```
+
+- [ ] **Step 2: Create `frontend/lib/hooks/use-sessions.ts`**
+
+```ts
+import useSWR from 'swr'
+import type { SessionSummary } from '@/lib/interfaces/auth.interface'
+
+export function useSessions() {
+  const { data, isLoading, mutate } = useSWR<SessionSummary[]>('/auth/sessions')
+  return { sessions: data ?? [], isLoading, mutate }
+}
+```
+
+- [ ] **Step 3: Write the failing test `frontend/components/account/__tests__/change-password-card.test.tsx`**
+
+```tsx
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { ChangePasswordCard } from '@/components/account/change-password-card'
+import { useAuthStore } from '@/lib/state-management/auth.store'
+
+beforeEach(() => {
+  useAuthStore.setState({ status: 'authenticated', isLoading: false, error: null })
+})
+
+describe('ChangePasswordCard', () => {
+  it('rejects a new password under 12 chars', async () => {
+    const changePassword = vi.spyOn(useAuthStore.getState(), 'changePassword').mockResolvedValue()
+    render(<ChangePasswordCard />)
+    await userEvent.type(screen.getByLabelText(/current password/i), 'oldpassword12')
+    await userEvent.type(screen.getByLabelText(/^new password/i), 'short')
+    await userEvent.type(screen.getByLabelText(/confirm/i), 'short')
+    await userEvent.click(screen.getByRole('button', { name: /change password/i }))
+    expect(changePassword).not.toHaveBeenCalled()
+    expect(await screen.findByText(/at least 12 characters/i)).toBeInTheDocument()
+  })
+})
+```
+
+- [ ] **Step 4: Run to verify it fails**
+
+Run: `npm run test -- change-password-card`
+Expected: FAIL.
+
+- [ ] **Step 5: Create `frontend/components/account/change-password-card.tsx`**
+
+```tsx
+'use client'
+
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { toast } from 'sonner'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Field, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
+import { useAuthStore } from '@/lib/state-management/auth.store'
+import { changePasswordSchema, type ChangePasswordFormValues } from '@/lib/validations/auth.schema'
+import { scorePassword } from '@/lib/auth/password-strength'
+import { ApiError } from '@/lib/http/api-client'
+
+export function ChangePasswordCard() {
+  const changePassword = useAuthStore((s) => s.changePassword)
+  const form = useForm<ChangePasswordFormValues>({
+    resolver: zodResolver(changePasswordSchema),
+    defaultValues: { currentPassword: '', newPassword: '', confirmPassword: '' },
+  })
+  const strength = scorePassword(form.watch('newPassword'))
+
+  const onSubmit = async (values: ChangePasswordFormValues) => {
+    try {
+      await changePassword(values.currentPassword, values.newPassword)
+      // changePassword revokes all sessions + clears local state; send to login.
+      toast.success('Password changed — please sign in again.')
+      window.location.href = '/auth/login'
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Could not change password.')
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Change password</CardTitle>
+        <CardDescription>You&apos;ll be signed out of all sessions afterwards.</CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={form.handleSubmit(onSubmit)} noValidate>
+          <FieldGroup>
+            <Field data-invalid={form.formState.errors.currentPassword ? 'true' : undefined}>
+              <FieldLabel htmlFor="currentPassword">Current password</FieldLabel>
+              <Input id="currentPassword" type="password" autoComplete="current-password" {...form.register('currentPassword')} />
+              {form.formState.errors.currentPassword && <FieldError>{form.formState.errors.currentPassword.message}</FieldError>}
+            </Field>
+            <Field data-invalid={form.formState.errors.newPassword ? 'true' : undefined}>
+              <FieldLabel htmlFor="newPassword">New password</FieldLabel>
+              <Input id="newPassword" type="password" autoComplete="new-password" {...form.register('newPassword')} />
+              {form.watch('newPassword') && <p className="text-xs text-muted-foreground">Strength: {strength.label}</p>}
+              {form.formState.errors.newPassword && <FieldError>{form.formState.errors.newPassword.message}</FieldError>}
+            </Field>
+            <Field data-invalid={form.formState.errors.confirmPassword ? 'true' : undefined}>
+              <FieldLabel htmlFor="confirmPassword">Confirm new password</FieldLabel>
+              <Input id="confirmPassword" type="password" autoComplete="new-password" {...form.register('confirmPassword')} />
+              {form.formState.errors.confirmPassword && <FieldError>{form.formState.errors.confirmPassword.message}</FieldError>}
+            </Field>
+            <Button type="submit" disabled={form.formState.isSubmitting}>Change password</Button>
+          </FieldGroup>
+        </form>
+      </CardContent>
+    </Card>
+  )
+}
+```
+
+- [ ] **Step 6: Create `frontend/components/account/sessions-card.tsx`**
+
+```tsx
+'use client'
+
+import { toast } from 'sonner'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { useSessions } from '@/lib/hooks/use-sessions'
+import { authService } from '@/lib/services/auth.service'
+import { useAuthStore } from '@/lib/state-management/auth.store'
+
+export function SessionsCard() {
+  const { sessions, isLoading, mutate } = useSessions()
+  const logout = useAuthStore((s) => s.logout)
+
+  const revokeAllOthers = async () => {
+    try {
+      await authService.logoutAll()
+      toast.success('All sessions signed out. Please sign in again.')
+      await logout()
+      window.location.href = '/auth/login'
+    } catch {
+      toast.error('Could not revoke sessions.')
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Active sessions</CardTitle>
+        <CardDescription>Devices currently signed in to your account.</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {isLoading ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : (
+          <ul className="space-y-2 text-sm">
+            {sessions.map((s) => (
+              <li key={s.id} className="flex justify-between gap-4 border-b pb-2">
+                <span className="truncate">{s.userAgent ?? 'Unknown device'}</span>
+                <span className="text-muted-foreground">{s.ip ?? '—'}</span>
+              </li>
+            ))}
+            {sessions.length === 0 && <li className="text-muted-foreground">No sessions.</li>}
+          </ul>
+        )}
+        <Button variant="destructive" onClick={revokeAllOthers}>Sign out of all sessions</Button>
+      </CardContent>
+    </Card>
+  )
+}
+```
+
+- [ ] **Step 7: Create `frontend/app/(protected)/account/page.tsx`**
+
+```tsx
+import { ChangePasswordCard } from '@/components/account/change-password-card'
+import { SessionsCard } from '@/components/account/sessions-card'
+
+export default function AccountPage() {
+  return (
+    <div className="mx-auto flex max-w-2xl flex-col gap-6 p-6">
+      <h1 className="text-2xl font-semibold">Account</h1>
+      <ChangePasswordCard />
+      <SessionsCard />
+    </div>
+  )
+}
+```
+
+- [ ] **Step 8: Run tests + typecheck**
+
+Run: `npm run test -- change-password-card && npm run typecheck`
+Expected: PASS; typecheck clean.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add "frontend/app/(protected)" frontend/components/account/ frontend/lib/hooks/use-sessions.ts frontend/components/account/__tests__/
+git commit -m "feat(frontend): account page — change password + session management"
+```
+
+---
+
+## Task 16: Agent service + interface correction
+
+**Files:**
+- Create: `frontend/lib/services/agent.service.ts`
+- Rewrite: `frontend/lib/interfaces/mastra.interface.ts`
+- Test: `frontend/lib/services/__tests__/agent.service.test.ts`
+
+**Interfaces:**
+- Consumes: `apiClient`, `Paginated`.
+- Produces: types `RunStatus`, `ActionType`, `ApprovalStatus`, `DeliveryChannel`, `PendingApproval`, `ChatResult`, `Conversation`; and `agentService` with `chat({conversationId?, message})`, `listConversations(page, limit)`, `listApprovals()`, `decideApproval(id, {approved, note?})`.
+
+- [ ] **Step 1: Rewrite `frontend/lib/interfaces/mastra.interface.ts`** (replace fictional threads/messages types)
+
+```ts
+export type RunStatus = 'queued' | 'running' | 'awaiting_approval' | 'succeeded' | 'failed' | 'cancelled'
+export type ActionType = 'send_email' | 'db_write' | 'external_api' | 'other'
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'executed' | 'failed'
+export type DeliveryChannel = 'conversation' | 'email' | 'none'
+
+export interface PendingApproval {
+  toolCallId: string
+  actionType: ActionType
+  title: string
+  payload: Record<string, unknown>
+}
+
+export interface ChatResult {
+  conversationId: string
+  runId: string
+  text: string
+  pendingApprovals: PendingApproval[]
+}
+
+export interface Conversation {
+  id: string
+  title: string | null
+  createdAt: string
+  updatedAt: string
+}
+```
+
+- [ ] **Step 2: Write the failing test `frontend/lib/services/__tests__/agent.service.test.ts`**
+
+```ts
+import { describe, it, expect, beforeEach } from 'vitest'
+import MockAdapter from 'axios-mock-adapter'
+import { apiClient } from '@/lib/http/api-client'
+import { agentService } from '@/lib/services/agent.service'
+
+const mock = new MockAdapter(apiClient)
+beforeEach(() => mock.reset())
+
+describe('agentService', () => {
+  it('chat posts to /agent/chat', async () => {
+    mock.onPost('/agent/chat').reply(200, { conversationId: 'c1', runId: 'r1', text: 'hi', pendingApprovals: [] })
+    const res = await agentService.chat({ message: 'hello' })
+    expect(res.conversationId).toBe('c1')
+    expect(res.text).toBe('hi')
+  })
+  it('listConversations passes pagination', async () => {
+    mock.onGet('/agent/conversations').reply((config) => {
+      expect(config.params).toEqual({ page: 2, limit: 10 })
+      return [200, { data: [], total: 0, page: 2, limit: 10 }]
+    })
+    const res = await agentService.listConversations(2, 10)
+    expect(res.page).toBe(2)
+  })
+})
+```
+
+- [ ] **Step 3: Run to verify it fails**
+
+Run: `npm run test -- agent.service`
+Expected: FAIL.
+
+- [ ] **Step 4: Create `frontend/lib/services/agent.service.ts`**
+
+```ts
+import { apiClient } from '@/lib/http/api-client'
+import type { ChatResult, Conversation, PendingApproval } from '@/lib/interfaces/mastra.interface'
+import type { Paginated } from '@/lib/interfaces/auth.interface'
+
+export const agentService = {
+  chat(input: { conversationId?: string; message: string }): Promise<ChatResult> {
+    return apiClient.post<ChatResult>('/agent/chat', input).then((r) => r.data)
+  },
+  listConversations(page = 1, limit = 20): Promise<Paginated<Conversation>> {
+    return apiClient
+      .get<Paginated<Conversation>>('/agent/conversations', { params: { page, limit } })
+      .then((r) => r.data)
+  },
+  listApprovals(): Promise<PendingApproval[]> {
+    return apiClient.get<PendingApproval[]>('/agent/approvals').then((r) => r.data)
+  },
+  decideApproval(id: string, input: { approved: boolean; note?: string }): Promise<unknown> {
+    return apiClient.post(`/agent/approvals/${id}`, input).then((r) => r.data)
+  },
+}
+```
+
+- [ ] **Step 5: Run to verify it passes + typecheck**
+
+Run: `npm run test -- agent.service && npm run typecheck`
+Expected: PASS; typecheck clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add frontend/lib/services/agent.service.ts frontend/lib/interfaces/mastra.interface.ts frontend/lib/services/__tests__/agent.service.test.ts
+git commit -m "feat(frontend): agent service on real /agent/* routes"
+```
+
+---
+
+## Task 17: Dashboard shell + nav rewire
+
+**Files:**
+- Modify/Create: `frontend/app/dashboard/page.tsx`, `frontend/app/dashboard/layout.tsx`
+- Test: `frontend/app/dashboard/__tests__/page.test.tsx`
+
+**Interfaces:**
+- Consumes: `AuthGuard`, `useUser`, `useAuthStore.logout`.
+- Produces: a minimal protected dashboard that proves the guard end-to-end and offers logout.
+
+- [ ] **Step 1: Replace `frontend/app/dashboard/layout.tsx`** (guard the segment)
+
+```tsx
+'use client'
+import { AuthGuard } from '@/lib/auth/guards'
+
+export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  return <AuthGuard>{children}</AuthGuard>
+}
+```
+
+- [ ] **Step 2: Replace `frontend/app/dashboard/page.tsx`** (minimal shell)
+
+```tsx
+'use client'
+
+import { Button } from '@/components/ui/button'
+import { useUser, useAuthStore } from '@/lib/state-management/auth.store'
+import { deriveDisplayName } from '@/lib/auth/display-name'
+
+export default function DashboardPage() {
+  const user = useUser()
+  const logout = useAuthStore((s) => s.logout)
+  return (
+    <div className="flex min-h-svh flex-col gap-4 p-8">
+      <h1 className="text-2xl font-semibold">Dashboard</h1>
+      <p className="text-muted-foreground">
+        Signed in as <strong>{user ? deriveDisplayName(user) : '…'}</strong> ({user?.role})
+      </p>
+      <div className="flex gap-3">
+        <Button asChild variant="outline"><a href="/account">Account</a></Button>
+        <Button variant="destructive" onClick={() => { void logout().then(() => (window.location.href = '/auth/login')) }}>
+          Log out
+        </Button>
+      </div>
+    </div>
+  )
+}
+```
+
+- [ ] **Step 3: Create `frontend/lib/auth/display-name.ts`**
+
+```ts
+import type { CurrentUser } from '@/lib/interfaces/auth.interface'
+
+/** Stable label for a user without a display-name field. */
+export function deriveDisplayName(user: CurrentUser): string {
+  if (user.email) return user.email.split('@')[0]
+  return 'User'
+}
+```
+
+- [ ] **Step 4: Write the test `frontend/app/dashboard/__tests__/page.test.tsx`**
+
+```tsx
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import DashboardPage from '@/app/dashboard/page'
+import { useAuthStore } from '@/lib/state-management/auth.store'
+
+beforeEach(() => {
+  useAuthStore.setState({ status: 'authenticated', user: { id: 'u1', role: 'admin', email: 'jane@acme.com' } })
+})
+
+describe('DashboardPage', () => {
+  it('shows the derived display name and role', () => {
+    render(<DashboardPage />)
+    expect(screen.getByText(/jane/)).toBeInTheDocument()
+    expect(screen.getByText(/admin/)).toBeInTheDocument()
+  })
+})
+```
+
+- [ ] **Step 5: Run tests + typecheck**
+
+Run: `npm run test -- dashboard && npm run typecheck`
+Expected: PASS; typecheck clean.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add frontend/app/dashboard/layout.tsx frontend/app/dashboard/page.tsx frontend/lib/auth/display-name.ts frontend/app/dashboard/__tests__/
+git commit -m "feat(frontend): minimal guarded dashboard shell + display-name helper"
+```
+
+---
+
+## Task 18: Pruning (destructive) — remove fiction & demo scaffolding
+
+> Do this LATE so nothing still imports the deleted files. Gate strictly on a green build + tests.
+
+**Files (delete):**
+- Domain state/services/interfaces (keep only `auth`, `app`, `shared`, `mastra`): `frontend/lib/state-management/{call,company,contact,cost,daily-event-generation,daily-summary,email,event,income,knowledge,notification,plan,project,scheduler,task}.store.ts`; same basenames under `frontend/lib/services/*.service.ts` (keep `auth.service.ts`, `agent.service.ts`); same basenames under `frontend/lib/interfaces/*.interface.ts` (keep `auth`, `app`, `shared`, `mastra`).
+- `frontend/lib/services/mastra.service.ts` (replaced by `agent.service.ts`).
+- `frontend/lib/sessionControl/` (vestigial).
+- Auth pages/flows: `frontend/app/auth/signup/`, `frontend/app/auth/verify-email/`, `frontend/app/auth/resend-verification/`, `frontend/app/auth/callback/`.
+- Demo components: `frontend/components/{signup-form,music-player,chart-area-interactive,section-cards,data-table,team-switcher,force-modal}.tsx`.
+- Demo pages/mock data: `frontend/app/data-links/`, `frontend/app/data-links-modal/`, `frontend/app/home-page/`, `frontend/app/profile/`, `frontend/app/dashboard/data.json`, `frontend/app/dashboard/calls/`.
+- Demo nav/sidebar chrome (wired to the removed `route` config + deleted domain stores; the v1 dashboard shell in Task 17 does not use them, so once the fiction layer is deleted they are orphaned AND break `tsc` because they import removed modules). Confirm orphaned/broken via the Step 1 grep, then remove: `frontend/components/{app-sidebar,nav-main,nav-user,nav-projects,nav-secondary,nav-documents,site-header}.tsx` and `frontend/lib/routes/routes.tsx`. Real navigation is rebuilt on live routes when domain features land (design §13). **Keep** generic pieces that do NOT import removed code: `theme-provider`, `global-loading`, `global-modal`; keep `notification-drawer`/`notification-panel` only if they don't import a deleted store — otherwise remove them too.
+
+- [ ] **Step 1: Grep for references to each candidate before deleting**
+
+Run (for each basename, e.g. `music-player`):
+```bash
+cd frontend
+grep -rn "music-player\|team-switcher\|section-cards\|chart-area-interactive\|data-table\|force-modal\|signup-form\|sessionControl\|mastra.service\|/data-links\|home-page\|profile/settings" app components lib --include=*.ts --include=*.tsx | grep -v "__tests__"
+```
+Expected: any hit that is NOT itself a file being deleted must be resolved first (remove the import). Note: `app-sidebar`, `nav-*` may import deleted demo components — fix or delete those imports as encountered.
+
+- [ ] **Step 2: Delete the fiction domain layer**
+
+```bash
+cd frontend
+for n in call company contact cost daily-event-generation daily-summary email event income knowledge notification plan project scheduler task; do
+  rm -f "lib/state-management/$n.store.ts" "lib/services/$n.service.ts" "lib/interfaces/$n.interface.ts"
+done
+rm -f lib/services/mastra.service.ts
+rm -rf lib/sessionControl
+```
+
+- [ ] **Step 3: Delete removed auth pages + demo pages/components**
+
+```bash
+cd frontend
+rm -rf app/auth/signup app/auth/verify-email app/auth/resend-verification app/auth/callback
+rm -rf app/data-links app/data-links-modal app/home-page app/profile
+rm -rf app/dashboard/calls
+rm -f app/dashboard/data.json
+rm -f components/signup-form.tsx components/music-player.tsx components/chart-area-interactive.tsx \
+      components/section-cards.tsx components/data-table.tsx components/team-switcher.tsx components/force-modal.tsx
+```
+
+- [ ] **Step 4: Delete orphaned nav/chrome, then resolve any remaining broken imports**
+
+First remove the confirmed-orphaned demo chrome from the grep in Step 1:
+```bash
+cd frontend
+rm -f components/app-sidebar.tsx components/nav-main.tsx components/nav-user.tsx \
+      components/nav-projects.tsx components/nav-secondary.tsx components/nav-documents.tsx \
+      components/site-header.tsx
+rm -f lib/routes/routes.tsx
+# Remove notification-drawer/panel ONLY if Step 1 grep showed them importing a deleted store:
+# rm -f components/notification-drawer.tsx components/notification-panel.tsx
+```
+Then:
+
+Run: `npm run typecheck`
+Expected: clean. **Decision rule for any remaining error:** if the breaking file is demo chrome wired to removed code and unused by the foundation → delete it; if it is a generic/reusable file → open it and remove only the dead import/usage. Re-run until clean.
+
+- [ ] **Step 5: Full test + build gate**
+
+Run: `npm run test && npm run typecheck && npm run build`
+Expected: tests PASS; typecheck clean; production build succeeds.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add -A frontend
+git commit -m "chore(frontend): prune fictional domain layer, demo pages/components, dead auth flows"
+```
+
+---
+
+## Task 19: Env example + final verification
+
+**Files:**
+- Modify: `frontend/.env.example`
+
+**Interfaces:** none (finalization).
+
+- [ ] **Step 1: Update `frontend/.env.example`**
+
+```dotenv
+# Base URL of the backend API, reachable from the browser. No trailing slash, NO /api suffix.
+NEXT_PUBLIC_API_URL=http://localhost:3000
+
+# App display name (optional; defaults to "Cybernetics").
+NEXT_PUBLIC_APP_NAME=Cybernetics
+
+# Server-side base URL for middleware / route handlers (can equal NEXT_PUBLIC_API_URL in dev).
+API_URL=http://localhost:3000
+```
+
+- [ ] **Step 2: Final full verification**
+
+Run:
+```bash
+cd frontend
+npm run test
+npm run typecheck
+npm run lint
+npm run build
+```
+Expected: all green.
+
+- [ ] **Step 3: Manual smoke (with backend running on :3000)**
+
+Verify by hand (see design §4):
+1. Visit `/dashboard` while logged out → redirected to `/auth/login?callbackUrl=%2Fdashboard`.
+2. Log in with a seeded admin (`SEED_ADMIN_EMAIL`/`SEED_ADMIN_PASSWORD`) → lands on `/dashboard`, shows email + role.
+3. Reload `/dashboard` → stays authenticated (bootstrap refresh works; `cbn_rt` cookie present).
+4. Visit `/auth/login` while logged in → redirected to `/dashboard`.
+5. `/account` → change password → forced back to `/auth/login` with a toast.
+6. Log out → `cbn_rt` cleared, `/dashboard` redirects to login.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add frontend/.env.example
+git commit -m "docs(frontend): update .env.example to real backend contract"
+```
+
+---
+
+## Self-Review Notes (traceability to design)
+
+- §2 D1 (login-only) → Tasks 14, 18 (signup/OAuth/verify removed). D2 (user={id,role}, account page) → Tasks 3, 15, 17. D3 (memory+cookie+middleware+refresh) → Tasks 5, 6, 7, 11, 12. D4 (Zustand+SWR) → Tasks 9, 12, 15. D5 (password 12–200 + strength) → Tasks 3, 4, 14, 15. D6 (types-only) → Task 3.
+- §4 lifecycle → Tasks 6, 7 (single-flight refresh), 9 (bootstrap), 12 (provider). §5 RBAC/guards → Tasks 10, 11, 13. §7 errors → Task 7 (`ApiError.fieldErrors`). §8 env → Task 2. §9 agent → Task 16. §10 pruning → Task 18. §11 folder structure → matches created paths.
+- HARD RULE (no backend changes) → enforced in Global Constraints; every route used is verified-existing in the design's contract map.
