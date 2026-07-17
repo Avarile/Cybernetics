@@ -90,7 +90,7 @@ export class AuthController {
 
   @Get('me')
   me(@CurrentUser() user: Principal) {
-    return user;
+    return this.auth.getProfile(user);
   }
 
   @Get('sessions')

@@ -95,6 +95,36 @@ describe('AuthService', () => {
     });
   });
 
+  describe('getProfile', () => {
+    it('enriches the principal with email and display name from the DB', async () => {
+      users.findActiveById.mockResolvedValueOnce(
+        makeUser({ id: 'u1', role: 'admin', email: 'jane@acme.com', displayName: 'Jane Doe' }),
+      );
+      await expect(service.getProfile({ id: 'u1', role: 'admin' })).resolves.toEqual({
+        id: 'u1',
+        role: 'admin',
+        email: 'jane@acme.com',
+        displayName: 'Jane Doe',
+      });
+    });
+
+    it('returns the bare principal for a non-user caller (no users row)', async () => {
+      users.findActiveById.mockResolvedValueOnce(null);
+      await expect(service.getProfile({ id: 'svc-1', role: 'agent' })).resolves.toEqual({
+        id: 'svc-1',
+        role: 'agent',
+      });
+    });
+
+    it('returns the bare principal for the system caller (id === null)', async () => {
+      await expect(service.getProfile({ id: null, role: 'agent' })).resolves.toEqual({
+        id: null,
+        role: 'agent',
+      });
+      expect(users.findActiveById).not.toHaveBeenCalled();
+    });
+  });
+
   describe('login', () => {
     it('issues a pair, persists a session, and stamps login', async () => {
       const pair = await service.login(makeUser(), { ip: '1.2.3.4' });

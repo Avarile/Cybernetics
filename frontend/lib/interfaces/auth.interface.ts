@@ -7,11 +7,13 @@ export interface TokenPair {
   expiresIn: number
 }
 
-/** GET /auth/me → { id, role }. `email` is populated only if the JWT carries the claim. */
+/** GET /auth/me → the acting user's profile. `email`/`displayName` are absent for
+ *  non-user callers (e.g. service credentials), which have no users row. */
 export interface CurrentUser {
   id: string
   role: Role
   email?: string
+  displayName?: string | null
 }
 
 /** GET /auth/sessions → SessionSummary[] */

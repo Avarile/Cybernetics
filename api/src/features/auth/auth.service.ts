@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
+import type { Principal } from '../../common/principal';
 import type { UserRow } from '../../infrastructure/database/schema/identity.schema';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { UserRepository } from '../users/user.repository';
-import type { TokenPair } from './auth.types';
+import type { TokenPair, UserProfile } from './auth.types';
 import { PasswordService } from './password.service';
 import { SessionRepository } from './session.repository';
 import { TokenService } from './token.service';
@@ -31,6 +32,23 @@ export class AuthService {
     private readonly passwords: PasswordService,
     private readonly errors: ExceptionService,
   ) {}
+
+  /**
+   * Full identity for GET /auth/me: the principal plus the user's email and
+   * display name loaded from the DB. Non-user callers (service credentials)
+   * have no users row, so they get the bare principal back.
+   */
+  async getProfile(principal: Principal): Promise<UserProfile> {
+    if (!principal.id) return principal;
+    const user = await this.users.findActiveById(principal.id);
+    if (!user) return principal;
+    return {
+      id: user.id,
+      role: user.role,
+      email: user.email,
+      displayName: user.displayName,
+    };
+  }
 
   /** Used by LocalStrategy. Uniform 401 — never reveals which factor failed. */
   async validateUser(email: string, password: string): Promise<UserRow> {
