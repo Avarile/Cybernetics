@@ -1,79 +1,31 @@
 import { apiClient } from '@/lib/http/api-client'
 import type {
-  IApiResponse,
-  ILoginInput,
-  IRegisterInput,
-  IUpdateProfileInput,
-  IRbacData,
-  IUser,
+  CurrentUser, SessionSummary, TokenPair, ILoginInput, IResetPasswordInput,
 } from '@/lib/interfaces/auth.interface'
 
 export const authService = {
-  login(input: ILoginInput): Promise<IApiResponse<string>> {
-    return apiClient
-      .post<IApiResponse<string>>('/auth/login/local', {
-        email: input.email,
-        password: input.password,
-      })
-      .then((r) => r.data)
+  login(input: ILoginInput): Promise<TokenPair> {
+    return apiClient.post<TokenPair>('/auth/login', input).then((r) => r.data)
   },
-
-  register(input: IRegisterInput): Promise<IApiResponse<IUser>> {
-    return apiClient
-      .post<IApiResponse<IUser>>('/auth/register/local', {
-        email: input.email,
-        userName: input.userName,
-        password: input.password,
-        // confirmPassword intentionally excluded — backend derives it
-      })
-      .then((r) => r.data)
+  logout(refreshToken: string): Promise<void> {
+    return apiClient.post('/auth/logout', { refreshToken }).then(() => undefined)
   },
-
-  logout(): Promise<IApiResponse<void>> {
-    return apiClient.post<IApiResponse<void>>('/auth/logout').then((r) => r.data)
+  logoutAll(): Promise<void> {
+    return apiClient.post('/auth/logout-all').then(() => undefined)
   },
-
-  getCurrentUser(): Promise<IApiResponse<IUser>> {
-    return apiClient.get<IApiResponse<IUser>>('/current-user/get').then((r) => r.data)
+  getMe(): Promise<CurrentUser> {
+    return apiClient.get<CurrentUser>('/auth/me').then((r) => r.data)
   },
-
-  getRbac(): Promise<IApiResponse<IRbacData>> {
-    return apiClient.get<IApiResponse<IRbacData>>('/current-user/rbac').then((r) => r.data)
+  getSessions(): Promise<SessionSummary[]> {
+    return apiClient.get<SessionSummary[]>('/auth/sessions').then((r) => r.data)
   },
-
-  updateProfile(data: IUpdateProfileInput): Promise<IApiResponse<IUser>> {
-    return apiClient
-      .post<IApiResponse<IUser>>('/current-user/update', data)
-      .then((r) => r.data)
+  changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    return apiClient.patch('/auth/password', { currentPassword, newPassword }).then(() => undefined)
   },
-
-  updatePassword(currentPassword: string, newPassword: string): Promise<IApiResponse<void>> {
-    return apiClient
-      .post<IApiResponse<void>>('/current-user/update-password', { currentPassword, newPassword })
-      .then((r) => r.data)
+  forgotPassword(email: string): Promise<void> {
+    return apiClient.post('/auth/forgot-password', { email }).then(() => undefined)
   },
-
-  verifyEmail(token: string): Promise<IApiResponse<void>> {
-    return apiClient
-      .post<IApiResponse<void>>('/auth/verify-email', { token })
-      .then((r) => r.data)
-  },
-
-  resendVerification(email: string): Promise<IApiResponse<void>> {
-    return apiClient
-      .post<IApiResponse<void>>('/auth/resend-verification', { email })
-      .then((r) => r.data)
-  },
-
-  forgotPassword(email: string): Promise<IApiResponse<void>> {
-    return apiClient
-      .post<IApiResponse<void>>('/auth/forgot-password', { email })
-      .then((r) => r.data)
-  },
-
-  resetPassword(token: string, newPassword: string): Promise<IApiResponse<void>> {
-    return apiClient
-      .post<IApiResponse<void>>('/auth/reset-password', { token, newPassword })
-      .then((r) => r.data)
+  resetPassword(input: IResetPasswordInput): Promise<void> {
+    return apiClient.post('/auth/reset-password', input).then(() => undefined)
   },
 }
