@@ -1,170 +1,85 @@
 'use client'
 
-import { useState } from 'react'
-import { useRouter } from 'next/navigation'
+import { Suspense } from 'react'
+import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { toast } from 'sonner'
-import { IconLayoutRows } from '@tabler/icons-react'
 import { Button } from '@/components/ui/button'
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from '@/components/ui/card'
-import {
-  Field,
-  FieldError,
-  FieldGroup,
-  FieldLabel,
-  FieldDescription,
-} from '@/components/ui/field'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Field, FieldError, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
-import { ApiError } from '@/lib/http/api-client'
 import { useAuthStore } from '@/lib/state-management/auth.store'
 import { resetPasswordSchema, type ResetPasswordFormValues } from '@/lib/validations/auth.schema'
+import { scorePassword } from '@/lib/auth/password-strength'
+import { ApiError } from '@/lib/http/api-client'
 
-export default function ResetPasswordPage() {
+function ResetPasswordForm() {
   const router = useRouter()
+  const searchParams = useSearchParams()
   const resetPassword = useAuthStore((s) => s.resetPassword)
-  const isLoading = useAuthStore((s) => s.isLoading)
 
-  const [values, setValues] = useState<ResetPasswordFormValues>({
-    token: '',
-    newPassword: '',
-    confirmPassword: '',
+  const form = useForm<ResetPasswordFormValues>({
+    resolver: zodResolver(resetPasswordSchema),
+    defaultValues: { email: searchParams.get('email') ?? '', code: '', newPassword: '', confirmPassword: '' },
   })
-  const [errors, setErrors] = useState<Partial<Record<keyof ResetPasswordFormValues, string>>>({})
 
-  const handleChange =
-    (field: keyof ResetPasswordFormValues) =>
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const value = field === 'token' ? e.target.value.replace(/\D/g, '') : e.target.value
-      setValues((v) => ({ ...v, [field]: value }))
-      if (errors[field]) setErrors((prev) => ({ ...prev, [field]: undefined }))
-    }
+  const pw = form.watch('newPassword')
+  const strength = scorePassword(pw)
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    const parsed = resetPasswordSchema.safeParse(values)
-    if (!parsed.success) {
-      const fieldErrors: typeof errors = {}
-      for (const issue of parsed.error.issues) {
-        const key = issue.path[0] as keyof ResetPasswordFormValues
-        if (!fieldErrors[key]) fieldErrors[key] = issue.message
-      }
-      setErrors(fieldErrors)
-      return
-    }
+  const onSubmit = async (values: ResetPasswordFormValues) => {
     try {
-      await resetPassword(parsed.data.token, parsed.data.newPassword)
-      toast.success('Password reset successfully! You can now sign in.')
-      router.push('/login')
-    } catch (err: unknown) {
-      if (err instanceof ApiError && (err.message.includes('expired') || err.message.includes('invalid'))) {
-        setErrors({ token: 'Invalid or expired code. Please request a new one.' })
-      } else {
-        toast.error('Something went wrong. Please try again.')
-      }
+      await resetPassword({ email: values.email, code: values.code, newPassword: values.newPassword })
+      toast.success('Password reset. Please sign in.')
+      router.replace('/auth/login')
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : 'Reset failed. Check your code and try again.')
     }
   }
 
   return (
+    <form onSubmit={form.handleSubmit(onSubmit)} noValidate>
+      <FieldGroup>
+        <Field data-invalid={form.formState.errors.email ? 'true' : undefined}>
+          <FieldLabel htmlFor="email">Email</FieldLabel>
+          <Input id="email" type="email" autoComplete="email" {...form.register('email')} />
+          {form.formState.errors.email && <FieldError>{form.formState.errors.email.message}</FieldError>}
+        </Field>
+        <Field data-invalid={form.formState.errors.code ? 'true' : undefined}>
+          <FieldLabel htmlFor="code">6-digit code</FieldLabel>
+          <Input id="code" inputMode="numeric" maxLength={6} {...form.register('code')} />
+          {form.formState.errors.code && <FieldError>{form.formState.errors.code.message}</FieldError>}
+        </Field>
+        <Field data-invalid={form.formState.errors.newPassword ? 'true' : undefined}>
+          <FieldLabel htmlFor="newPassword">New password</FieldLabel>
+          <Input id="newPassword" type="password" autoComplete="new-password" {...form.register('newPassword')} />
+          {pw && <p className="text-xs text-muted-foreground">Strength: {strength.label}</p>}
+          {form.formState.errors.newPassword && <FieldError>{form.formState.errors.newPassword.message}</FieldError>}
+        </Field>
+        <Field data-invalid={form.formState.errors.confirmPassword ? 'true' : undefined}>
+          <FieldLabel htmlFor="confirmPassword">Confirm password</FieldLabel>
+          <Input id="confirmPassword" type="password" autoComplete="new-password" {...form.register('confirmPassword')} />
+          {form.formState.errors.confirmPassword && <FieldError>{form.formState.errors.confirmPassword.message}</FieldError>}
+        </Field>
+        <Button type="submit" disabled={form.formState.isSubmitting}>Reset password</Button>
+      </FieldGroup>
+    </form>
+  )
+}
+
+export default function ResetPasswordPage() {
+  return (
     <div className="flex min-h-svh flex-col items-center justify-center gap-6 bg-muted p-6 md:p-10">
-      <div className="flex w-full max-w-sm flex-col gap-6">
-        <a href="#" className="flex items-center gap-2 self-center font-medium">
-          <div className="flex size-6 items-center justify-center rounded-md bg-primary text-primary-foreground">
-            <IconLayoutRows className="size-4" />
-          </div>
-          Acme Inc.
-        </a>
-
-        <div className="flex flex-col gap-6">
-          <Card>
-            <CardHeader className="text-center">
-              <CardTitle className="text-xl">Reset your password</CardTitle>
-              <CardDescription>
-                Enter the 6-digit code from your email and choose a new password.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form onSubmit={handleSubmit} noValidate>
-                <FieldGroup>
-                  <Field data-invalid={errors.token ? 'true' : undefined}>
-                    <FieldLabel htmlFor="token">Reset Code</FieldLabel>
-                    <Input
-                      id="token"
-                      type="text"
-                      inputMode="numeric"
-                      maxLength={6}
-                      placeholder="123456"
-                      value={values.token}
-                      onChange={handleChange('token')}
-                      disabled={isLoading}
-                      autoComplete="one-time-code"
-                      className="text-center text-2xl tracking-[0.5em]"
-                    />
-                    {errors.token && <FieldError>{errors.token}</FieldError>}
-                  </Field>
-
-                  <Field data-invalid={errors.newPassword ? 'true' : undefined}>
-                    <FieldLabel htmlFor="newPassword">New Password</FieldLabel>
-                    <Input
-                      id="newPassword"
-                      type="password"
-                      value={values.newPassword}
-                      onChange={handleChange('newPassword')}
-                      disabled={isLoading}
-                      autoComplete="new-password"
-                    />
-                    <FieldDescription className="text-xs text-muted-foreground">
-                      Min 8 characters with uppercase, lowercase, number, and symbol
-                    </FieldDescription>
-                    {errors.newPassword && <FieldError>{errors.newPassword}</FieldError>}
-                  </Field>
-
-                  <Field data-invalid={errors.confirmPassword ? 'true' : undefined}>
-                    <FieldLabel htmlFor="confirmPassword">Confirm New Password</FieldLabel>
-                    <Input
-                      id="confirmPassword"
-                      type="password"
-                      value={values.confirmPassword}
-                      onChange={handleChange('confirmPassword')}
-                      disabled={isLoading}
-                      autoComplete="new-password"
-                    />
-                    {errors.confirmPassword && <FieldError>{errors.confirmPassword}</FieldError>}
-                  </Field>
-
-                  <Field>
-                    <Button
-                      type="submit"
-                      disabled={
-                        isLoading ||
-                        values.token.length !== 6 ||
-                        !values.newPassword ||
-                        !values.confirmPassword
-                      }
-                    >
-                      {isLoading ? 'Resetting…' : 'Reset Password'}
-                    </Button>
-                  </Field>
-                </FieldGroup>
-              </form>
-            </CardContent>
-          </Card>
-
-          <FieldDescription className="px-6 text-center">
-            Didn&apos;t get a code?{' '}
-            <a href="/auth/forgot-password" className="underline underline-offset-4 hover:text-primary">
-              Request a new one
-            </a>
-            {' · '}
-            <a href="/login" className="underline underline-offset-4 hover:text-primary">
-              Back to sign in
-            </a>
-          </FieldDescription>
-        </div>
+      <div className="w-full max-w-sm">
+        <Card>
+          <CardHeader className="text-center">
+            <CardTitle className="text-xl">Set a new password</CardTitle>
+            <CardDescription>Enter the code we emailed you</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Suspense><ResetPasswordForm /></Suspense>
+          </CardContent>
+        </Card>
       </div>
     </div>
   )
