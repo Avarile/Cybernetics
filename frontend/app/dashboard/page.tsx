@@ -1,20 +1,23 @@
-import { ChartAreaInteractive } from "@/components/chart-area-interactive"
-import { DataTable } from "@/components/data-table"
-import { SectionCards } from "@/components/section-cards"
+'use client'
 
-import data from "./data.json"
+import { Button } from '@/components/ui/button'
+import { useUser, useAuthStore } from '@/lib/state-management/auth.store'
+import { deriveDisplayName } from '@/lib/auth/display-name'
 
-export default function Page() {
+export default function DashboardPage() {
+  const user = useUser()
+  const logout = useAuthStore((s) => s.logout)
   return (
-    <div className="flex flex-1 flex-col">
-      <div className="@container/main flex flex-1 flex-col gap-2">
-        <div className="flex flex-col gap-4 py-4 md:gap-6 md:py-6">
-          <SectionCards />
-          <div className="px-4 lg:px-6">
-            <ChartAreaInteractive />
-          </div>
-          <DataTable data={data} />
-        </div>
+    <div className="flex min-h-svh flex-col gap-4 p-8">
+      <h1 className="text-2xl font-semibold">Dashboard</h1>
+      <p className="text-muted-foreground">
+        Signed in as <strong>{user ? deriveDisplayName(user) : '…'}</strong> ({user?.role})
+      </p>
+      <div className="flex gap-3">
+        <Button asChild variant="outline"><a href="/account">Account</a></Button>
+        <Button variant="destructive" onClick={() => { void logout().then(() => (window.location.href = '/auth/login')) }}>
+          Log out
+        </Button>
       </div>
     </div>
   )
