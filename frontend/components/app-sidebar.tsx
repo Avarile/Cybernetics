@@ -28,6 +28,13 @@ const data = {
       ),
     },
     {
+      title: "Data Management",
+      url: "/dashboard/data-management",
+      icon: (
+        <HugeiconsIcon icon={Database01Icon} strokeWidth={2} />
+      ),
+    },
+    {
       title: "Lifecycle",
       url: "#",
       icon: (
