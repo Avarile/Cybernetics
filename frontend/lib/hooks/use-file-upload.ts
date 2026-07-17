@@ -36,6 +36,16 @@ export function useFileUpload() {
           ids.push(init.fileId)
         } catch (err) {
           patch(file, { status: 'error', error: err instanceof Error ? err.message : 'Upload failed' })
+          const rest = files.slice(files.indexOf(file) + 1)
+          if (rest.length) {
+            setItems((prev) =>
+              prev.map((it) =>
+                rest.includes(it.file)
+                  ? { ...it, status: 'error' as const, error: 'Skipped — a previous upload failed' }
+                  : it,
+              ),
+            )
+          }
           throw err
         }
       }

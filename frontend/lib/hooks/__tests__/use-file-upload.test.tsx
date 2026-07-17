@@ -35,4 +35,16 @@ describe('useFileUpload', () => {
     expect(fileService.uploadToPolicy).not.toHaveBeenCalled()
     expect(fileService.complete).not.toHaveBeenCalled()
   })
+
+  it('marks not-yet-attempted files as error when an earlier upload fails', async () => {
+    vi.mocked(fileService.initiate).mockRejectedValueOnce(new Error('boom'))
+    const { result } = renderHook(() => useFileUpload())
+    const f1 = new File(['a'], 'a.pdf', { type: 'application/pdf' })
+    const f2 = new File(['b'], 'b.pdf', { type: 'application/pdf' })
+    await act(async () => {
+      await expect(result.current.uploadAll([f1, f2])).rejects.toThrow('boom')
+    })
+    expect(result.current.items.find((i) => i.file === f1)?.status).toBe('error')
+    expect(result.current.items.find((i) => i.file === f2)?.status).toBe('error')
+  })
 })
