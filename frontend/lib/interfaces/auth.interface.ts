@@ -1,46 +1,46 @@
-export type RoleName = 'guest' | 'member' | 'operator' | 'admin' | 'superadmin'
+export type Role = 'guest' | 'user' | 'admin' | 'agent'
+export type AuthStatus = 'idle' | 'loading' | 'authenticated' | 'unauthenticated'
 
-export interface IRole {
-  id: string
-  name: RoleName
-  description?: string
+export interface TokenPair {
+  accessToken: string
+  refreshToken: string
+  expiresIn: number
 }
 
-export interface IPermission {
+/** GET /auth/me → { id, role }. `email` is populated only if the JWT carries the claim. */
+export interface CurrentUser {
   id: string
-  action: string
-  subject: string
-  conditions?: Record<string, unknown>
+  role: Role
+  email?: string
 }
 
-export interface IUser {
+/** GET /auth/sessions → SessionSummary[] */
+export interface SessionSummary {
   id: string
-  email: string
-  userName: string
-  firstName?: string | null
-  lastName?: string | null
-  nickName?: string | null
-  title?: string | null
-  mobile?: string | null
-  position?: string | null
   createdAt: string
-  updatedAt: string
-  avatar?: string
+  lastUsedAt: string | null
+  expiresAt: string
+  userAgent: string | null
+  ip: string | null
 }
 
-export interface IUpdateProfileInput {
-  userName?: string
-  firstName?: string | null
-  lastName?: string | null
-  nickName?: string | null
-  title?: string | null
-  mobile?: string | null
-  position?: string | null
+export interface Paginated<T> {
+  data: T[]
+  total: number
+  page: number
+  limit: number
 }
 
-export interface IRbacData {
-  roles: IRole[]
-  permissions: IPermission[]
+export interface ErrorEnvelope {
+  error: {
+    code: string
+    message: string
+    statusCode: number
+    details: unknown | null
+    correlationId: string
+    timestamp: string
+    path: string
+  }
 }
 
 export interface ILoginInput {
@@ -48,47 +48,24 @@ export interface ILoginInput {
   password: string
 }
 
-export interface IRegisterInput {
+export interface IResetPasswordInput {
   email: string
-  userName: string
-  password: string
-  confirmPassword: string
-}
-
-export interface IApiResponse<T = unknown> {
-  data: T
-  message?: string
-  statusCode?: number
-}
-
-export interface IApiError {
-  message: string | string[]
-  error?: string
-  statusCode: number
+  code: string
+  newPassword: string
 }
 
 export interface IAuthState {
-  // Data
-  user: IUser | null
-  roles: IRole[]
-  permissions: IPermission[]
-  sessionToken: string | null
-  // Status
-  isAuthenticated: boolean
+  user: CurrentUser | null
+  status: AuthStatus
   isLoading: boolean
   error: string | null
-  // Actions
+
   login: (input: ILoginInput) => Promise<void>
-  register: (input: IRegisterInput) => Promise<{ email: string }>
   logout: () => Promise<void>
-  fetchCurrentUser: () => Promise<void>
-  fetchRbac: () => Promise<void>
-  updateProfile: (data: IUpdateProfileInput) => Promise<void>
-  updatePassword: (currentPassword: string, newPassword: string) => Promise<void>
-  verifyEmail: (token: string) => Promise<void>
-  resendVerification: (email: string) => Promise<void>
+  logoutAll: () => Promise<void>
+  bootstrap: () => Promise<void>
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>
   forgotPassword: (email: string) => Promise<void>
-  resetPassword: (token: string, newPassword: string) => Promise<void>
+  resetPassword: (input: IResetPasswordInput) => Promise<void>
   clearError: () => void
-  setSessionToken: (token: string | null) => void
 }

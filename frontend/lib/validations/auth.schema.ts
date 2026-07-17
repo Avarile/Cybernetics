@@ -1,48 +1,46 @@
 import { z } from 'zod'
 
+export const emailSchema = z.string().trim().toLowerCase().email('Enter a valid email address')
+export const passwordSchema = z
+  .string()
+  .min(12, 'At least 12 characters')
+  .max(200, 'At most 200 characters')
+
 export const loginSchema = z.object({
-  email: z.string().email('Enter a valid email address'),
+  email: emailSchema,
   password: z.string().min(1, 'Password is required'),
 })
 
-export const registerSchema = z
-  .object({
-    email: z.string().email('Enter a valid email address'),
-    userName: z.string().min(2, 'Username must be at least 2 characters').max(50),
-    password: z.string().min(8, 'Password must be at least 8 characters'),
-    confirmPassword: z.string().min(1, 'Please confirm your password'),
-  })
-  .refine((data) => data.password === data.confirmPassword, {
-    message: 'Passwords do not match',
-    path: ['confirmPassword'],
-  })
-
-export type LoginFormValues = z.infer<typeof loginSchema>
-export type RegisterFormValues = z.infer<typeof registerSchema>
-
-export const forgotPasswordSchema = z.object({
-  email: z.string().email('Enter a valid email address'),
-})
+export const forgotPasswordSchema = z.object({ email: emailSchema })
 
 export const resetPasswordSchema = z
   .object({
-    token: z
-      .string()
-      .length(6, 'Enter the 6-digit code from your email')
-      .regex(/^\d{6}$/, 'Code must be 6 digits'),
-    newPassword: z
-      .string()
-      .min(8, 'Password must be at least 8 characters')
-      .regex(/[A-Z]/, 'Must contain an uppercase letter')
-      .regex(/[a-z]/, 'Must contain a lowercase letter')
-      .regex(/[0-9]/, 'Must contain a number')
-      .regex(/[^A-Za-z0-9]/, 'Must contain a symbol'),
-    confirmPassword: z.string().min(1, 'Please confirm your password'),
+    email: emailSchema,
+    code: z.string().regex(/^\d{6}$/, 'Enter the 6-digit code from your email'),
+    newPassword: passwordSchema,
+    confirmPassword: z.string(),
   })
   .refine((d) => d.newPassword === d.confirmPassword, {
-    message: 'Passwords do not match',
     path: ['confirmPassword'],
+    message: 'Passwords do not match',
   })
 
+export const changePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1, 'Current password is required'),
+    newPassword: passwordSchema,
+    confirmPassword: z.string(),
+  })
+  .refine((d) => d.newPassword === d.confirmPassword, {
+    path: ['confirmPassword'],
+    message: 'Passwords do not match',
+  })
+  .refine((d) => d.newPassword !== d.currentPassword, {
+    path: ['newPassword'],
+    message: 'New password must be different',
+  })
+
+export type LoginFormValues = z.infer<typeof loginSchema>
 export type ForgotPasswordFormValues = z.infer<typeof forgotPasswordSchema>
 export type ResetPasswordFormValues = z.infer<typeof resetPasswordSchema>
+export type ChangePasswordFormValues = z.infer<typeof changePasswordSchema>
