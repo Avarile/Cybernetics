@@ -1,4 +1,4 @@
-import { Body, Controller, HttpCode, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { SearchQueryDto } from './dto/search-query.dto';
@@ -19,6 +19,12 @@ export class SearchQueryController {
   @HttpCode(200)
   query(@Param('name') name: string, @Body() body: SearchQueryDto) {
     return this.records.search(name, body);
+  }
+
+  @ApiOperation({ summary: 'Get a single record by id or externalId' })
+  @Get('records/:id')
+  getRecord(@Param('name') name: string, @Param('id') id: string) {
+    return this.records.get(name, id);
   }
 
   @ApiOperation({ summary: 'Reload and rebuild a collection' })

@@ -234,3 +234,48 @@ describe('SearchRecordService.remove / reload', () => {
     );
   });
 });
+
+describe('SearchRecordService.get', () => {
+  it('404s on an unknown collection', async () => {
+    const { service } = make();
+    await expect(service.get('nope', 'rec-1')).rejects.toMatchObject({
+      code: ErrorCode.SEARCH_COLLECTION_NOT_FOUND,
+    });
+  });
+
+  it('resolves a UUID key via findLiveById', async () => {
+    const uuid = '11111111-1111-1111-1111-111111111111';
+    const { service, records } = make({
+      findLiveById: jest.fn(async () => ({
+        id: uuid, collection: 'articles', externalId: 'ext-1',
+        document: { title: 'Hi' }, indexState: 'INDEXED', indexError: null,
+        createdAt: new Date('2020-01-01'), updatedAt: new Date('2020-01-02'),
+      })),
+    });
+    const view = await service.get('articles', uuid);
+    expect(records.findLiveById).toHaveBeenCalledWith(uuid);
+    expect(view).toMatchObject({ id: uuid, externalId: 'ext-1', document: { title: 'Hi' }, indexState: 'INDEXED' });
+  });
+
+  it('resolves a non-UUID key via findLiveByExternalId', async () => {
+    const { service, records } = make({
+      findLiveByExternalId: jest.fn(async () => ({
+        id: 'rec-9', collection: 'articles', externalId: 'ext-9',
+        document: {}, indexState: 'PENDING', indexError: null,
+        createdAt: new Date(), updatedAt: new Date(),
+      })),
+    });
+    const view = await service.get('articles', 'ext-9');
+    expect(records.findLiveByExternalId).toHaveBeenCalledWith('articles', 'ext-9');
+    expect(view.indexState).toBe('PENDING');
+  });
+
+  it('404s when the row belongs to another collection', async () => {
+    const { service } = make({
+      findLiveByExternalId: jest.fn(async () => ({ id: 'r', collection: 'other', externalId: 'e', document: {} })),
+    });
+    await expect(service.get('articles', 'e')).rejects.toMatchObject({
+      code: ErrorCode.SEARCH_RECORD_NOT_FOUND,
+    });
+  });
+});

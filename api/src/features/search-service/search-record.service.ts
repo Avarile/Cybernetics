@@ -40,6 +40,16 @@ export interface PersistResult {
   indexState: IndexState;
 }
 
+export interface RecordView {
+  id: string;
+  externalId: string | null;
+  document: Record<string, unknown>;
+  indexState: IndexState;
+  indexError: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 /**
  * Owns record persistence and querying. Writes go to Postgres (source of truth)
  * then enqueue an async index job; queries hit Meili only. Reads are global —
@@ -147,6 +157,17 @@ export class SearchRecordService {
       { collection, id: row.id },
       INDEXING_JOB_OPTS,
     );
+  }
+
+  /** Read one record from Postgres (source of truth). Resolves by id or externalId. */
+  async get(collection: string, key: string): Promise<RecordView> {
+    await this.requireCollection(collection);
+    let row = UUID_RE.test(key) ? await this.records.findLiveById(key) : null;
+    if (!row) row = await this.records.findLiveByExternalId(collection, key);
+    if (!row || row.collection !== collection) {
+      throw this.errors.create(ErrorCode.SEARCH_RECORD_NOT_FOUND);
+    }
+    return toRecordView(row);
   }
 
   async reload(collection: string): Promise<void> {
@@ -257,6 +278,27 @@ export class SearchRecordService {
     }
     return facets;
   }
+}
+
+/** Map a DB row to the API record view. */
+function toRecordView(row: {
+  id: string;
+  externalId: string | null;
+  document: Record<string, unknown>;
+  indexState: IndexState;
+  indexError: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}): RecordView {
+  return {
+    id: row.id,
+    externalId: row.externalId,
+    document: row.document,
+    indexState: row.indexState,
+    indexError: row.indexError,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 
 /** Quote + escape a string value for a Meili filter expression. */
