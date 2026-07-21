@@ -1,10 +1,12 @@
 import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import type { Principal } from '../../../common/principal';
 import { ChatDto } from '../dto/chat.dto';
 import { AgentRunnerService } from '../services/agent-runner.service';
 import { ConversationService } from '../services/conversation.service';
 
+@ApiTags('Agent')
 @Controller('agent')
 export class ChatController {
   constructor(
@@ -12,11 +14,13 @@ export class ChatController {
     private readonly conversations: ConversationService,
   ) {}
 
+  @ApiOperation({ summary: 'Send chat message to agent' })
   @Post('chat')
   chat(@CurrentUser() user: Principal, @Body() dto: ChatDto) {
     return this.runner.runChat(user, dto);
   }
 
+  @ApiOperation({ summary: 'List agent conversations' })
   @Get('conversations')
   list(
     @CurrentUser() user: Principal,

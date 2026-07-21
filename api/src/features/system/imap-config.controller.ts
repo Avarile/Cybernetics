@@ -12,6 +12,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import type { Principal } from '../../common/principal';
@@ -22,6 +23,7 @@ import { ImapConfigService } from './imap-config.service';
 import type { AuditContext } from './system-audit.types';
 
 @Roles('admin')
+@ApiTags('System')
 @Controller('system/imap')
 export class ImapConfigController {
   constructor(private readonly imap: ImapConfigService) {}
@@ -30,6 +32,7 @@ export class ImapConfigController {
     return { actorId: user.id, ip, userAgent: ua ?? null };
   }
 
+  @ApiOperation({ summary: 'Create IMAP config' })
   @Post()
   create(
     @Body() dto: CreateImapDto,
@@ -40,16 +43,19 @@ export class ImapConfigController {
     return this.imap.create(dto, this.ctx(user, ip, ua));
   }
 
+  @ApiOperation({ summary: 'List IMAP configs' })
   @Get()
   list(@Query() query: ListQueryDto) {
     return this.imap.list(query.page, query.limit);
   }
 
+  @ApiOperation({ summary: 'Get IMAP config by id' })
   @Get(':id')
   get(@Param('id', ParseUUIDPipe) id: string) {
     return this.imap.findById(id);
   }
 
+  @ApiOperation({ summary: 'Update IMAP config' })
   @Patch(':id')
   update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -61,6 +67,7 @@ export class ImapConfigController {
     return this.imap.update(id, dto, this.ctx(user, ip, ua));
   }
 
+  @ApiOperation({ summary: 'Delete IMAP config' })
   @Delete(':id')
   @HttpCode(204)
   async remove(
@@ -72,6 +79,7 @@ export class ImapConfigController {
     await this.imap.remove(id, this.ctx(user, ip, ua));
   }
 
+  @ApiOperation({ summary: 'Activate IMAP config' })
   @Post(':id/activate')
   activate(
     @Param('id', ParseUUIDPipe) id: string,
@@ -82,6 +90,7 @@ export class ImapConfigController {
     return this.imap.activate(id, this.ctx(user, ip, ua));
   }
 
+  @ApiOperation({ summary: 'Test IMAP config' })
   @Post(':id/test')
   test(
     @Param('id', ParseUUIDPipe) id: string,

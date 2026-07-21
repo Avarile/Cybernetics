@@ -9,6 +9,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { CompleteUploadDto } from './dto/complete-upload.dto';
 import { InitiateUploadDto } from './dto/initiate-upload.dto';
@@ -24,10 +25,12 @@ import type { FilePrincipal } from './file.types';
  * A real auth guard binds here later (`@UseGuards(AuthGuard)`); today the
  * principal comes from the CurrentUser placeholder decorator.
  */
+@ApiTags('Files')
 @Controller('files')
 export class FileController {
   constructor(private readonly files: FileService) {}
 
+  @ApiOperation({ summary: 'Initiate presigned upload' })
   @Post()
   initiate(
     @Body() body: InitiateUploadDto,
@@ -36,6 +39,7 @@ export class FileController {
     return this.files.initiateUpload(body, user);
   }
 
+  @ApiOperation({ summary: 'Complete presigned upload' })
   @Post(':id/complete')
   complete(
     @Param('id', ParseUUIDPipe) id: string,
@@ -45,6 +49,7 @@ export class FileController {
     return this.files.completeUpload(id, user, body);
   }
 
+  @ApiOperation({ summary: 'Get presigned download URL' })
   @Get(':id/download-url')
   downloadUrl(
     @Param('id', ParseUUIDPipe) id: string,
@@ -58,6 +63,7 @@ export class FileController {
     });
   }
 
+  @ApiOperation({ summary: 'Get file metadata' })
   @Get(':id')
   get(
     @Param('id', ParseUUIDPipe) id: string,
@@ -66,11 +72,13 @@ export class FileController {
     return this.files.getMetadata(id, user);
   }
 
+  @ApiOperation({ summary: 'List files' })
   @Get()
   list(@Query() query: QueryFilesDto, @CurrentUser() user: FilePrincipal) {
     return this.files.list(query, user);
   }
 
+  @ApiOperation({ summary: 'Soft-delete file' })
   @Delete(':id')
   @HttpCode(204)
   async remove(

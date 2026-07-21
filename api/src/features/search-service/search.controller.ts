@@ -1,4 +1,5 @@
 import { Body, Controller, HttpCode, Param, Post } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { SearchQueryDto } from './dto/search-query.dto';
 import { SearchRecordService } from './search-record.service';
@@ -8,16 +9,19 @@ import { SearchRecordService } from './search-record.service';
  * principal (global reads); `POST .../reload` is admin-only and runs the full
  * clear-and-rebuild through BullMQ.
  */
+@ApiTags('Search')
 @Controller('search/collections/:name')
 export class SearchQueryController {
   constructor(private readonly records: SearchRecordService) {}
 
+  @ApiOperation({ summary: 'Query records in a collection' })
   @Post('query')
   @HttpCode(200)
   query(@Param('name') name: string, @Body() body: SearchQueryDto) {
     return this.records.search(name, body);
   }
 
+  @ApiOperation({ summary: 'Reload and rebuild a collection' })
   @Post('reload')
   @Roles('admin')
   @HttpCode(202)

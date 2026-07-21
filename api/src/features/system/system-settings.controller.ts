@@ -10,6 +10,7 @@ import {
   Put,
   Query,
 } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import type { Principal } from '../../common/principal';
@@ -18,6 +19,7 @@ import { SystemSettingsService } from './system-settings.service';
 import type { AuditContext } from './system-audit.types';
 
 @Roles('admin')
+@ApiTags('System')
 @Controller('system/settings')
 export class SystemSettingsController {
   constructor(private readonly settings: SystemSettingsService) {}
@@ -26,16 +28,19 @@ export class SystemSettingsController {
     return { actorId: user.id, ip, userAgent: ua ?? null };
   }
 
+  @ApiOperation({ summary: 'List system settings' })
   @Get()
   list(@Query() query: SettingsQueryDto) {
     return this.settings.list(query);
   }
 
+  @ApiOperation({ summary: 'Get system setting by key' })
   @Get(':key')
   get(@Param('key') key: string) {
     return this.settings.get(key);
   }
 
+  @ApiOperation({ summary: 'Create or update system setting' })
   @Put(':key')
   upsert(
     @Param('key') key: string,
@@ -47,6 +52,7 @@ export class SystemSettingsController {
     return this.settings.upsert(key, dto, this.ctx(user, ip, ua));
   }
 
+  @ApiOperation({ summary: 'Delete system setting' })
   @Delete(':key')
   @HttpCode(204)
   async remove(

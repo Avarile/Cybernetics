@@ -12,6 +12,7 @@ import {
   Post,
   Query,
 } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import type { Principal } from '../../common/principal';
@@ -24,6 +25,7 @@ import { IntegrationCredentialService } from './integration-credential.service';
 import type { AuditContext } from './system-audit.types';
 
 @Roles('admin')
+@ApiTags('System')
 @Controller('system/integrations')
 export class IntegrationCredentialController {
   constructor(private readonly integrations: IntegrationCredentialService) {}
@@ -32,6 +34,7 @@ export class IntegrationCredentialController {
     return { actorId: user.id, ip, userAgent: ua ?? null };
   }
 
+  @ApiOperation({ summary: 'Create integration credential' })
   @Post()
   create(
     @Body() dto: CreateIntegrationDto,
@@ -42,16 +45,19 @@ export class IntegrationCredentialController {
     return this.integrations.create(dto, this.ctx(user, ip, ua));
   }
 
+  @ApiOperation({ summary: 'List integration credentials' })
   @Get()
   list(@Query() query: IntegrationQueryDto) {
     return this.integrations.list(query);
   }
 
+  @ApiOperation({ summary: 'Get integration credential by id' })
   @Get(':id')
   get(@Param('id', ParseUUIDPipe) id: string) {
     return this.integrations.findById(id);
   }
 
+  @ApiOperation({ summary: 'Update integration credential' })
   @Patch(':id')
   update(
     @Param('id', ParseUUIDPipe) id: string,
@@ -63,6 +69,7 @@ export class IntegrationCredentialController {
     return this.integrations.update(id, dto, this.ctx(user, ip, ua));
   }
 
+  @ApiOperation({ summary: 'Delete integration credential' })
   @Delete(':id')
   @HttpCode(204)
   async remove(

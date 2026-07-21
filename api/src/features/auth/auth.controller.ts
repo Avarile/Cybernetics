@@ -8,6 +8,7 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
@@ -30,6 +31,7 @@ function reqContext(req: Request) {
   return { userAgent: req.headers['user-agent'], ip: req.ip };
 }
 
+@ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
   constructor(
@@ -41,6 +43,7 @@ export class AuthController {
   @Public()
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @UseGuards(LocalAuthGuard)
+  @ApiOperation({ summary: 'Authenticate and issue tokens' })
   @Post('login')
   @HttpCode(200)
   login(@Body() _body: LoginDto, @Req() req: Request & { user: UserRow }) {
@@ -50,6 +53,7 @@ export class AuthController {
 
   @Public()
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Refresh access token' })
   @Post('refresh')
   @HttpCode(200)
   refresh(@Body() body: RefreshDto, @Req() req: Request) {
@@ -57,28 +61,33 @@ export class AuthController {
   }
 
   @Public()
+  @ApiOperation({ summary: 'Revoke a refresh token' })
   @Post('logout')
   @HttpCode(204)
   async logout(@Body() body: LogoutDto) {
     await this.auth.logout(body.refreshToken);
   }
 
+  @ApiOperation({ summary: 'Revoke all user sessions' })
   @Post('logout-all')
   @HttpCode(204)
   async logoutAll(@CurrentUser() user: Principal) {
     await this.auth.logoutAll(user.id as string);
   }
 
+  @ApiOperation({ summary: 'Get current user profile' })
   @Get('me')
   me(@CurrentUser() user: Principal) {
     return this.auth.getProfile(user);
   }
 
+  @ApiOperation({ summary: 'List active sessions' })
   @Get('sessions')
   sessions(@CurrentUser() user: Principal) {
     return this.auth.listSessions(user.id as string);
   }
 
+  @ApiOperation({ summary: 'Change account password' })
   @Patch('password')
   @HttpCode(204)
   async changePassword(
@@ -94,6 +103,7 @@ export class AuthController {
 
   @Public()
   @Throttle({ default: { limit: 3, ttl: 900_000 } })
+  @ApiOperation({ summary: 'Request password reset code' })
   @Post('forgot-password')
   @HttpCode(204)
   async forgotPassword(@Body() body: ForgotPasswordDto): Promise<void> {
@@ -102,6 +112,7 @@ export class AuthController {
 
   @Public()
   @Throttle({ default: { limit: 10, ttl: 900_000 } })
+  @ApiOperation({ summary: 'Reset password with code' })
   @Post('reset-password')
   @HttpCode(204)
   async resetPassword(@Body() body: ResetPasswordDto): Promise<void> {
@@ -110,6 +121,7 @@ export class AuthController {
 
   @Public()
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Exchange API key for token' })
   @Post('service-token')
   @HttpCode(200)
   serviceToken(@Body() body: ServiceTokenDto) {

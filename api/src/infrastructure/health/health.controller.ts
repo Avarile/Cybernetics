@@ -1,4 +1,5 @@
 import { Controller, Get } from '@nestjs/common';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import {
   HealthCheck,
   HealthCheckService,
@@ -14,6 +15,7 @@ import { RedisHealthIndicator } from './redis.health';
  * `GET /health` — liveness/readiness probe aggregating database, Redis, MinIO,
  * MeiliSearch, and heap-memory checks.
  */
+@ApiTags('Health')
 @Public()
 @Controller('health')
 export class HealthController {
@@ -26,6 +28,7 @@ export class HealthController {
     private readonly meili: MeiliHealthIndicator,
   ) {}
 
+  @ApiOperation({ summary: 'Liveness/readiness probe (all dependencies)' })
   @Get()
   @HealthCheck()
   check() {
