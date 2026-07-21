@@ -12,15 +12,30 @@ import { CollectionEditorSheet } from '@/components/data-management/collection-e
 import { useCollections } from '@/lib/hooks/use-collections'
 import { useCollectionMutations } from '@/lib/hooks/use-collection-mutations'
 import { useDataManagementStore } from '@/lib/state-management/data-management.store'
+import { toast } from 'sonner'
 
 export function CollectionManagerDialog() {
   const panel = useDataManagementStore((s) => s.collectionPanel)
   const openCreate = useDataManagementStore((s) => s.openCreateCollection)
   const openEdit = useDataManagementStore((s) => s.openEditCollection)
   const close = useDataManagementStore((s) => s.closeCollectionPanel)
+  const activeCollection = useDataManagementStore((s) => s.collection)
+  const setCollection = useDataManagementStore((s) => s.setCollection)
   const { collections } = useCollections()
   const { remove } = useCollectionMutations()
   const editing = panel.kind === 'edit' ? panel.name : undefined
+
+  const handleDelete = async (name: string) => {
+    try {
+      await remove(name)
+      if (name === activeCollection) {
+        const next = collections.find((c) => c.name !== name)
+        if (next) setCollection(next.name)
+      }
+    } catch {
+      toast.error('Failed to delete collection')
+    }
+  }
 
   return (
     <>
@@ -48,7 +63,7 @@ export function CollectionManagerDialog() {
                       </AlertDialogHeader>
                       <AlertDialogFooter>
                         <AlertDialogCancel>Cancel</AlertDialogCancel>
-                        <AlertDialogAction onClick={() => void remove(c.name)}>Delete</AlertDialogAction>
+                        <AlertDialogAction onClick={() => void handleDelete(c.name)}>Delete</AlertDialogAction>
                       </AlertDialogFooter>
                     </AlertDialogContent>
                   </AlertDialog>
