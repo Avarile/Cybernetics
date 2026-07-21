@@ -20,11 +20,7 @@ import {
   DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem,
   DropdownMenuSeparator, DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import {
-  Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select'
-import { Label } from '@/components/ui/label'
-import { DataPagination } from '@/components/ui/data-pagination'
+import { DataTablePagination } from '@/app/dashboard/data-management/components/data-table-pagination'
 import { useIsAdmin } from '@/lib/hooks/use-permission'
 import { useDataManagementStore } from '@/lib/state-management/data-management.store'
 import { buildColumns, type RecordColumnMeta } from '@/lib/schema/field-to-column'
@@ -101,11 +97,21 @@ export function RecordDataTable({
   const table = useReactTable({
     data: results?.hits ?? [],
     columns,
-    state: { rowSelection: s.selection, columnVisibility: s.columnVisibility },
+    state: {
+      rowSelection: s.selection,
+      columnVisibility: s.columnVisibility,
+      pagination: { pageIndex: s.page - 1, pageSize: s.limit },
+    },
     getRowId: (row) => row.id,
     enableRowSelection: true,
     onRowSelectionChange: s.setSelection,
     onColumnVisibilityChange: s.setColumnVisibility,
+    onPaginationChange: (updater) => {
+      const prev = { pageIndex: s.page - 1, pageSize: s.limit }
+      const next = typeof updater === 'function' ? updater(prev) : updater
+      if (next.pageSize !== s.limit) s.setLimit(next.pageSize)
+      else if (next.pageIndex !== prev.pageIndex) s.setPage(next.pageIndex + 1)
+    },
     manualPagination: true,
     manualSorting: true,
     manualFiltering: true,
@@ -228,26 +234,7 @@ export function RecordDataTable({
         </Table>
       </div>
 
-      <div className="flex items-center justify-between gap-4">
-        <div className="hidden items-center gap-2 lg:flex">
-          <Label htmlFor="rows-per-page" className="text-sm font-medium">Rows per page</Label>
-          <Select value={String(s.limit)} onValueChange={(v) => s.setLimit(Number(v))}>
-            <SelectTrigger size="sm" className="w-20" id="rows-per-page"><SelectValue /></SelectTrigger>
-            <SelectContent side="top">
-              <SelectGroup>
-                {PAGE_SIZES.map((n) => <SelectItem key={n} value={String(n)}>{n}</SelectItem>)}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-        </div>
-        <DataPagination
-          page={s.page}
-          pageSize={s.limit}
-          total={results?.totalHits ?? 0}
-          onPageChange={s.setPage}
-          isLoading={isLoading}
-        />
-      </div>
+      <DataTablePagination table={table} isLoading={isLoading} pageSizeOptions={PAGE_SIZES} />
     </div>
   )
 }

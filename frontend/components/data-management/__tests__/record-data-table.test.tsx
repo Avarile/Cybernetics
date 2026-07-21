@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 
 vi.mock('@/lib/hooks/use-permission', () => ({ useIsAdmin: () => true }))
 
@@ -31,6 +31,50 @@ describe('RecordDataTable', () => {
     render(<RecordDataTable fields={fields} results={undefined} isLoading={false} error={new Error('x')} onRetry={() => {}} />)
     expect(screen.getByText('Could not load records')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+  })
+
+  it('reflects the store page against the server page count and advances on next', () => {
+    useDataManagementStore.setState({ page: 1, limit: 20 })
+    const results: SearchResults = { hits: [{ id: 'r1', title: 'Laptop', price: 999 }], page: 1, limit: 20, totalHits: 45, totalPages: 3, processingTimeMs: 1 }
+    render(<RecordDataTable fields={fields} results={results} isLoading={false} onRetry={() => {}} />)
+
+    expect(screen.getByText(/Page 1 of 3/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /go to next page/i }))
+    expect(useDataManagementStore.getState().page).toBe(2)
+  })
+
+  it('disables previous/first on the first page and next/last on the last page', () => {
+    const results: SearchResults = { hits: [{ id: 'r1', title: 'Laptop', price: 999 }], page: 3, limit: 20, totalHits: 45, totalPages: 3, processingTimeMs: 1 }
+
+    useDataManagementStore.setState({ page: 1, limit: 20 })
+    const { rerender } = render(<RecordDataTable fields={fields} results={{ ...results, page: 1 }} isLoading={false} onRetry={() => {}} />)
+    expect(screen.getByRole('button', { name: /go to previous page/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /go to next page/i })).toBeEnabled()
+
+    useDataManagementStore.setState({ page: 3, limit: 20 })
+    rerender(<RecordDataTable fields={fields} results={results} isLoading={false} onRetry={() => {}} />)
+    expect(screen.getByRole('button', { name: /go to next page/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /go to previous page/i })).toBeEnabled()
+  })
+
+  it('first/last buttons jump to the boundary pages', () => {
+    useDataManagementStore.setState({ page: 2, limit: 20 })
+    const results: SearchResults = { hits: [{ id: 'r1', title: 'Laptop', price: 999 }], page: 2, limit: 20, totalHits: 45, totalPages: 3, processingTimeMs: 1 }
+    render(<RecordDataTable fields={fields} results={results} isLoading={false} onRetry={() => {}} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /go to last page/i }))
+    expect(useDataManagementStore.getState().page).toBe(3)
+    fireEvent.click(screen.getByRole('button', { name: /go to first page/i }))
+    expect(useDataManagementStore.getState().page).toBe(1)
+  })
+
+  it('disables all pagination controls while loading', () => {
+    useDataManagementStore.setState({ page: 2, limit: 20 })
+    const results: SearchResults = { hits: [{ id: 'r1', title: 'Laptop', price: 999 }], page: 2, limit: 20, totalHits: 45, totalPages: 3, processingTimeMs: 1 }
+    render(<RecordDataTable fields={fields} results={results} isLoading={true} onRetry={() => {}} />)
+
+    expect(screen.getByRole('button', { name: /go to next page/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /go to previous page/i })).toBeDisabled()
   })
 
   it('skeleton row cell count matches the header when a column is hidden', () => {

@@ -1,14 +1,14 @@
-# Goal: use the existing ai components in 
+# Goal: use the existing components in frontend/components/ui, design and implement a data control panel.
 
-feature description: review the frontend professionally, especially the statemanagement(authentication, session, user role, user info, global envirables, and the router guards), Basically focusing on the foundational layers. To make it easier later when meaningful components, views and pages to be built on a solid foundation
+feature description: This is the main data control page, it should have a input / new data input component(basically a form to input data, upload file) and a data query / view component(this is basically a table with proper pagination)
 
-1. This design has to be a simple but production grade system design. This is the first version, it should be simple, clean and reliable.
-2. Design the schemas as well, discuss the schema with me, as this is the hardest part.
-3. Review the lastest API doc for Mastra AI, as it changing very fast.
-4. I have an pre-designed folder structure for you to start with in `frontend`
-5. this is a complex module, so discuss with me if you need.
-6. remove any components / files / functions in the template frontend project(frontend)
+1. This is complex data management page, may need complex statemanagement accordingly.
+   1. The state management should take care most if not all setState operations, so minimal state operation is done from the UI components.
+   2. The table must refer the design of frontend/components/data-table.tsx
+2. this is a complex page, so discuss with me if you need.
+3. Design this professionally as it is a production grade page / view / components(and state management)
+4. This page is in frontend/app/dashboard/data-management
   
-
 ## Actions to take
-Design the execption module and output the design to [development/current_session/current_design]
+
+Design this page and output the design to [development/current_session/current_design]
