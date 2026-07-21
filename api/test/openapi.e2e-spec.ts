@@ -135,6 +135,15 @@ describe('OpenAPI / Scalar (e2e)', () => {
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toContain('text/html');
     });
+
+    it('serves a Scalar-compatible CSP on /reference (not helmet’s strict default)', async () => {
+      const res = await request(app.getHttpServer()).get('/reference');
+      const csp = res.headers['content-security-policy'];
+      expect(csp).toBeDefined();
+      // must allow the CDN bundle + inline bootstrap Scalar needs
+      expect(csp).toContain('https://cdn.jsdelivr.net');
+      expect(csp).toContain("'unsafe-inline'");
+    });
   });
 
   describe('when disabled (kill-switch)', () => {

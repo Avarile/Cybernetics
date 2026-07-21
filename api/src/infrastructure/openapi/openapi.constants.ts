@@ -7,6 +7,25 @@ export const OPENAPI_REFERENCE_PATH = '/reference';
 /** Security-scheme key referenced by operations requiring a JWT bearer token. */
 export const BEARER_SCHEME_NAME = 'bearer';
 
+/** CDN host the Scalar middleware loads its UI bundle + assets from by default. */
+export const SCALAR_CDN_HOST = 'https://cdn.jsdelivr.net';
+
+/**
+ * Content-Security-Policy served ONLY on the Scalar reference page. The global
+ * `helmet()` policy is `script-src 'self'`, which blocks Scalar's CDN bundle and
+ * its inline bootstrap → a blank page. This scoped override re-allows exactly
+ * what the Scalar UI needs; every other route keeps helmet's strict defaults.
+ */
+export const SCALAR_CSP = [
+  "default-src 'self'",
+  `script-src 'self' 'unsafe-inline' 'unsafe-eval' ${SCALAR_CDN_HOST}`,
+  `style-src 'self' 'unsafe-inline' ${SCALAR_CDN_HOST} https://fonts.googleapis.com`,
+  `font-src 'self' data: ${SCALAR_CDN_HOST} https://fonts.gstatic.com`,
+  "img-src 'self' data: https:",
+  `connect-src 'self' ${SCALAR_CDN_HOST}`,
+  "worker-src 'self' blob:",
+].join('; ');
+
 export const API_TITLE = 'Cybernetics API';
 export const API_VERSION = '1.0.0';
 export const API_DESCRIPTION = [

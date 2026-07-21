@@ -2,11 +2,15 @@ import type { INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule } from '@nestjs/swagger';
 import { apiReference } from '@scalar/nestjs-api-reference';
-import type { Request, Response } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import { cleanupOpenApiDoc } from 'nestjs-zod';
 import type { OpenApiConfig } from '../../config/configurations/openapi.config';
 import { buildDocumentConfig } from './openapi.document';
-import { OPENAPI_JSON_PATH, OPENAPI_REFERENCE_PATH } from './openapi.constants';
+import {
+  OPENAPI_JSON_PATH,
+  OPENAPI_REFERENCE_PATH,
+  SCALAR_CSP,
+} from './openapi.constants';
 import {
   applyGlobalSecurity,
   attachStandardErrors,
@@ -56,5 +60,15 @@ export function setupOpenApi(app: INestApplication): void {
     res.json(document);
   });
 
-  app.use(OPENAPI_REFERENCE_PATH, apiReference({ content: document }));
+  // The Scalar UI loads its bundle from a CDN + runs an inline bootstrap, both
+  // blocked by helmet's global `script-src 'self'`. Override the CSP for this
+  // route only (helmet ran earlier in the chain; setHeader replaces its value).
+  app.use(
+    OPENAPI_REFERENCE_PATH,
+    (_req: Request, res: Response, next: NextFunction) => {
+      res.setHeader('Content-Security-Policy', SCALAR_CSP);
+      next();
+    },
+    apiReference({ content: document }),
+  );
 }
