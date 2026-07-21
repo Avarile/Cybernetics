@@ -7,6 +7,10 @@ vi.mock('@/lib/services/record.service', () => ({
   recordService: { query: vi.fn() },
 }))
 
+vi.mock('@/lib/hooks/use-collection-definition', () => ({
+  useCollectionDefinition: () => ({ fields: [], definition: null, isLoading: false, error: undefined }),
+}))
+
 import { recordService } from '@/lib/services/record.service'
 import { useRecords } from '@/lib/hooks/use-records'
 import { useDataManagementStore } from '@/lib/state-management/data-management.store'

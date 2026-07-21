@@ -17,7 +17,7 @@ export function DataManagementView() {
   const collection = useCollection()
   const setCollection = useSetCollection()
   const { fields, isLoading: defLoading } = useCollectionDefinition(collection)
-  const { results, isLoading, error, mutate } = useRecords(fields)
+  const { results, isLoading, error, mutate } = useRecords()
 
   // Default to the first collection once the list resolves.
   React.useEffect(() => {
