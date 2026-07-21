@@ -21,6 +21,21 @@ export interface CollectionView {
   updatedAt: string
 }
 
+/** POST /search/collections */
+export interface CreateCollectionInput {
+  name: string
+  displayName: string
+  description?: string
+  fields: FieldSpec[]
+}
+
+/** PATCH /search/collections/:name */
+export interface UpdateCollectionInput {
+  displayName?: string
+  description?: string | null
+  fields?: FieldSpec[]
+}
+
 export type FilterValue = string | number | boolean | (string | number)[]
 export type SortDir = 'asc' | 'desc'
 export interface SortSpec { field: string; dir: SortDir }
