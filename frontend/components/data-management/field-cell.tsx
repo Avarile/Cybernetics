@@ -5,7 +5,15 @@ function Dash() {
   return <span className="text-muted-foreground">—</span>
 }
 
-export function FieldCell({ field, value }: { field: FieldSpec; value: unknown }) {
+export function FieldCell({
+  field,
+  value,
+  highlighted,
+}: {
+  field: FieldSpec
+  value: unknown
+  highlighted?: string
+}) {
   if (value === null || value === undefined || value === '') return <Dash />
 
   if (field.type === 'boolean') {
@@ -30,5 +38,19 @@ export function FieldCell({ field, value }: { field: FieldSpec; value: unknown }
   if (field.enum) {
     return <Badge variant="outline" className="text-muted-foreground">{String(value)}</Badge>
   }
+  if (typeof highlighted === 'string' && highlighted.length) {
+    return (
+      <span
+        className="block max-w-[28ch] truncate"
+        dangerouslySetInnerHTML={{ __html: sanitizeMarks(highlighted) }}
+      />
+    )
+  }
   return <span className="block max-w-[28ch] truncate">{String(value)}</span>
+}
+
+/** Escape everything, then re-allow only <em>/<mark> tags (Meili's default highlight tags). */
+function sanitizeMarks(html: string): string {
+  const escaped = html.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return escaped.replace(/&lt;(\/?)(em|mark)&gt;/g, '<$1$2>')
 }

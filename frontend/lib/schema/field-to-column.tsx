@@ -15,6 +15,9 @@ export function buildColumns(fields: FieldSpec[]): ColumnDef<RecordHit>[] {
     enableSorting: !!field.sortable,
     enableHiding: true,
     meta: { field } satisfies RecordColumnMeta,
-    cell: ({ getValue }) => <FieldCell field={field} value={getValue()} />,
+    cell: ({ getValue, row }) => {
+      const formatted = (row.original as { _formatted?: Record<string, string> })._formatted
+      return <FieldCell field={field} value={getValue()} highlighted={formatted?.[field.name]} />
+    },
   }))
 }

@@ -32,4 +32,21 @@ describe('FieldCell', () => {
     render(<FieldCell field={{ name: 'title', type: 'string' }} value="Hello world" />)
     expect(screen.getByText('Hello world')).toBeInTheDocument()
   })
+  it('renders highlight marks for a string field', () => {
+    render(
+      <FieldCell field={{ name: 'title', type: 'string' }} value="hello world" highlighted="<em>hello</em> world" />
+    )
+    expect(screen.getByText('hello')).toBeInTheDocument()
+  })
+  it('escapes script tags in highlighted content instead of executing them', () => {
+    const { container } = render(
+      <FieldCell
+        field={{ name: 'title', type: 'string' }}
+        value="hello"
+        highlighted='<script>window.__pwned = true</script><em>hello</em>'
+      />
+    )
+    expect(container.querySelector('script')).toBeNull()
+    expect(screen.getByText('hello')).toBeInTheDocument()
+  })
 })
