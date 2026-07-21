@@ -17,4 +17,14 @@ describe('toSearchRequestBody', () => {
     const out = toSearchRequestBody({ ...base, filters: { tags: [], status: '', active: true, cat: ['a'] } })
     expect(out.filters).toEqual({ active: true, cat: ['a'] })
   })
+  it('includes facets and highlight when provided', () => {
+    const out = toSearchRequestBody(base, { facets: ['status'], highlight: ['title'] })
+    expect(out.facets).toEqual(['status'])
+    expect(out.highlight).toEqual(['title'])
+  })
+  it('omits facets and highlight when empty', () => {
+    const out = toSearchRequestBody(base, { facets: [], highlight: [] })
+    expect(out.facets).toBeUndefined()
+    expect(out.highlight).toBeUndefined()
+  })
 })

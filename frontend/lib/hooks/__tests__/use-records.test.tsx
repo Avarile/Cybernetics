@@ -25,6 +25,10 @@ describe('useRecords', () => {
     vi.mocked(recordService.query).mockResolvedValue({ hits: [{ id: 'r1' }], page: 1, limit: 20, totalHits: 1, totalPages: 1, processingTimeMs: 1 })
     const { result } = renderHook(() => useRecords(), { wrapper })
     await waitFor(() => expect(result.current.results?.totalHits).toBe(1))
-    expect(recordService.query).toHaveBeenCalledWith('products', expect.objectContaining({ page: 1, limit: 20 }))
+    expect(recordService.query).toHaveBeenCalledWith(
+      'products',
+      expect.objectContaining({ page: 1, limit: 20 }),
+      expect.objectContaining({ facets: [], highlight: [] }),
+    )
   })
 })

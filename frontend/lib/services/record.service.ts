@@ -11,9 +11,13 @@ import type {
 const base = (name: string) => `/search/collections/${encodeURIComponent(name)}`
 
 export const recordService = {
-  query(collection: string, query: SearchQuery): Promise<SearchResults> {
+  query(
+    collection: string,
+    query: SearchQuery,
+    opts?: { facets?: string[]; highlight?: string[] },
+  ): Promise<SearchResults> {
     return apiClient
-      .post<SearchResults>(`${base(collection)}/query`, toSearchRequestBody(query))
+      .post<SearchResults>(`${base(collection)}/query`, toSearchRequestBody(query, opts))
       .then((r) => r.data)
   },
   get(collection: string, id: string): Promise<RecordDetail> {

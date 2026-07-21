@@ -56,6 +56,8 @@ export interface SearchRequestBody {
   limit?: number
   filters?: Record<string, FilterValue>
   sort?: string[]
+  facets?: string[]
+  highlight?: string[]
 }
 
 export type RecordDocument = Record<string, unknown>
