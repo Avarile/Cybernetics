@@ -10,6 +10,7 @@ export function useQueryUrlSync() {
   const params = useSearchParams()
   const store = useDataManagementStore((s) => s)
   const hydrated = React.useRef(false)
+  const justHydrated = React.useRef(false)
 
   React.useEffect(() => {
     if (hydrated.current) return
@@ -30,11 +31,22 @@ export function useQueryUrlSync() {
       }
     }
     if (record) store.openDetail(record)
+    justHydrated.current = true
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   React.useEffect(() => {
     if (!hydrated.current) return
+    // Skip the write-back exactly once, on the hydration commit: this effect's
+    // closure still holds the pre-hydration store (collection null, q '', etc.)
+    // because it ran in the same commit as the hydration effect above. Running
+    // it here would strip deep-link params before the hydrated state
+    // propagates. The store setters trigger a re-render, and this effect runs
+    // again with the fresh, hydrated store — reproducing the same URL.
+    if (justHydrated.current) {
+      justHydrated.current = false
+      return
+    }
     const next = new URLSearchParams()
     if (store.collection) next.set('collection', store.collection)
     if (store.q) next.set('q', store.q)

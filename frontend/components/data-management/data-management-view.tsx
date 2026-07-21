@@ -11,7 +11,11 @@ import { useCollections } from '@/lib/hooks/use-collections'
 import { useCollectionDefinition } from '@/lib/hooks/use-collection-definition'
 import { useRecords } from '@/lib/hooks/use-records'
 import { useQueryUrlSync } from '@/lib/hooks/use-query-url-sync'
-import { useCollection, useSetCollection } from '@/lib/state-management/data-management.store'
+import {
+  useCollection,
+  useDataManagementStore,
+  useSetCollection,
+} from '@/lib/state-management/data-management.store'
 
 export function DataManagementView() {
   useQueryUrlSync()
@@ -23,9 +27,16 @@ export function DataManagementView() {
   const { results, isLoading, error, mutate } = useRecords()
 
   // Default to the first collection once the list resolves (unless the URL already set one).
+  // Read the live store value at effect-run time rather than the closed-over
+  // `collection`: useQueryUrlSync() hydrates the store synchronously earlier
+  // in this component's render, so under a warm useCollections() cache this
+  // effect can otherwise run with a stale (null) `collection` and clobber a
+  // collection that was just hydrated from `?collection=`.
   React.useEffect(() => {
-    if (!collection && collections.length > 0) setCollection(collections[0].name)
-  }, [collection, collections, setCollection])
+    if (collections.length > 0 && !useDataManagementStore.getState().collection) {
+      setCollection(collections[0].name)
+    }
+  }, [collections, setCollection])
 
   return (
     <div className="flex flex-col gap-4 py-4 md:gap-6 md:py-6">
