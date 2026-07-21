@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-vi.mock('@/lib/http/api-client', () => ({ apiClient: { get: vi.fn(), post: vi.fn() } }))
+vi.mock('@/lib/http/api-client', () => ({ apiClient: { get: vi.fn(), post: vi.fn(), delete: vi.fn() } }))
 
 import { apiClient } from '@/lib/http/api-client'
 import { fileService } from '@/lib/services/file.service'
@@ -32,5 +32,35 @@ describe('fileService', () => {
   it('downloadUrl returns the presigned url', async () => {
     vi.mocked(apiClient.get).mockResolvedValue({ data: { url: 'http://minio/get', expiresIn: 60 } })
     expect(await fileService.downloadUrl('f1')).toBe('http://minio/get')
+  })
+})
+
+describe('fileService.list', () => {
+  it('omits status when ALL and passes paging + mimeType', async () => {
+    const page = { items: [], total: 0, page: 2, limit: 20 }
+    vi.mocked(apiClient.get).mockResolvedValue({ data: page })
+    const res = await fileService.list({ status: 'ALL', mimeType: 'application/pdf', page: 2, limit: 20 })
+    expect(apiClient.get).toHaveBeenCalledWith('/files', {
+      params: { page: 2, limit: 20, mimeType: 'application/pdf' },
+    })
+    expect(res).toEqual(page)
+  })
+
+  it('sends status when not ALL', async () => {
+    const page = { items: [], total: 0, page: 1, limit: 20 }
+    vi.mocked(apiClient.get).mockResolvedValue({ data: page })
+    const res = await fileService.list({ status: 'QUARANTINED', page: 1, limit: 20 })
+    expect(apiClient.get).toHaveBeenCalledWith('/files', {
+      params: { page: 1, limit: 20, status: 'QUARANTINED' },
+    })
+    expect(res).toEqual(page)
+  })
+})
+
+describe('fileService.remove', () => {
+  it('DELETEs the file by id', async () => {
+    vi.mocked(apiClient.delete).mockResolvedValue({ data: undefined })
+    await expect(fileService.remove('abc')).resolves.toBeUndefined()
+    expect(apiClient.delete).toHaveBeenCalledWith('/files/abc')
   })
 })

@@ -133,3 +133,20 @@ export interface FileMetadata {
   createdAt: string
   updatedAt: string
 }
+
+export type FileStatus = 'PENDING' | 'AVAILABLE' | 'QUARANTINED'
+export type FileStatusFilter = 'ALL' | FileStatus
+
+export interface FilesQuery {
+  status: FileStatusFilter
+  mimeType?: string
+  page: number
+  limit: number
+}
+
+export interface PaginatedFiles {
+  items: FileMetadata[]
+  total: number
+  page: number
+  limit: number
+}

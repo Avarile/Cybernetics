@@ -1,8 +1,10 @@
 import { apiClient } from '@/lib/http/api-client'
 import type {
   FileMetadata,
+  FilesQuery,
   InitiateUploadInput,
   InitiateUploadResult,
+  PaginatedFiles,
   PresignedTarget,
 } from '@/lib/interfaces/search.interface'
 
@@ -35,5 +37,19 @@ export const fileService = {
       params: ttl ? { ttl } : undefined,
     })
     return data.url
+  },
+
+  list(query: FilesQuery): Promise<PaginatedFiles> {
+    const params: Record<string, string | number> = {
+      page: query.page,
+      limit: query.limit,
+    }
+    if (query.status !== 'ALL') params.status = query.status
+    if (query.mimeType) params.mimeType = query.mimeType
+    return apiClient.get<PaginatedFiles>('/files', { params }).then((r) => r.data)
+  },
+
+  remove(id: string): Promise<void> {
+    return apiClient.delete(`/files/${id}`).then(() => undefined)
   },
 }
