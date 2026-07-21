@@ -33,7 +33,7 @@ export function DataManagementView() {
         </p>
       </div>
 
-      <RecordToolbar fields={fields} />
+      <RecordToolbar fields={fields} facetDistribution={results?.facetDistribution} />
 
       <RecordDataTable
         fields={fields}

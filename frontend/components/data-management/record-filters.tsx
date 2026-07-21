@@ -5,7 +5,13 @@ import { FilterControl } from '@/components/data-management/field-to-filter'
 import { useDataManagementStore } from '@/lib/state-management/data-management.store'
 import type { FieldSpec } from '@/lib/interfaces/search.interface'
 
-export function RecordFilters({ fields }: { fields: FieldSpec[] }) {
+export function RecordFilters({
+  fields,
+  facetDistribution,
+}: {
+  fields: FieldSpec[]
+  facetDistribution?: Record<string, Record<string, number>>
+}) {
   const filters = useDataManagementStore((s) => s.filters)
   const setFilter = useDataManagementStore((s) => s.setFilter)
   const clearFilters = useDataManagementStore((s) => s.clearFilters)
@@ -22,6 +28,7 @@ export function RecordFilters({ fields }: { fields: FieldSpec[] }) {
           key={field.name}
           field={field}
           value={filters[field.name]}
+          counts={facetDistribution?.[field.name]}
           onChange={(v) => setFilter(field.name, v)}
         />
       ))}

@@ -11,10 +11,12 @@ import type { FieldSpec, FilterValue } from '@/lib/interfaces/search.interface'
 export function FilterControl({
   field,
   value,
+  counts,
   onChange,
 }: {
   field: FieldSpec
   value: FilterValue | undefined
+  counts?: Record<string, number>
   onChange: (v: FilterValue | undefined) => void
 }) {
   if (field.enum && field.enum.length) {
@@ -37,7 +39,9 @@ export function FilterControl({
                 checked={selected.includes(key)}
                 onCheckedChange={(c) => toggle(key, !!c)}
               />
-              <Label htmlFor={`f-${field.name}-${key}`}>{key}</Label>
+              <Label htmlFor={`f-${field.name}-${key}`}>
+                {key}{counts && key in counts ? ` (${counts[key]})` : ''}
+              </Label>
             </div>
           )
         })}

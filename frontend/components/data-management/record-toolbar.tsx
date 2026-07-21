@@ -17,7 +17,13 @@ import { useRecordMutations } from '@/lib/hooks/use-record-mutations'
 import { useDataManagementStore } from '@/lib/state-management/data-management.store'
 import type { FieldSpec } from '@/lib/interfaces/search.interface'
 
-export function RecordToolbar({ fields }: { fields: FieldSpec[] }) {
+export function RecordToolbar({
+  fields,
+  facetDistribution,
+}: {
+  fields: FieldSpec[]
+  facetDistribution?: Record<string, Record<string, number>>
+}) {
   const isAdmin = useIsAdmin()
   const { collections } = useCollections()
   const s = useDataManagementStore()
@@ -52,7 +58,7 @@ export function RecordToolbar({ fields }: { fields: FieldSpec[] }) {
           </Button>
         </PopoverTrigger>
         <PopoverContent align="start" className="w-72">
-          <RecordFilters fields={fields} />
+          <RecordFilters fields={fields} facetDistribution={facetDistribution} />
         </PopoverContent>
       </Popover>
 

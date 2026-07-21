@@ -27,4 +27,8 @@ describe('FilterControl', () => {
     fireEvent.click(screen.getByLabelText('1'))
     expect(onChange).toHaveBeenCalledWith([1])
   })
+  it('enum: renders facet counts when provided', () => {
+    render(<FilterControl field={{ name: 'status', type: 'string', enum: ['active'] }} value={undefined} counts={{ active: 7 }} onChange={() => {}} />)
+    expect(screen.getByText('active (7)')).toBeInTheDocument()
+  })
 })
