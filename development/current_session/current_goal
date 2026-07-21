@@ -1,14 +1,19 @@
-# Goal: use the existing components in frontend/components/ui, design and implement a data control panel.
+# Goal (v2): extend the data control panel with a Postgres-backed single-record read, collection/schema management, a redesigned creation flow, and an enriched query experience.
 
-feature description: This is the main data control page, it should have a input / new data input component(basically a form to input data, upload file) and a data query / view component(this is basically a table with proper pagination)
+Builds on the shipped v1 data control panel (`/dashboard/data-management`, records CRUD over the search-service). v1 design/plan are in git history; v2 supersedes them in this session.
 
-1. This is complex data management page, may need complex statemanagement accordingly.
-   1. The state management should take care most if not all setState operations, so minimal state operation is done from the UI components.
-   2. The table must refer the design of frontend/components/data-table.tsx
-2. this is a complex page, so discuss with me if you need.
-3. Design this professionally as it is a production grade page / view / components(and state management)
-4. This page is in frontend/app/dashboard/data-management
-  
+feature description: Add to the existing data-management page. Frontend-first, with two backend touches — one required, one optional:
+
+1. Single-record read (REQUIRED backend endpoint): add `GET /search/collections/:name/records/:id` served from Postgres (source of truth, always fresh, exposes indexState). Resolves by UUID or externalId, mirroring the DELETE route's dual-key logic; open to any authenticated principal (reads are global). This unlocks: detail/edit for ANY record (on or off the current result page), per-record deep links, and immediate visibility of a just-created record before it is indexed — the core fix for the async-indexing gap.
+2. Collection / schema management (admin): create, edit, and delete collections and their field schemas from the UI, via modals/sheets reached from the collection dropdown. The backend collection CRUD endpoints already exist — the frontend just doesn't call them yet.
+3. Creation / editing redesign: stop hiding the async-indexing gap. On create, open an immediate PG-backed detail view that shows live index status (PENDING → INDEXED / FAILED) and polls while pending — this replaces the fixed 1200ms guess as the correctness path. The list still revalidates on a bounded schedule (optionally with an optimistic pending row). Edit stays a re-persist on externalId and now works for any record via the PG read; records without an externalId are read-only.
+4. Query enrichment (all four confirmed): faceted filters with live counts (facetDistribution), recency sort (free) + date-range filter (the OPTIONAL backend touch — needs range operators in the query filter builder), URL-synced query state, and hit highlighting + multi-column sort.
+
+## Constraints (locked with user)
+- Search/list reads stay on Meili (POST /query). The only new read endpoint is GET /records/:id from Postgres. No PG list endpoint — browsing still flows through Meili.
+- Per-record deep links are delivered on the single page via a `?record=<id>` URL param (resolved through the new PG read), NOT routed record pages — the single-page IA stays.
+- IA stays single-page + collection dropdown; schema management lives in modals/sheets, not routes.
+- Preserve the clean v1 state boundary: Zustand (UI/query/selection/panels) · react-hook-form+zod (record & schema forms) · SWR (server cache). Optimistic pending rows live in the SWR cache, not Zustand.
+
 ## Actions to take
-
-Design this page and output the design to [development/current_session/current_design]
+Design this iteration and output the design to development/current_session/current_design.md, then an implementation plan to development/current_session/current_implementation_plan.md.

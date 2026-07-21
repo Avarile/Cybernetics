@@ -1,1505 +1,597 @@
-# Data Control Panel Implementation Plan
+# Data Control Panel v2 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a production-grade, schema-driven data control panel at `/dashboard/data-management` that lists records from a search-service collection (server-side pagination/filter/sort) and lets admins create/edit/delete records with file attachments.
+**Goal:** Extend the shipped data control panel with a Postgres-backed single-record read (enabling detail/edit/deep-link for any record and honest async-index status), collection/schema management, and query enrichment (facets, highlight, multi-sort, URL-sync).
 
-**Architecture:** Three state layers keep UI components near-stateless — a Zustand store owns page orchestration (collection, query params, selection, dialogs), react-hook-form owns transient form input, and SWR owns server cache. A TanStack table runs in fully controlled/manual mode driven by the store. Every column, filter, sort, and form input is derived at runtime from the active collection's `FieldSpec[]`.
+**Architecture:** One small backend endpoint (`GET /search/collections/:name/records/:id`, served from Postgres) becomes the correctness backbone: the detail drawer fetches by id (works off-page, always fresh, live `indexState`), and creation opens that PG-backed view instead of guessing with a fixed delay. Everything else is frontend, preserving v1's three-layer state boundary (Zustand / react-hook-form+zod / SWR). Schema management calls collection CRUD endpoints that already exist.
 
-**Tech Stack:** Next.js 16 (App Router), React, TypeScript, Zustand v5 (+devtools), SWR v2, react-hook-form v7 + `@hookform/resolvers/zod` + Zod v4, `@tanstack/react-table` v8, axios (shared `apiClient`), sonner, shadcn/ui (`components/ui/*`), Hugeicons, Vitest + Testing Library.
+**Tech Stack:** Backend — NestJS, Drizzle, BullMQ, Jest. Frontend — Next.js 16 (App Router), React, TypeScript, Zustand v5 (+devtools), SWR v2, react-hook-form v7 + `@hookform/resolvers/zod` + Zod v4, `@tanstack/react-table` v8, axios (shared `apiClient`), sonner, shadcn/ui (`components/ui/*`), Hugeicons, Vitest + Testing Library.
 
 ## Global Constraints
 
 - **Design source of truth:** `development/current_session/current_design.md`. Do not diverge from its resolved decisions.
-- **No new npm dependencies.** Everything needed is already installed.
-- **Path alias:** `@/` → `frontend/` root. All imports use it.
-- **Zustand pattern:** mirror `lib/state-management/app.store.ts` — `create()(devtools(creator, { name, enabled: process.env.NODE_ENV === 'development' }))`, named action strings as the 3rd arg to `set`, exported selector hooks.
-- **Forms:** react-hook-form + `zodResolver`, using shadcn `Field/FieldLabel/FieldError` (mirror `components/login-form.tsx`). Zod uses positional message strings (e.g. `z.string().min(1, 'msg')`).
-- **Server-side only:** the table never sorts/filters/paginates in memory. `manualPagination`, `manualSorting`, `manualFiltering` are all `true`.
-- **RBAC:** writes (create/edit/delete/reindex) are admin-only via `useIsAdmin()` from `lib/hooks/use-permission.ts`. Reads work for any authenticated role.
-- **Record identity:** a hit is `{ id: <uuid>, externalId?, ...document, createdAt: <epoch ms>, updatedAt: <epoch ms> }`. Use `id` for `getRowId`/delete. `persist` upserts on `externalId`, so **create auto-assigns an `externalId`** (`crypto.randomUUID()` unless the record carries one) and **edit requires an `externalId`**.
-- **Eventual consistency:** `persist` returns `202`/`PENDING`; a written record is not immediately queryable. After a write, toast + revalidate the records key after a short delay.
-- **Filters are exact-match** (backend operator is `=`/`IN`): enum→multiselect (IN), boolean→tri-state, number→exact. Free-text "contains" is the global `q` box. Number-range deferred.
-- **Files:** keep each file focused and under ~500 lines.
-- **Tests:** run with `npx vitest run <path>`. Tests colocate in a sibling `__tests__/` dir. jsdom + Testing Library are pre-configured (`vitest.config.ts`, `vitest.setup.ts`).
-- **Commit** after each task with a `feat(data-mgmt): …` conventional message.
+- **No new npm dependencies** on either side. Everything needed is installed.
+- **Backend rules (`api/CLAUDE.md`):** read a file before editing; keep files under 500 lines; validate input at boundaries; NO `Co-Authored-By` trailer on commits. Run `npm run build && npm test` in `api/` before considering a backend task done.
+- **Backend read auth:** reads are global — the new single-record GET is open to any authenticated principal (like `POST query`). Writes stay admin-only.
+- **PG read shape:** the single-record read returns `document` as a **nested object** with system fields as siblings: `{ id, externalId, document, indexState, indexError, createdAt, updatedAt }`. This differs from search hits, which **flatten** document fields to the top level. Never conflate `RecordDetail` (nested) with `RecordHit` (flat).
+- **Frontend path alias:** `@/` → `frontend/` root. All imports use it.
+- **Zustand pattern:** mirror the existing `data-management.store.ts` — `create()(devtools(creator, { name, enabled: process.env.NODE_ENV === 'development' }))`, named action strings as the 3rd arg to `set`, exported selector hooks.
+- **Forms:** react-hook-form + `zodResolver`, shadcn `Field/FieldLabel/FieldError` (mirror `record-form.tsx`). Zod uses positional message strings.
+- **RBAC:** writes (record create/edit/delete/reindex, ALL collection management) are admin-only via `useIsAdmin()` from `lib/hooks/use-permission.ts`. The single-record read is open.
+- **Record identity:** `persist` upserts on `externalId`; create auto-assigns an `externalId` (`crypto.randomUUID()` unless supplied); edit requires an `externalId`; `id` (PG uuid) is used for `getRowId`, delete, and the single-record read (which also accepts an `externalId` as the key).
+- **Frontend tests:** `cd frontend && npx vitest run <path>`; colocated `__tests__/`; jsdom + Testing Library pre-configured.
+- **Backend tests:** `cd api && npx jest <path>`; specs colocate as `*.spec.ts`.
+- **Commit** after each task. Frontend: `feat(data-mgmt): …`. Backend: `feat(search): …`. Conventional messages, no attribution trailer.
 
 ---
+
+## Phases
+
+- **Phase 1 — Single-record read + detail/creation redesign** (Tasks 1–4). Ships working detail/edit for any record and honest create status. Independently valuable.
+- **Phase 2 — Schema/collection management** (Tasks 5–9). Admin create/edit/delete collections.
+- **Phase 3 — Query enrichment** (Tasks 10–14). Facets, highlight, multi-sort, URL-sync + deep-link.
+- **Phase 4 — Optional: date-range filter** (Task 15). Only if the filter-builder extension is wanted.
 
 ## File Structure
 
 ```
+api/src/features/search-service/
+  search-record.service.ts        (Task 1: +RecordView, +toRecordView, +get())
+  search.controller.ts            (Task 1: +GET records/:id)
+  search-record.service.spec.ts   (Task 1: +get() tests)
+
 frontend/
-  app/dashboard/data-management/page.tsx            (Task 15)
+  lib/interfaces/search.interface.ts    (Task 2: +RecordDetail; Task 5: +Create/UpdateCollectionInput)
+  lib/services/record.service.ts        (Task 2: +get)   (Task 10: query facets/highlight)
+  lib/services/collection.service.ts    (Task 5: +create/update/remove)
+  lib/schema/serialize-query.ts         (Task 10: facets/highlight)
+  lib/schema/validate-field-spec.ts     (Task 6, new)
+  lib/schema/field-spec-to-zod.ts       (Task 6, new)
+  lib/hooks/use-record.ts               (Task 2, new)
+  lib/hooks/use-records.ts              (Task 10: pass fields → facets/highlight)
+  lib/hooks/use-record-mutations.ts     (Task 4: create→PG detail + bounded revalidate)
+  lib/hooks/use-collection-mutations.ts (Task 5, new)
+  lib/hooks/use-query-url-sync.ts       (Task 14, new)
+  lib/state-management/data-management.store.ts  (Task 9: collectionPanel) (Task 13: additive sort)
   components/data-management/
-    data-management-view.tsx                         (Task 15)
-    record-toolbar.tsx                               (Task 12)
-    record-filters.tsx                               (Task 12)
-    record-data-table.tsx                            (Task 11)
-    field-cell.tsx                                   (Task 6)
-    field-to-input.tsx                               (Task 7)
-    field-to-filter.tsx                              (Task 8)
-    record-form.tsx                                  (Task 13)
-    attachments-field.tsx                            (Task 13)
-    record-input-panel.tsx                           (Task 14)
-    record-detail-drawer.tsx                         (Task 14)
-    record-delete-dialog.tsx                         (Task 14)
-  lib/
-    interfaces/search.interface.ts                   (Task 1)
-    schema/serialize-query.ts                        (Task 1)
-    schema/field-to-zod.ts                           (Task 5)
-    schema/field-to-column.tsx                       (Task 6)
-    services/collection.service.ts                   (Task 2)
-    services/record.service.ts                       (Task 2)
-    services/file.service.ts                         (Task 3)
-    state-management/data-management.store.ts        (Task 4)
-    hooks/use-collections.ts                          (Task 9)
-    hooks/use-collection-definition.ts               (Task 9)
-    hooks/use-records.ts                             (Task 9)
-    hooks/use-record-mutations.ts                    (Task 10)
-    hooks/use-file-upload.ts                         (Task 10)
+    record-status-badge.tsx       (Task 3, new)
+    record-form.tsx               (Task 3: initialDocument/externalId props)
+    record-detail-drawer.tsx      (Task 3: PG-backed via useRecord)
+    data-management-view.tsx      (Task 3: drop results prop; Task 9: manager; Task 11: facets; Task 14: url-sync)
+    field-spec-editor.tsx         (Task 7, new)
+    collection-editor-sheet.tsx   (Task 8, new)
+    collection-manager-dialog.tsx (Task 9, new)
+    record-toolbar.tsx            (Task 9: Manage… + Reindex; Task 11: facetDistribution prop)
+    record-filters.tsx            (Task 11: facet counts)
+    field-to-filter.tsx           (Task 11: counts; Task 15: range)
+    field-cell.tsx                (Task 12: highlight)
+    field-to-column.tsx           (Task 12: pass _formatted)  [in lib/schema/]
+    record-data-table.tsx         (Task 13: multi-sort headers)
 ```
 
 ---
 
-## Task 1: Domain types + query serialization
+# Phase 1 — Single-record read + detail/creation redesign
+
+## Task 1: Backend — single-record read endpoint
 
 **Files:**
-- Create: `frontend/lib/interfaces/search.interface.ts`
-- Create: `frontend/lib/schema/serialize-query.ts`
-- Test: `frontend/lib/schema/__tests__/serialize-query.test.ts`
+- Modify: `api/src/features/search-service/search-record.service.ts`
+- Modify: `api/src/features/search-service/search.controller.ts`
+- Test: `api/src/features/search-service/search-record.service.spec.ts`
 
 **Interfaces:**
-- Produces: all shared types (`FieldSpec`, `FieldType`, `CollectionView`, `FilterValue`, `SortSpec`, `SearchQuery`, `SearchRequestBody`, `RecordDocument`, `RecordHit`, `SearchResults<T>`, `PersistRecordInput`, `PersistResult`, `IndexState`, `InitiateUploadInput`, `PresignedTarget`, `InitiateUploadResult`, `FileMetadata`) and `toSearchRequestBody(query: SearchQuery): SearchRequestBody`.
+- Produces (REST): `GET /search/collections/:name/records/:id` → `200 { id, externalId, document, indexState, indexError, createdAt, updatedAt }`, `404 SEARCH_RECORD_NOT_FOUND`.
+- Produces (service): `SearchRecordService.get(collection: string, key: string): Promise<RecordView>` and exported `interface RecordView`.
 
-- [ ] **Step 1: Create the interfaces file**
+- [ ] **Step 1: Write the failing tests** — append to `search-record.service.spec.ts`:
 
 ```ts
-// frontend/lib/interfaces/search.interface.ts
+describe('SearchRecordService.get', () => {
+  it('404s on an unknown collection', async () => {
+    const { service } = make();
+    await expect(service.get('nope', 'rec-1')).rejects.toMatchObject({
+      code: ErrorCode.SEARCH_COLLECTION_NOT_FOUND,
+    });
+  });
 
-export type FieldType = 'string' | 'number' | 'boolean' | 'date' | 'string[]' | 'number[]'
+  it('resolves a UUID key via findLiveById', async () => {
+    const uuid = '11111111-1111-1111-1111-111111111111';
+    const { service, records } = make({
+      findLiveById: jest.fn(async () => ({
+        id: uuid, collection: 'articles', externalId: 'ext-1',
+        document: { title: 'Hi' }, indexState: 'INDEXED', indexError: null,
+        createdAt: new Date('2020-01-01'), updatedAt: new Date('2020-01-02'),
+      })),
+    });
+    const view = await service.get('articles', uuid);
+    expect(records.findLiveById).toHaveBeenCalledWith(uuid);
+    expect(view).toMatchObject({ id: uuid, externalId: 'ext-1', document: { title: 'Hi' }, indexState: 'INDEXED' });
+  });
 
-/** One field in a collection definition (mirror of the backend FieldSpec). */
-export interface FieldSpec {
-  name: string
-  type: FieldType
-  required?: boolean
-  searchable?: boolean
-  filterable?: boolean
-  sortable?: boolean
-  enum?: (string | number)[]
-}
+  it('resolves a non-UUID key via findLiveByExternalId', async () => {
+    const { service, records } = make({
+      findLiveByExternalId: jest.fn(async () => ({
+        id: 'rec-9', collection: 'articles', externalId: 'ext-9',
+        document: {}, indexState: 'PENDING', indexError: null,
+        createdAt: new Date(), updatedAt: new Date(),
+      })),
+    });
+    const view = await service.get('articles', 'ext-9');
+    expect(records.findLiveByExternalId).toHaveBeenCalledWith('articles', 'ext-9');
+    expect(view.indexState).toBe('PENDING');
+  });
 
-/** GET /search/collections and GET /search/collections/:name */
-export interface CollectionView {
-  name: string
-  displayName: string
-  description: string | null
-  fields: FieldSpec[]
-  createdAt: string
-  updatedAt: string
-}
+  it('404s when the row belongs to another collection', async () => {
+    const { service } = make({
+      findLiveByExternalId: jest.fn(async () => ({ id: 'r', collection: 'other', externalId: 'e', document: {} })),
+    });
+    await expect(service.get('articles', 'e')).rejects.toMatchObject({
+      code: ErrorCode.SEARCH_RECORD_NOT_FOUND,
+    });
+  });
+});
+```
 
-export type FilterValue = string | number | boolean | (string | number)[]
-export type SortDir = 'asc' | 'desc'
-export interface SortSpec { field: string; dir: SortDir }
+- [ ] **Step 2: Run tests to verify they fail**
 
-/** Normalized query state held in the store. */
-export interface SearchQuery {
-  q: string
-  page: number
-  limit: number
-  filters: Record<string, FilterValue>
-  sort: SortSpec[]
-}
+Run: `cd api && npx jest src/features/search-service/search-record.service.spec.ts -t "SearchRecordService.get"`
+Expected: FAIL — `service.get is not a function`.
 
-/** Wire body POSTed to /search/collections/:name/query. */
-export interface SearchRequestBody {
-  q?: string
-  page?: number
-  limit?: number
-  filters?: Record<string, FilterValue>
-  sort?: string[]
-}
+- [ ] **Step 3: Add `RecordView`, `toRecordView`, and `get()` to `search-record.service.ts`**
 
-export type RecordDocument = Record<string, unknown>
+Add the interface near `PersistResult`:
 
-/** A single search hit: system fields + the persisted document fields. */
-export type RecordHit = {
-  id: string
-  externalId?: string
-  createdAt?: number
-  updatedAt?: number
-} & RecordDocument
-
-export interface SearchResults<T = RecordHit> {
-  hits: T[]
-  page: number
-  limit: number
-  totalHits: number
-  totalPages: number
-  facetDistribution?: Record<string, Record<string, number>>
-  processingTimeMs: number
-}
-
-export interface PersistRecordInput {
-  externalId?: string
-  document: RecordDocument
-}
-
-export type IndexState = 'PENDING' | 'INDEXED' | 'FAILED'
-export interface PersistResult {
-  id: string
-  externalId: string | null
-  indexState: IndexState
-}
-
-// ── Files (presigned upload) ────────────────────────────────────────
-export interface InitiateUploadInput {
-  filename: string
-  mimeType: string
-  size: number
-  sha256?: string
-  metadata?: Record<string, unknown>
-}
-export interface PresignedTarget {
-  url: string
-  fields?: Record<string, string>
-  expiresIn: number
-}
-export interface InitiateUploadResult {
-  fileId: string
-  deduplicated: boolean
-  upload?: PresignedTarget
-}
-export interface FileMetadata {
-  id: string
-  ownerId: string | null
-  filename: string
-  mimeType: string
-  size: number
-  checksumSha256: string | null
-  status: string
-  metadata: Record<string, unknown>
-  createdAt: string
-  updatedAt: string
+```ts
+export interface RecordView {
+  id: string;
+  externalId: string | null;
+  document: Record<string, unknown>;
+  indexState: IndexState;
+  indexError: string | null;
+  createdAt: Date;
+  updatedAt: Date;
 }
 ```
 
-- [ ] **Step 2: Write the failing test**
+Add the method inside the class (e.g. after `remove`):
 
 ```ts
-// frontend/lib/schema/__tests__/serialize-query.test.ts
-import { describe, it, expect } from 'vitest'
-import { toSearchRequestBody } from '@/lib/schema/serialize-query'
-import type { SearchQuery } from '@/lib/interfaces/search.interface'
-
-const base: SearchQuery = { q: '', page: 1, limit: 20, filters: {}, sort: [] }
-
-describe('toSearchRequestBody', () => {
-  it('omits empty q, filters, and sort', () => {
-    expect(toSearchRequestBody(base)).toEqual({ page: 1, limit: 20 })
-  })
-  it('trims q and maps sort specs to "field:dir"', () => {
-    const out = toSearchRequestBody({ ...base, q: '  laptop ', sort: [{ field: 'price', dir: 'desc' }] })
-    expect(out.q).toBe('laptop')
-    expect(out.sort).toEqual(['price:desc'])
-  })
-  it('drops empty-array and empty-string filter values', () => {
-    const out = toSearchRequestBody({ ...base, filters: { tags: [], status: '', active: true, cat: ['a'] } })
-    expect(out.filters).toEqual({ active: true, cat: ['a'] })
-  })
-})
-```
-
-- [ ] **Step 3: Run test to verify it fails**
-
-Run: `cd frontend && npx vitest run lib/schema/__tests__/serialize-query.test.ts`
-Expected: FAIL — cannot resolve `@/lib/schema/serialize-query`.
-
-- [ ] **Step 4: Create the serializer**
-
-```ts
-// frontend/lib/schema/serialize-query.ts
-import type { SearchQuery, SearchRequestBody } from '@/lib/interfaces/search.interface'
-
-/** Normalize UI query state into the API request body. */
-export function toSearchRequestBody(query: SearchQuery): SearchRequestBody {
-  const body: SearchRequestBody = { page: query.page, limit: query.limit }
-  if (query.q.trim()) body.q = query.q.trim()
-
-  const filters: Record<string, SearchQuery['filters'][string]> = {}
-  for (const [field, value] of Object.entries(query.filters)) {
-    if (value === undefined || value === null) continue
-    if (Array.isArray(value) && value.length === 0) continue
-    if (typeof value === 'string' && value === '') continue
-    filters[field] = value
+  /** Read one record from Postgres (source of truth). Resolves by id or externalId. */
+  async get(collection: string, key: string): Promise<RecordView> {
+    await this.requireCollection(collection);
+    let row = UUID_RE.test(key) ? await this.records.findLiveById(key) : null;
+    if (!row) row = await this.records.findLiveByExternalId(collection, key);
+    if (!row || row.collection !== collection) {
+      throw this.errors.create(ErrorCode.SEARCH_RECORD_NOT_FOUND);
+    }
+    return toRecordView(row);
   }
-  if (Object.keys(filters).length) body.filters = filters
+```
 
-  if (query.sort.length) body.sort = query.sort.map((s) => `${s.field}:${s.dir}`)
-  return body
+Add the mapper at the bottom of the file (next to `toFilterClause`):
+
+```ts
+/** Map a DB row to the API record view. */
+function toRecordView(row: {
+  id: string;
+  externalId: string | null;
+  document: Record<string, unknown>;
+  indexState: IndexState;
+  indexError: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+}): RecordView {
+  return {
+    id: row.id,
+    externalId: row.externalId,
+    document: row.document,
+    indexState: row.indexState,
+    indexError: row.indexError,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
 }
 ```
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 4: Add the route to `search.controller.ts`**
 
-Run: `cd frontend && npx vitest run lib/schema/__tests__/serialize-query.test.ts`
-Expected: PASS (3 tests).
+Add `Get` to the `@nestjs/common` import, then add the method to `SearchQueryController` (open — no `@Roles`):
+
+```ts
+  @Get('records/:id')
+  getRecord(@Param('name') name: string, @Param('id') id: string) {
+    return this.records.get(name, id);
+  }
+```
+
+- [ ] **Step 5: Run tests + build to verify pass**
+
+Run: `cd api && npx jest src/features/search-service/search-record.service.spec.ts && npm run build`
+Expected: PASS (all get() tests) and a clean build.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add frontend/lib/interfaces/search.interface.ts frontend/lib/schema/serialize-query.ts frontend/lib/schema/__tests__/serialize-query.test.ts
-git commit -m "feat(data-mgmt): search domain types + query serializer"
+git add api/src/features/search-service/search-record.service.ts api/src/features/search-service/search.controller.ts api/src/features/search-service/search-record.service.spec.ts
+git commit -m "feat(search): single-record read from Postgres (GET records/:id)"
 ```
 
 ---
 
-## Task 2: Collection + record services
+## Task 2: Frontend — RecordDetail type, service.get, useRecord hook
 
 **Files:**
-- Create: `frontend/lib/services/collection.service.ts`
-- Create: `frontend/lib/services/record.service.ts`
-- Test: `frontend/lib/services/__tests__/record.service.test.ts`
+- Modify: `frontend/lib/interfaces/search.interface.ts`
+- Modify: `frontend/lib/services/record.service.ts`
+- Create: `frontend/lib/hooks/use-record.ts`
+- Test: `frontend/lib/services/__tests__/record.service.test.ts` (extend)
+- Test: `frontend/lib/hooks/__tests__/use-record.test.tsx`
 
 **Interfaces:**
-- Consumes: `apiClient` (`lib/http/api-client.ts`); types + `toSearchRequestBody` from Task 1.
-- Produces: `collectionService.list(): Promise<CollectionView[]>`, `collectionService.get(name): Promise<CollectionView>`; `recordService.query(collection, query): Promise<SearchResults>`, `recordService.persist(collection, records): Promise<PersistResult[]>`, `recordService.remove(collection, id): Promise<void>`, `recordService.reload(collection): Promise<void>`.
+- Consumes: `apiClient`, `IndexState`, `RecordDocument`.
+- Produces: `RecordDetail`; `recordService.get(collection, id): Promise<RecordDetail>`; `useRecord(collection, id): { record?, isLoading, error, mutate }` (polls while `indexState==='PENDING'`).
 
-- [ ] **Step 1: Create the services**
-
-```ts
-// frontend/lib/services/collection.service.ts
-import { apiClient } from '@/lib/http/api-client'
-import type { CollectionView } from '@/lib/interfaces/search.interface'
-
-export const collectionService = {
-  list(): Promise<CollectionView[]> {
-    return apiClient.get<CollectionView[]>('/search/collections').then((r) => r.data)
-  },
-  get(name: string): Promise<CollectionView> {
-    return apiClient
-      .get<CollectionView>(`/search/collections/${encodeURIComponent(name)}`)
-      .then((r) => r.data)
-  },
-}
-```
+- [ ] **Step 1: Add `RecordDetail` to `search.interface.ts`** (after `PersistResult`):
 
 ```ts
-// frontend/lib/services/record.service.ts
-import { apiClient } from '@/lib/http/api-client'
-import { toSearchRequestBody } from '@/lib/schema/serialize-query'
-import type {
-  PersistRecordInput,
-  PersistResult,
-  SearchQuery,
-  SearchResults,
-} from '@/lib/interfaces/search.interface'
-
-const base = (name: string) => `/search/collections/${encodeURIComponent(name)}`
-
-export const recordService = {
-  query(collection: string, query: SearchQuery): Promise<SearchResults> {
-    return apiClient
-      .post<SearchResults>(`${base(collection)}/query`, toSearchRequestBody(query))
-      .then((r) => r.data)
-  },
-  persist(collection: string, records: PersistRecordInput[]): Promise<PersistResult[]> {
-    return apiClient
-      .post<PersistResult[]>(`${base(collection)}/records`, { records })
-      .then((r) => r.data)
-  },
-  remove(collection: string, id: string): Promise<void> {
-    return apiClient
-      .delete(`${base(collection)}/records/${encodeURIComponent(id)}`)
-      .then(() => undefined)
-  },
-  reload(collection: string): Promise<void> {
-    return apiClient.post(`${base(collection)}/reload`).then(() => undefined)
-  },
-}
-```
-
-- [ ] **Step 2: Write the failing test**
-
-```ts
-// frontend/lib/services/__tests__/record.service.test.ts
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-
-vi.mock('@/lib/http/api-client', () => ({
-  apiClient: { get: vi.fn(), post: vi.fn(), delete: vi.fn() },
-}))
-
-import { apiClient } from '@/lib/http/api-client'
-import { recordService } from '@/lib/services/record.service'
-import { collectionService } from '@/lib/services/collection.service'
-
-beforeEach(() => vi.clearAllMocks())
-
-describe('recordService', () => {
-  it('query posts the serialized body to /query', async () => {
-    vi.mocked(apiClient.post).mockResolvedValue({ data: { hits: [], page: 1, limit: 20, totalHits: 0, totalPages: 0, processingTimeMs: 1 } })
-    await recordService.query('products', { q: 'x', page: 2, limit: 20, filters: {}, sort: [] })
-    expect(apiClient.post).toHaveBeenCalledWith('/search/collections/products/query', { q: 'x', page: 2, limit: 20 })
-  })
-  it('persist wraps records under { records }', async () => {
-    vi.mocked(apiClient.post).mockResolvedValue({ data: [] })
-    await recordService.persist('products', [{ externalId: 'e1', document: { a: 1 } }])
-    expect(apiClient.post).toHaveBeenCalledWith('/search/collections/products/records', { records: [{ externalId: 'e1', document: { a: 1 } }] })
-  })
-  it('remove deletes by id', async () => {
-    vi.mocked(apiClient.delete).mockResolvedValue({ data: undefined })
-    await recordService.remove('products', 'abc')
-    expect(apiClient.delete).toHaveBeenCalledWith('/search/collections/products/records/abc')
-  })
-})
-
-describe('collectionService', () => {
-  it('get fetches a single collection by name', async () => {
-    vi.mocked(apiClient.get).mockResolvedValue({ data: { name: 'products', fields: [] } })
-    await collectionService.get('products')
-    expect(apiClient.get).toHaveBeenCalledWith('/search/collections/products')
-  })
-})
-```
-
-- [ ] **Step 3: Run test to verify it passes**
-
-Run: `cd frontend && npx vitest run lib/services/__tests__/record.service.test.ts`
-Expected: PASS (4 tests).
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add frontend/lib/services/collection.service.ts frontend/lib/services/record.service.ts frontend/lib/services/__tests__/record.service.test.ts
-git commit -m "feat(data-mgmt): collection + record services"
-```
-
----
-
-## Task 3: File service (presigned upload)
-
-**Files:**
-- Create: `frontend/lib/services/file.service.ts`
-- Test: `frontend/lib/services/__tests__/file.service.test.ts`
-
-**Interfaces:**
-- Consumes: `apiClient`; `InitiateUploadInput`, `InitiateUploadResult`, `PresignedTarget`, `FileMetadata` from Task 1.
-- Produces: `fileService.initiate(input): Promise<InitiateUploadResult>`, `fileService.uploadToPolicy(target, file): Promise<void>`, `fileService.complete(fileId, sha256?): Promise<FileMetadata>`, `fileService.get(id): Promise<FileMetadata>`, `fileService.downloadUrl(id, ttl?): Promise<string>`.
-
-- [ ] **Step 1: Create the file service**
-
-```ts
-// frontend/lib/services/file.service.ts
-import { apiClient } from '@/lib/http/api-client'
-import type {
-  FileMetadata,
-  InitiateUploadInput,
-  InitiateUploadResult,
-  PresignedTarget,
-} from '@/lib/interfaces/search.interface'
-
-export const fileService = {
-  initiate(input: InitiateUploadInput): Promise<InitiateUploadResult> {
-    return apiClient.post<InitiateUploadResult>('/files', input).then((r) => r.data)
-  },
-
-  /** Upload bytes straight to storage via the presigned POST policy (no bearer). */
-  async uploadToPolicy(target: PresignedTarget, file: File): Promise<void> {
-    const form = new FormData()
-    for (const [k, v] of Object.entries(target.fields ?? {})) form.append(k, v)
-    form.append('file', file) // MUST be appended last for a MinIO POST policy
-    const res = await fetch(target.url, { method: 'POST', body: form })
-    if (!res.ok) throw new Error(`Upload failed (${res.status})`)
-  },
-
-  complete(fileId: string, sha256?: string): Promise<FileMetadata> {
-    return apiClient
-      .post<FileMetadata>(`/files/${fileId}/complete`, sha256 ? { sha256 } : {})
-      .then((r) => r.data)
-  },
-
-  get(id: string): Promise<FileMetadata> {
-    return apiClient.get<FileMetadata>(`/files/${id}`).then((r) => r.data)
-  },
-
-  async downloadUrl(id: string, ttl?: number): Promise<string> {
-    const { data } = await apiClient.get<PresignedTarget>(`/files/${id}/download-url`, {
-      params: ttl ? { ttl } : undefined,
-    })
-    return data.url
-  },
-}
-```
-
-- [ ] **Step 2: Write the failing test**
-
-```ts
-// frontend/lib/services/__tests__/file.service.test.ts
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-
-vi.mock('@/lib/http/api-client', () => ({ apiClient: { get: vi.fn(), post: vi.fn() } }))
-
-import { apiClient } from '@/lib/http/api-client'
-import { fileService } from '@/lib/services/file.service'
-
-beforeEach(() => vi.clearAllMocks())
-
-describe('fileService', () => {
-  it('initiate posts declared metadata to /files', async () => {
-    vi.mocked(apiClient.post).mockResolvedValue({ data: { fileId: 'f1', deduplicated: false } })
-    const r = await fileService.initiate({ filename: 'a.pdf', mimeType: 'application/pdf', size: 10 })
-    expect(apiClient.post).toHaveBeenCalledWith('/files', { filename: 'a.pdf', mimeType: 'application/pdf', size: 10 })
-    expect(r.fileId).toBe('f1')
-  })
-
-  it('uploadToPolicy posts multipart form with fields then file', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 204 })
-    vi.stubGlobal('fetch', fetchMock)
-    const file = new File(['x'], 'a.pdf', { type: 'application/pdf' })
-    await fileService.uploadToPolicy({ url: 'http://minio/bucket', fields: { key: 'k', policy: 'p' }, expiresIn: 60 }, file)
-    const [url, init] = fetchMock.mock.calls[0]
-    expect(url).toBe('http://minio/bucket')
-    const form = init.body as FormData
-    expect(form.get('key')).toBe('k')
-    expect(form.get('file')).toBe(file)
-    vi.unstubAllGlobals()
-  })
-
-  it('downloadUrl returns the presigned url', async () => {
-    vi.mocked(apiClient.get).mockResolvedValue({ data: { url: 'http://minio/get', expiresIn: 60 } })
-    expect(await fileService.downloadUrl('f1')).toBe('http://minio/get')
-  })
-})
-```
-
-- [ ] **Step 3: Run test to verify it passes**
-
-Run: `cd frontend && npx vitest run lib/services/__tests__/file.service.test.ts`
-Expected: PASS (3 tests).
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add frontend/lib/services/file.service.ts frontend/lib/services/__tests__/file.service.test.ts
-git commit -m "feat(data-mgmt): presigned file upload service"
-```
-
----
-
-## Task 4: Data-management Zustand store
-
-**Files:**
-- Create: `frontend/lib/state-management/data-management.store.ts`
-- Test: `frontend/lib/state-management/__tests__/data-management.store.test.ts`
-
-**Interfaces:**
-- Consumes: `FilterValue`, `SearchQuery`, `SortSpec` from Task 1; `Updater` from `@tanstack/react-table`.
-- Produces: `useDataManagementStore` (full state + actions per §3 of the design), and selector hooks `useCollection()`, `useSetCollection()`, `useRecordQuery(): SearchQuery`.
-
-- [ ] **Step 1: Create the store**
-
-```ts
-// frontend/lib/state-management/data-management.store.ts
-'use client'
-
-import { create, type StateCreator } from 'zustand'
-import { devtools } from 'zustand/middleware'
-import { useShallow } from 'zustand/react/shallow'
-import type { Updater } from '@tanstack/react-table'
-import type { FilterValue, SearchQuery, SortSpec } from '@/lib/interfaces/search.interface'
-
-const DEFAULT_LIMIT = 20
-
-type RowSelection = Record<string, boolean>
-type ColumnVisibility = Record<string, boolean>
-
-interface DataManagementState {
-  collection: string | null
-  setCollection: (name: string) => void
-
-  q: string
-  page: number
-  limit: number
-  filters: Record<string, FilterValue>
-  sort: SortSpec[]
-  setSearch: (q: string) => void
-  setPage: (page: number) => void
-  setLimit: (limit: number) => void
-  setFilter: (field: string, value: FilterValue | undefined) => void
-  clearFilters: () => void
-  toggleSort: (field: string) => void
-  resetQuery: () => void
-
-  selection: RowSelection
-  setSelection: (updater: Updater<RowSelection>) => void
-  clearSelection: () => void
-
-  columnVisibility: ColumnVisibility
-  setColumnVisibility: (updater: Updater<ColumnVisibility>) => void
-
-  panel: 'closed' | 'create'
-  detailId: string | null
-  deleteTarget: string[] | null
-  openCreate: () => void
-  closeCreate: () => void
-  openDetail: (id: string) => void
-  closeDetail: () => void
-  requestDelete: (ids: string[]) => void
-  cancelDelete: () => void
-}
-
-const QUERY_DEFAULTS = {
-  q: '',
-  page: 1,
-  filters: {} as Record<string, FilterValue>,
-  sort: [] as SortSpec[],
-}
-
-function applyUpdater<T>(updater: Updater<T>, prev: T): T {
-  return typeof updater === 'function' ? (updater as (p: T) => T)(prev) : updater
-}
-
-const creator: StateCreator<
-  DataManagementState,
-  [['zustand/devtools', never]],
-  [],
-  DataManagementState
-> = (set) => ({
-  collection: null,
-  setCollection: (name) =>
-    set(
-      { collection: name, ...QUERY_DEFAULTS, limit: DEFAULT_LIMIT, selection: {} },
-      false,
-      'dm/setCollection',
-    ),
-
-  ...QUERY_DEFAULTS,
-  limit: DEFAULT_LIMIT,
-  setSearch: (q) => set({ q, page: 1 }, false, 'dm/setSearch'),
-  setPage: (page) => set({ page }, false, 'dm/setPage'),
-  setLimit: (limit) => set({ limit, page: 1 }, false, 'dm/setLimit'),
-  setFilter: (field, value) =>
-    set(
-      (s) => {
-        const filters = { ...s.filters }
-        if (value === undefined) delete filters[field]
-        else filters[field] = value
-        return { filters, page: 1 }
-      },
-      false,
-      'dm/setFilter',
-    ),
-  clearFilters: () => set({ filters: {}, page: 1 }, false, 'dm/clearFilters'),
-  toggleSort: (field) =>
-    set(
-      (s) => {
-        const current = s.sort[0]
-        if (!current || current.field !== field) return { sort: [{ field, dir: 'asc' }] }
-        if (current.dir === 'asc') return { sort: [{ field, dir: 'desc' }] }
-        return { sort: [] }
-      },
-      false,
-      'dm/toggleSort',
-    ),
-  resetQuery: () => set({ ...QUERY_DEFAULTS }, false, 'dm/resetQuery'),
-
-  selection: {},
-  setSelection: (updater) =>
-    set((s) => ({ selection: applyUpdater(updater, s.selection) }), false, 'dm/setSelection'),
-  clearSelection: () => set({ selection: {} }, false, 'dm/clearSelection'),
-
-  columnVisibility: {},
-  setColumnVisibility: (updater) =>
-    set((s) => ({ columnVisibility: applyUpdater(updater, s.columnVisibility) }), false, 'dm/setColumnVisibility'),
-
-  panel: 'closed',
-  detailId: null,
-  deleteTarget: null,
-  openCreate: () => set({ panel: 'create' }, false, 'dm/openCreate'),
-  closeCreate: () => set({ panel: 'closed' }, false, 'dm/closeCreate'),
-  openDetail: (id) => set({ detailId: id }, false, 'dm/openDetail'),
-  closeDetail: () => set({ detailId: null }, false, 'dm/closeDetail'),
-  requestDelete: (ids) => set({ deleteTarget: ids }, false, 'dm/requestDelete'),
-  cancelDelete: () => set({ deleteTarget: null }, false, 'dm/cancelDelete'),
-})
-
-export const useDataManagementStore = create<DataManagementState>()(
-  devtools(creator, { name: 'DataManagementStore', enabled: process.env.NODE_ENV === 'development' }),
-)
-
-// ── selectors ──────────────────────────────────────────────────────
-export const useCollection = () => useDataManagementStore((s) => s.collection)
-export const useSetCollection = () => useDataManagementStore((s) => s.setCollection)
-export const useRecordQuery = (): SearchQuery =>
-  useDataManagementStore(
-    useShallow((s) => ({ q: s.q, page: s.page, limit: s.limit, filters: s.filters, sort: s.sort })),
-  )
-```
-
-- [ ] **Step 2: Write the failing test**
-
-```ts
-// frontend/lib/state-management/__tests__/data-management.store.test.ts
-import { describe, it, expect, beforeEach } from 'vitest'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
-
-const get = () => useDataManagementStore.getState()
-
-beforeEach(() => {
-  useDataManagementStore.setState({
-    collection: 'products', q: '', page: 1, limit: 20, filters: {}, sort: [],
-    selection: {}, columnVisibility: {}, panel: 'closed', detailId: null, deleteTarget: null,
-  })
-})
-
-describe('data-management store', () => {
-  it('setSearch resets page to 1', () => {
-    get().setPage(5)
-    get().setSearch('laptop')
-    expect(get().q).toBe('laptop')
-    expect(get().page).toBe(1)
-  })
-
-  it('toggleSort cycles asc → desc → off', () => {
-    get().toggleSort('price')
-    expect(get().sort).toEqual([{ field: 'price', dir: 'asc' }])
-    get().toggleSort('price')
-    expect(get().sort).toEqual([{ field: 'price', dir: 'desc' }])
-    get().toggleSort('price')
-    expect(get().sort).toEqual([])
-  })
-
-  it('toggleSort on a new field replaces the previous sort', () => {
-    get().toggleSort('price')
-    get().toggleSort('name')
-    expect(get().sort).toEqual([{ field: 'name', dir: 'asc' }])
-  })
-
-  it('setFilter adds then clears, resetting page each time', () => {
-    get().setPage(3)
-    get().setFilter('status', ['active'])
-    expect(get().filters).toEqual({ status: ['active'] })
-    expect(get().page).toBe(1)
-    get().setFilter('status', undefined)
-    expect(get().filters).toEqual({})
-  })
-
-  it('setCollection resets query and selection', () => {
-    get().setSearch('x'); get().setFilter('a', 1); get().setSelection({ r1: true })
-    get().setCollection('orders')
-    expect(get().collection).toBe('orders')
-    expect(get().q).toBe('')
-    expect(get().filters).toEqual({})
-    expect(get().selection).toEqual({})
-  })
-
-  it('setSelection supports functional updaters', () => {
-    get().setSelection({ r1: true })
-    get().setSelection((prev) => ({ ...prev, r2: true }))
-    expect(get().selection).toEqual({ r1: true, r2: true })
-  })
-
-  it('dialog actions toggle panel / detail / delete state', () => {
-    get().openCreate(); expect(get().panel).toBe('create')
-    get().closeCreate(); expect(get().panel).toBe('closed')
-    get().openDetail('r1'); expect(get().detailId).toBe('r1')
-    get().requestDelete(['r1', 'r2']); expect(get().deleteTarget).toEqual(['r1', 'r2'])
-    get().cancelDelete(); expect(get().deleteTarget).toBeNull()
-  })
-})
-```
-
-- [ ] **Step 3: Run test to verify it passes**
-
-Run: `cd frontend && npx vitest run lib/state-management/__tests__/data-management.store.test.ts`
-Expected: PASS (7 tests).
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add frontend/lib/state-management/data-management.store.ts frontend/lib/state-management/__tests__/data-management.store.test.ts
-git commit -m "feat(data-mgmt): page orchestration store"
-```
-
----
-
-## Task 5: Dynamic zod schema builder
-
-**Files:**
-- Create: `frontend/lib/schema/field-to-zod.ts`
-- Test: `frontend/lib/schema/__tests__/field-to-zod.test.ts`
-
-**Interfaces:**
-- Consumes: `FieldSpec` from Task 1; `z` from `zod`.
-- Produces: `buildRecordSchema(fields: FieldSpec[]): z.ZodType<Record<string, unknown>>`.
-
-Notes: numbers use `z.coerce.number()` so string inputs coerce; dates are validated as non-empty strings (ISO). Optional (non-required) fields are `.optional()`.
-
-- [ ] **Step 1: Write the failing test**
-
-```ts
-// frontend/lib/schema/__tests__/field-to-zod.test.ts
-import { describe, it, expect } from 'vitest'
-import { buildRecordSchema } from '@/lib/schema/field-to-zod'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
-
-describe('buildRecordSchema', () => {
-  it('requires a required string and rejects empty', () => {
-    const schema = buildRecordSchema([{ name: 'title', type: 'string', required: true }])
-    expect(schema.safeParse({ title: 'hi' }).success).toBe(true)
-    expect(schema.safeParse({ title: '' }).success).toBe(false)
-  })
-  it('coerces number inputs', () => {
-    const schema = buildRecordSchema([{ name: 'price', type: 'number', required: true }])
-    const parsed = schema.safeParse({ price: '42' })
-    expect(parsed.success).toBe(true)
-    if (parsed.success) expect(parsed.data.price).toBe(42)
-  })
-  it('constrains enum values', () => {
-    const schema = buildRecordSchema([{ name: 'status', type: 'string', enum: ['active', 'archived'] }])
-    expect(schema.safeParse({ status: 'active' }).success).toBe(true)
-    expect(schema.safeParse({ status: 'nope' }).success).toBe(false)
-  })
-  it('treats non-required fields as optional', () => {
-    const schema = buildRecordSchema([{ name: 'note', type: 'string' }])
-    expect(schema.safeParse({}).success).toBe(true)
-  })
-})
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd frontend && npx vitest run lib/schema/__tests__/field-to-zod.test.ts`
-Expected: FAIL — cannot resolve `@/lib/schema/field-to-zod`.
-
-- [ ] **Step 3: Implement the builder**
-
-```ts
-// frontend/lib/schema/field-to-zod.ts
-import { z } from 'zod'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
-
-/** Build a zod object schema for a collection's create/edit form. */
-export function buildRecordSchema(fields: FieldSpec[]): z.ZodType<Record<string, unknown>> {
-  const shape: Record<string, z.ZodTypeAny> = {}
-  for (const f of fields) shape[f.name] = applyRequired(f, fieldToZod(f))
-  return z.object(shape)
-}
-
-function fieldToZod(f: FieldSpec): z.ZodTypeAny {
-  if (f.enum && f.enum.length) {
-    const values = f.enum.map(String) as [string, ...string[]]
-    return f.type === 'string[]' || f.type === 'number[]'
-      ? z.array(z.enum(values))
-      : z.enum(values)
-  }
-  switch (f.type) {
-    case 'number': return z.coerce.number()
-    case 'boolean': return z.boolean()
-    case 'date': return z.string().min(1, `${f.name} is required`)
-    case 'string[]': return z.array(z.string())
-    case 'number[]': return z.array(z.coerce.number())
-    default: return z.string()
-  }
-}
-
-function applyRequired(f: FieldSpec, schema: z.ZodTypeAny): z.ZodTypeAny {
-  if (!f.required) return schema.optional()
-  if (schema instanceof z.ZodString) return schema.min(1, `${f.name} is required`)
-  return schema
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd frontend && npx vitest run lib/schema/__tests__/field-to-zod.test.ts`
-Expected: PASS (4 tests).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add frontend/lib/schema/field-to-zod.ts frontend/lib/schema/__tests__/field-to-zod.test.ts
-git commit -m "feat(data-mgmt): dynamic zod schema from field specs"
-```
-
----
-
-## Task 6: Column builder + type-aware cell
-
-**Files:**
-- Create: `frontend/components/data-management/field-cell.tsx`
-- Create: `frontend/lib/schema/field-to-column.tsx`
-- Test: `frontend/components/data-management/__tests__/field-cell.test.tsx`
-- Test: `frontend/lib/schema/__tests__/field-to-column.test.tsx`
-
-**Interfaces:**
-- Consumes: `FieldSpec`, `RecordHit` from Task 1; `ColumnDef` from `@tanstack/react-table`; `Badge` from `@/components/ui/badge`.
-- Produces: `FieldCell({ field, value }: { field: FieldSpec; value: unknown })`; `RecordColumnMeta` (`{ field: FieldSpec }`); `buildColumns(fields: FieldSpec[]): ColumnDef<RecordHit>[]` (data columns only — the table prepends select and appends actions).
-
-- [ ] **Step 1: Create the cell renderer**
-
-```tsx
-// frontend/components/data-management/field-cell.tsx
-import { Badge } from '@/components/ui/badge'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
-
-function Dash() {
-  return <span className="text-muted-foreground">—</span>
-}
-
-export function FieldCell({ field, value }: { field: FieldSpec; value: unknown }) {
-  if (value === null || value === undefined || value === '') return <Dash />
-
-  if (field.type === 'boolean') {
-    return <Badge variant="outline">{value ? 'Yes' : 'No'}</Badge>
-  }
-  if (field.type === 'date') {
-    const d = new Date(value as string)
-    return <span>{Number.isNaN(d.getTime()) ? String(value) : d.toLocaleDateString()}</span>
-  }
-  if (Array.isArray(value)) {
-    if (value.length === 0) return <Dash />
-    return (
-      <div className="flex flex-wrap gap-1">
-        {value.map((v, i) => (
-          <Badge key={i} variant="outline" className="text-muted-foreground">
-            {String(v)}
-          </Badge>
-        ))}
-      </div>
-    )
-  }
-  if (field.enum) {
-    return <Badge variant="outline" className="text-muted-foreground">{String(value)}</Badge>
-  }
-  return <span className="block max-w-[28ch] truncate">{String(value)}</span>
-}
-```
-
-- [ ] **Step 2: Create the column builder**
-
-```tsx
-// frontend/lib/schema/field-to-column.tsx
-import type { ColumnDef } from '@tanstack/react-table'
-import { FieldCell } from '@/components/data-management/field-cell'
-import type { FieldSpec, RecordHit } from '@/lib/interfaces/search.interface'
-
-export interface RecordColumnMeta {
-  field: FieldSpec
-}
-
-/** Data columns derived from the collection field specs (no select/actions). */
-export function buildColumns(fields: FieldSpec[]): ColumnDef<RecordHit>[] {
-  return fields.map((field) => ({
-    id: field.name,
-    accessorKey: field.name,
-    header: field.name,
-    enableSorting: !!field.sortable,
-    enableHiding: true,
-    meta: { field } satisfies RecordColumnMeta,
-    cell: ({ getValue }) => <FieldCell field={field} value={getValue()} />,
-  }))
-}
-```
-
-- [ ] **Step 3: Write the failing tests**
-
-```tsx
-// frontend/lib/schema/__tests__/field-to-column.test.tsx
-import { describe, it, expect } from 'vitest'
-import { buildColumns, type RecordColumnMeta } from '@/lib/schema/field-to-column'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
-
-const fields: FieldSpec[] = [
-  { name: 'title', type: 'string' },
-  { name: 'price', type: 'number', sortable: true },
-]
-
-describe('buildColumns', () => {
-  it('creates one column per field with ids and sort flags', () => {
-    const cols = buildColumns(fields)
-    expect(cols.map((c) => c.id)).toEqual(['title', 'price'])
-    expect(cols[0].enableSorting).toBe(false)
-    expect(cols[1].enableSorting).toBe(true)
-  })
-  it('carries the field spec in column meta', () => {
-    const cols = buildColumns(fields)
-    expect((cols[1].meta as RecordColumnMeta).field.name).toBe('price')
-  })
-})
-```
-
-```tsx
-// frontend/components/data-management/__tests__/field-cell.test.tsx
-import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
-import { FieldCell } from '@/components/data-management/field-cell'
-
-describe('FieldCell', () => {
-  it('renders a dash for empty values', () => {
-    render(<FieldCell field={{ name: 'x', type: 'string' }} value={null} />)
-    expect(screen.getByText('—')).toBeInTheDocument()
-  })
-  it('renders a badge per array item', () => {
-    render(<FieldCell field={{ name: 'tags', type: 'string[]' }} value={['a', 'b']} />)
-    expect(screen.getByText('a')).toBeInTheDocument()
-    expect(screen.getByText('b')).toBeInTheDocument()
-  })
-  it('renders Yes/No for booleans', () => {
-    render(<FieldCell field={{ name: 'active', type: 'boolean' }} value={true} />)
-    expect(screen.getByText('Yes')).toBeInTheDocument()
-  })
-})
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `cd frontend && npx vitest run lib/schema/__tests__/field-to-column.test.tsx components/data-management/__tests__/field-cell.test.tsx`
-Expected: PASS (5 tests).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add frontend/components/data-management/field-cell.tsx frontend/lib/schema/field-to-column.tsx frontend/components/data-management/__tests__/field-cell.test.tsx frontend/lib/schema/__tests__/field-to-column.test.tsx
-git commit -m "feat(data-mgmt): schema-driven columns + type-aware cells"
-```
-
----
-
-## Task 7: Schema-driven form input
-
-**Files:**
-- Create: `frontend/components/data-management/field-to-input.tsx`
-- Test: `frontend/components/data-management/__tests__/field-to-input.test.tsx`
-
-**Interfaces:**
-- Consumes: `FieldSpec` from Task 1; `Control`, `Controller` from `react-hook-form`; shadcn `Field/FieldLabel/FieldError`, `Input`, `Switch`, `Select*`, `Badge`, `Button`.
-- Produces: `RecordFieldInput({ field, control }: { field: FieldSpec; control: Control<Record<string, unknown>> })`.
-
-Notes: one `Controller` per field. `string`→Input, `number`→numeric Input (coerces to number/undefined), `boolean`→Switch, `date`→native date Input, single `enum`→Select, `string[]`/`number[]`→inline `TagsInput`. The `attachments` field is handled separately (Task 13), not here.
-
-- [ ] **Step 1: Write the failing test**
-
-```tsx
-// frontend/components/data-management/__tests__/field-to-input.test.tsx
-import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
-import { useForm } from 'react-hook-form'
-import { RecordFieldInput } from '@/components/data-management/field-to-input'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
-
-function Harness({ field }: { field: FieldSpec }) {
-  const { control } = useForm<Record<string, unknown>>({ defaultValues: {} })
-  return <RecordFieldInput field={field} control={control} />
-}
-
-describe('RecordFieldInput', () => {
-  it('renders a labeled text input for a string field', () => {
-    render(<Harness field={{ name: 'title', type: 'string' }} />)
-    expect(screen.getByLabelText('title')).toBeInTheDocument()
-  })
-  it('renders a select for an enum field', () => {
-    render(<Harness field={{ name: 'status', type: 'string', enum: ['active', 'archived'] }} />)
-    expect(screen.getByLabelText('status')).toBeInTheDocument()
-  })
-  it('renders a number input for a number field', () => {
-    render(<Harness field={{ name: 'price', type: 'number' }} />)
-    expect(screen.getByLabelText('price')).toHaveAttribute('type', 'number')
-  })
-})
-```
-
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd frontend && npx vitest run components/data-management/__tests__/field-to-input.test.tsx`
-Expected: FAIL — cannot resolve `@/components/data-management/field-to-input`.
-
-- [ ] **Step 3: Implement the input component**
-
-```tsx
-// frontend/components/data-management/field-to-input.tsx
-'use client'
-
-import * as React from 'react'
-import { Controller, type Control, type ControllerRenderProps } from 'react-hook-form'
-import { Field, FieldLabel, FieldError } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
-import { Switch } from '@/components/ui/switch'
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import {
-  Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
-
-type F = ControllerRenderProps<Record<string, unknown>, string>
-
-export function RecordFieldInput({
-  field,
-  control,
-}: {
-  field: FieldSpec
-  control: Control<Record<string, unknown>>
-}) {
-  return (
-    <Controller
-      control={control}
-      name={field.name}
-      render={({ field: f, fieldState }) => (
-        <Field data-invalid={fieldState.error ? 'true' : undefined}>
-          <FieldLabel htmlFor={field.name}>
-            {field.name}
-            {field.required ? ' *' : ''}
-          </FieldLabel>
-          {renderWidget(field, f)}
-          {fieldState.error && <FieldError>{fieldState.error.message}</FieldError>}
-        </Field>
-      )}
-    />
-  )
-}
-
-function renderWidget(field: FieldSpec, f: F) {
-  if (field.enum && field.type !== 'string[]' && field.type !== 'number[]') {
-    return (
-      <Select value={f.value ? String(f.value) : ''} onValueChange={f.onChange}>
-        <SelectTrigger id={field.name} className="w-full">
-          <SelectValue placeholder={`Select ${field.name}`} />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectGroup>
-            {field.enum.map((opt) => (
-              <SelectItem key={String(opt)} value={String(opt)}>{String(opt)}</SelectItem>
-            ))}
-          </SelectGroup>
-        </SelectContent>
-      </Select>
-    )
-  }
-  switch (field.type) {
-    case 'boolean':
-      return <Switch id={field.name} checked={!!f.value} onCheckedChange={f.onChange} />
-    case 'number':
-      return (
-        <Input
-          id={field.name}
-          type="number"
-          value={f.value === undefined || f.value === null ? '' : String(f.value)}
-          onChange={(e) => f.onChange(e.target.value === '' ? undefined : Number(e.target.value))}
-        />
-      )
-    case 'date':
-      return (
-        <Input
-          id={field.name}
-          type="date"
-          value={typeof f.value === 'string' ? f.value : ''}
-          onChange={(e) => f.onChange(e.target.value)}
-        />
-      )
-    case 'string[]':
-    case 'number[]':
-      return <TagsInput id={field.name} value={f.value} numeric={field.type === 'number[]'} onChange={f.onChange} />
-    default:
-      return (
-        <Input
-          id={field.name}
-          value={typeof f.value === 'string' ? f.value : ''}
-          onChange={(e) => f.onChange(e.target.value)}
-        />
-      )
-  }
-}
-
-function TagsInput({
-  id,
-  value,
-  numeric,
-  onChange,
-}: {
+/** GET /search/collections/:name/records/:id — Postgres read (document nested). */
+export interface RecordDetail {
   id: string
-  value: unknown
-  numeric?: boolean
-  onChange: (v: unknown[]) => void
-}) {
-  const items = Array.isArray(value) ? value : []
-  const [draft, setDraft] = React.useState('')
-
-  const add = () => {
-    const trimmed = draft.trim()
-    if (!trimmed) return
-    onChange([...items, numeric ? Number(trimmed) : trimmed])
-    setDraft('')
-  }
-
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="flex gap-2">
-        <Input
-          id={id}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') { e.preventDefault(); add() }
-          }}
-          placeholder="Type and press Enter"
-        />
-        <Button type="button" variant="outline" onClick={add}>Add</Button>
-      </div>
-      {items.length > 0 && (
-        <div className="flex flex-wrap gap-1">
-          {items.map((it, i) => (
-            <Badge key={i} variant="secondary" className="gap-1">
-              {String(it)}
-              <button
-                type="button"
-                aria-label={`Remove ${String(it)}`}
-                onClick={() => onChange(items.filter((_, idx) => idx !== i))}
-              >
-                ×
-              </button>
-            </Badge>
-          ))}
-        </div>
-      )}
-    </div>
-  )
+  externalId: string | null
+  document: RecordDocument
+  indexState: IndexState
+  indexError?: string | null
+  createdAt: string
+  updatedAt: string
 }
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 2: Add `get` to `record.service.ts`** (inside `recordService`); add `RecordDetail` to the type import at the top:
 
-Run: `cd frontend && npx vitest run components/data-management/__tests__/field-to-input.test.tsx`
-Expected: PASS (3 tests).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add frontend/components/data-management/field-to-input.tsx frontend/components/data-management/__tests__/field-to-input.test.tsx
-git commit -m "feat(data-mgmt): schema-driven form inputs"
+```ts
+  get(collection: string, id: string): Promise<RecordDetail> {
+    return apiClient
+      .get<RecordDetail>(`${base(collection)}/records/${encodeURIComponent(id)}`)
+      .then((r) => r.data)
+  },
 ```
 
----
+- [ ] **Step 3: Extend the service test** — append to `record.service.test.ts`:
 
-## Task 8: Schema-driven filter control
-
-**Files:**
-- Create: `frontend/components/data-management/field-to-filter.tsx`
-- Test: `frontend/components/data-management/__tests__/field-to-filter.test.tsx`
-
-**Interfaces:**
-- Consumes: `FieldSpec`, `FilterValue` from Task 1; shadcn `Checkbox`, `Label`, `Input`, `Select*`.
-- Produces: `FilterControl({ field, value, onChange }: { field: FieldSpec; value: FilterValue | undefined; onChange: (v: FilterValue | undefined) => void })`.
-
-Notes: `enum`→checkbox multiselect (emits array = IN, or `undefined` when empty); `boolean`→tri-state Select (Any/Yes/No); `number`→exact number input; other `string`→exact text input.
-
-- [ ] **Step 1: Write the failing test**
-
-```tsx
-// frontend/components/data-management/__tests__/field-to-filter.test.tsx
-import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
-import { FilterControl } from '@/components/data-management/field-to-filter'
-
-describe('FilterControl', () => {
-  it('enum: toggling a checkbox emits an array (IN)', () => {
-    const onChange = vi.fn()
-    render(<FilterControl field={{ name: 'status', type: 'string', enum: ['active', 'archived'] }} value={undefined} onChange={onChange} />)
-    fireEvent.click(screen.getByLabelText('active'))
-    expect(onChange).toHaveBeenCalledWith(['active'])
-  })
-  it('enum: unchecking the last value emits undefined', () => {
-    const onChange = vi.fn()
-    render(<FilterControl field={{ name: 'status', type: 'string', enum: ['active'] }} value={['active']} onChange={onChange} />)
-    fireEvent.click(screen.getByLabelText('active'))
-    expect(onChange).toHaveBeenCalledWith(undefined)
-  })
-  it('number: emits a number or undefined', () => {
-    const onChange = vi.fn()
-    render(<FilterControl field={{ name: 'price', type: 'number' }} value={undefined} onChange={onChange} />)
-    fireEvent.change(screen.getByLabelText('price'), { target: { value: '10' } })
-    expect(onChange).toHaveBeenCalledWith(10)
-  })
+```ts
+it('get fetches a single record by id', async () => {
+  vi.mocked(apiClient.get).mockResolvedValue({ data: { id: 'abc', document: {} } })
+  await recordService.get('products', 'abc')
+  expect(apiClient.get).toHaveBeenCalledWith('/search/collections/products/records/abc')
 })
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
-
-Run: `cd frontend && npx vitest run components/data-management/__tests__/field-to-filter.test.tsx`
-Expected: FAIL — cannot resolve `@/components/data-management/field-to-filter`.
-
-- [ ] **Step 3: Implement the filter control**
+- [ ] **Step 4: Write the failing hook test** — `frontend/lib/hooks/__tests__/use-record.test.tsx`:
 
 ```tsx
-// frontend/components/data-management/field-to-filter.tsx
-'use client'
-
-import { Checkbox } from '@/components/ui/checkbox'
-import { Label } from '@/components/ui/label'
-import { Input } from '@/components/ui/input'
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select'
-import type { FieldSpec, FilterValue } from '@/lib/interfaces/search.interface'
-
-export function FilterControl({
-  field,
-  value,
-  onChange,
-}: {
-  field: FieldSpec
-  value: FilterValue | undefined
-  onChange: (v: FilterValue | undefined) => void
-}) {
-  if (field.enum && field.enum.length) {
-    const selected = Array.isArray(value) ? value.map(String) : []
-    const toggle = (opt: string, checked: boolean) => {
-      const next = checked ? [...selected, opt] : selected.filter((v) => v !== opt)
-      onChange(next.length ? next : undefined)
-    }
-    return (
-      <div className="flex flex-col gap-2">
-        <span className="text-sm font-medium">{field.name}</span>
-        {field.enum.map((opt) => {
-          const key = String(opt)
-          return (
-            <div key={key} className="flex items-center gap-2">
-              <Checkbox
-                id={`f-${field.name}-${key}`}
-                checked={selected.includes(key)}
-                onCheckedChange={(c) => toggle(key, !!c)}
-              />
-              <Label htmlFor={`f-${field.name}-${key}`}>{key}</Label>
-            </div>
-          )
-        })}
-      </div>
-    )
-  }
-
-  if (field.type === 'boolean') {
-    const v = value === undefined ? 'any' : value ? 'true' : 'false'
-    return (
-      <div className="flex flex-col gap-2">
-        <Label htmlFor={`f-${field.name}`}>{field.name}</Label>
-        <Select
-          value={v}
-          onValueChange={(next) => onChange(next === 'any' ? undefined : next === 'true')}
-        >
-          <SelectTrigger id={`f-${field.name}`} className="w-full"><SelectValue /></SelectTrigger>
-          <SelectContent>
-            <SelectItem value="any">Any</SelectItem>
-            <SelectItem value="true">Yes</SelectItem>
-            <SelectItem value="false">No</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-    )
-  }
-
-  const isNumber = field.type === 'number'
-  return (
-    <div className="flex flex-col gap-2">
-      <Label htmlFor={`f-${field.name}`}>{field.name}</Label>
-      <Input
-        id={field.name}
-        type={isNumber ? 'number' : 'text'}
-        value={value === undefined ? '' : String(value)}
-        placeholder="Exact match"
-        onChange={(e) => {
-          const raw = e.target.value
-          if (raw === '') return onChange(undefined)
-          onChange(isNumber ? Number(raw) : raw)
-        }}
-      />
-    </div>
-  )
-}
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd frontend && npx vitest run components/data-management/__tests__/field-to-filter.test.tsx`
-Expected: PASS (3 tests).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add frontend/components/data-management/field-to-filter.tsx frontend/components/data-management/__tests__/field-to-filter.test.tsx
-git commit -m "feat(data-mgmt): schema-driven exact-match filters"
-```
-
----
-
-## Task 9: Read hooks (collections, definition, records)
-
-**Files:**
-- Create: `frontend/lib/hooks/use-collections.ts`
-- Create: `frontend/lib/hooks/use-collection-definition.ts`
-- Create: `frontend/lib/hooks/use-records.ts`
-- Test: `frontend/lib/hooks/__tests__/use-records.test.tsx`
-
-**Interfaces:**
-- Consumes: `useSWR`; global SWR fetcher (already wired in `components/providers/swr-provider.tsx`); `recordService.query`; store selectors `useCollection`, `useRecordQuery`; types from Task 1.
-- Produces: `useCollections(): { collections: CollectionView[]; isLoading; error }`; `useCollectionDefinition(name: string | null): { definition: CollectionView | null; fields: FieldSpec[]; isLoading; error }`; `useRecords(): { results?: SearchResults; isLoading; isValidating; error; mutate }`.
-
-- [ ] **Step 1: Create the collection hooks**
-
-```ts
-// frontend/lib/hooks/use-collections.ts
-import useSWR from 'swr'
-import type { CollectionView } from '@/lib/interfaces/search.interface'
-
-export function useCollections() {
-  const { data, isLoading, error } = useSWR<CollectionView[]>('/search/collections')
-  return { collections: data ?? [], isLoading, error }
-}
-```
-
-```ts
-// frontend/lib/hooks/use-collection-definition.ts
-import useSWR from 'swr'
-import type { CollectionView, FieldSpec } from '@/lib/interfaces/search.interface'
-
-export function useCollectionDefinition(name: string | null) {
-  const { data, isLoading, error } = useSWR<CollectionView>(
-    name ? `/search/collections/${encodeURIComponent(name)}` : null,
-  )
-  return {
-    definition: data ?? null,
-    fields: (data?.fields ?? []) as FieldSpec[],
-    isLoading,
-    error,
-  }
-}
-```
-
-- [ ] **Step 2: Create the records hook**
-
-```ts
-// frontend/lib/hooks/use-records.ts
-import useSWR from 'swr'
-import { recordService } from '@/lib/services/record.service'
-import { useCollection, useRecordQuery } from '@/lib/state-management/data-management.store'
-import type { SearchResults } from '@/lib/interfaces/search.interface'
-
-/**
- * Records for the active collection + query. POST-based, so it uses an explicit
- * fetcher (the global GET fetcher does not apply). `keepPreviousData` avoids a
- * flash to empty while paginating/filtering.
- */
-export function useRecords() {
-  const collection = useCollection()
-  const query = useRecordQuery()
-  const key = collection ? (['records', collection, query] as const) : null
-
-  const { data, isLoading, isValidating, error, mutate } = useSWR<SearchResults>(
-    key,
-    () => recordService.query(collection as string, query),
-    { keepPreviousData: true },
-  )
-  return { results: data, isLoading, isValidating, error, mutate }
-}
-```
-
-- [ ] **Step 3: Write the failing test**
-
-```tsx
-// frontend/lib/hooks/__tests__/use-records.test.tsx
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderHook, waitFor } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import { SWRConfig } from 'swr'
 import React from 'react'
+import { useRecord } from '@/lib/hooks/use-record'
 
-vi.mock('@/lib/services/record.service', () => ({
-  recordService: { query: vi.fn() },
-}))
-
+vi.mock('@/lib/services/record.service', () => ({ recordService: { get: vi.fn() } }))
 import { recordService } from '@/lib/services/record.service'
-import { useRecords } from '@/lib/hooks/use-records'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
 
-const wrapper = ({ children }: { children: React.ReactNode }) => (
-  <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>{children}</SWRConfig>
+function Probe({ id }: { id: string | null }) {
+  const { record, isLoading } = useRecord('products', id)
+  if (isLoading) return <span>loading</span>
+  return <span>{record ? record.indexState : 'none'}</span>
+}
+const wrap = (ui: React.ReactNode) => (
+  <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>{ui}</SWRConfig>
 )
 
-beforeEach(() => {
-  vi.clearAllMocks()
-  useDataManagementStore.setState({ collection: 'products', q: '', page: 1, limit: 20, filters: {}, sort: [] })
-})
+beforeEach(() => vi.clearAllMocks())
 
-describe('useRecords', () => {
-  it('fetches records for the active collection + query', async () => {
-    vi.mocked(recordService.query).mockResolvedValue({ hits: [{ id: 'r1' }], page: 1, limit: 20, totalHits: 1, totalPages: 1, processingTimeMs: 1 })
-    const { result } = renderHook(() => useRecords(), { wrapper })
-    await waitFor(() => expect(result.current.results?.totalHits).toBe(1))
-    expect(recordService.query).toHaveBeenCalledWith('products', expect.objectContaining({ page: 1, limit: 20 }))
+describe('useRecord', () => {
+  it('does not fetch when id is null', () => {
+    render(wrap(<Probe id={null} />))
+    expect(recordService.get).not.toHaveBeenCalled()
+    expect(screen.getByText('none')).toBeInTheDocument()
+  })
+  it('fetches and returns the record', async () => {
+    vi.mocked(recordService.get).mockResolvedValue({ id: 'abc', externalId: null, document: {}, indexState: 'INDEXED', createdAt: '', updatedAt: '' })
+    render(wrap(<Probe id="abc" />))
+    await waitFor(() => expect(screen.getByText('INDEXED')).toBeInTheDocument())
+    expect(recordService.get).toHaveBeenCalledWith('products', 'abc')
   })
 })
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 5: Run to verify it fails**
 
-Run: `cd frontend && npx vitest run lib/hooks/__tests__/use-records.test.tsx`
-Expected: PASS (1 test).
+Run: `cd frontend && npx vitest run lib/hooks/__tests__/use-record.test.tsx`
+Expected: FAIL — cannot resolve `@/lib/hooks/use-record`.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Implement `use-record.ts`**
+
+```ts
+import useSWR from 'swr'
+import { recordService } from '@/lib/services/record.service'
+import type { RecordDetail } from '@/lib/interfaces/search.interface'
+
+/**
+ * One record read from Postgres (source of truth). POST-independent, so it uses
+ * an explicit fetcher. Polls only while the record is still indexing, then stops.
+ */
+export function useRecord(collection: string | null, id: string | null) {
+  const key = collection && id ? (['record', collection, id] as const) : null
+  const { data, isLoading, error, mutate } = useSWR<RecordDetail>(
+    key,
+    () => recordService.get(collection as string, id as string),
+    { refreshInterval: (d?: RecordDetail) => (d?.indexState === 'PENDING' ? 1500 : 0) },
+  )
+  return { record: data, isLoading, error, mutate }
+}
+```
+
+- [ ] **Step 7: Run tests to verify they pass**
+
+Run: `cd frontend && npx vitest run lib/hooks/__tests__/use-record.test.tsx lib/services/__tests__/record.service.test.ts`
+Expected: PASS.
+
+- [ ] **Step 8: Commit**
 
 ```bash
-git add frontend/lib/hooks/use-collections.ts frontend/lib/hooks/use-collection-definition.ts frontend/lib/hooks/use-records.ts frontend/lib/hooks/__tests__/use-records.test.tsx
-git commit -m "feat(data-mgmt): SWR read hooks for collections + records"
+git add frontend/lib/interfaces/search.interface.ts frontend/lib/services/record.service.ts frontend/lib/hooks/use-record.ts frontend/lib/hooks/__tests__/use-record.test.tsx frontend/lib/services/__tests__/record.service.test.ts
+git commit -m "feat(data-mgmt): RecordDetail type, record read service + useRecord hook"
 ```
 
 ---
 
-## Task 10: Mutation + upload hooks
+## Task 3: Status badge + PG-backed detail drawer + form refactor
 
 **Files:**
-- Create: `frontend/lib/hooks/use-record-mutations.ts`
-- Create: `frontend/lib/hooks/use-file-upload.ts`
-- Test: `frontend/lib/hooks/__tests__/use-file-upload.test.tsx`
+- Create: `frontend/components/data-management/record-status-badge.tsx`
+- Modify: `frontend/components/data-management/record-form.tsx`
+- Modify: `frontend/components/data-management/record-detail-drawer.tsx`
+- Modify: `frontend/components/data-management/data-management-view.tsx`
+- Test: `frontend/components/data-management/__tests__/record-status-badge.test.tsx`
+- Test: update `frontend/components/data-management/__tests__/record-form.test.tsx`
 
 **Interfaces:**
-- Consumes: `recordService`, `fileService`; `useCollection`; `useRecords` (for `mutate`); `toast`; types from Task 1.
-- Produces:
-  - `useRecordMutations(): { create(input): Promise<PersistResult>; update(input): Promise<PersistResult>; remove(ids: string[]): Promise<void>; reindex(): Promise<void> }` (`update` is `create` — persist upserts on `externalId`).
-  - `useFileUpload(): { items: UploadItem[]; uploadAll(files: File[], metadata?): Promise<string[]>; reset(): void }`, where `UploadItem = { file: File; status: 'pending'|'uploading'|'done'|'error'; fileId?: string; error?: string }`.
+- Consumes: `useRecord` (Task 2), `RecordDetail`, `useIsAdmin`.
+- Produces: `RecordStatusBadge({ state, error? })`; `RecordForm` now takes `initialDocument?: RecordDocument` + `externalId?: string` instead of `record?: RecordHit`.
 
-- [ ] **Step 1: Create the mutations hook**
+- [ ] **Step 1: Write the failing badge test** — `record-status-badge.test.tsx`:
+
+```tsx
+import { describe, it, expect } from 'vitest'
+import { render, screen } from '@testing-library/react'
+import { RecordStatusBadge } from '@/components/data-management/record-status-badge'
+
+describe('RecordStatusBadge', () => {
+  it('shows Indexing for PENDING', () => { render(<RecordStatusBadge state="PENDING" />); expect(screen.getByText('Indexing')).toBeInTheDocument() })
+  it('shows Indexed for INDEXED', () => { render(<RecordStatusBadge state="INDEXED" />); expect(screen.getByText('Indexed')).toBeInTheDocument() })
+  it('shows Failed for FAILED', () => { render(<RecordStatusBadge state="FAILED" />); expect(screen.getByText('Failed')).toBeInTheDocument() })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cd frontend && npx vitest run components/data-management/__tests__/record-status-badge.test.tsx`
+Expected: FAIL — cannot resolve the module.
+
+- [ ] **Step 3: Implement `record-status-badge.tsx`**
+
+```tsx
+import { Badge } from '@/components/ui/badge'
+import type { IndexState } from '@/lib/interfaces/search.interface'
+
+const MAP: Record<IndexState, { label: string; variant: 'secondary' | 'outline' | 'destructive' }> = {
+  PENDING: { label: 'Indexing', variant: 'secondary' },
+  INDEXED: { label: 'Indexed', variant: 'outline' },
+  FAILED: { label: 'Failed', variant: 'destructive' },
+}
+
+export function RecordStatusBadge({ state, error }: { state: IndexState; error?: string | null }) {
+  const { label, variant } = MAP[state]
+  return <Badge variant={variant} title={error ?? undefined}>{label}</Badge>
+}
+```
+
+- [ ] **Step 4: Refactor `record-form.tsx` to nested-document props**
+
+Replace the `record?: RecordHit` prop with `initialDocument` + `externalId`. Remove `SYSTEM_KEYS` and `documentOf`; replace `defaultValuesFor` and the signature:
+
+```tsx
+function defaultValuesFor(fields: FieldSpec[], doc: RecordDocument = {}): RecordDocument {
+  const out: RecordDocument = {}
+  for (const f of fields) out[f.name] = f.name in doc ? doc[f.name] : emptyValueFor(f)
+  return out
+}
+```
+
+```tsx
+export function RecordForm({
+  fields, collection, mode, initialDocument, externalId: externalIdProp, onDone,
+}: {
+  fields: FieldSpec[]
+  collection: string
+  mode: 'create' | 'edit'
+  initialDocument?: RecordDocument
+  externalId?: string
+  onDone: () => void
+}) {
+  const { create } = useRecordMutations()
+  const [externalId] = React.useState<string>(() => externalIdProp ?? genId())
+  const schema = React.useMemo(
+    () => buildRecordSchema(fields) as unknown as ZodType<Record<string, unknown>, Record<string, unknown>>,
+    [fields],
+  )
+  const form = useForm<Record<string, unknown>>({
+    resolver: zodResolver(schema),
+    defaultValues: defaultValuesFor(fields, initialDocument),
+  })
+  // …attachmentsField, onSubmit, and the returned JSX are unchanged…
+}
+```
+
+Update the top import to drop `RecordHit` if now unused (keep `RecordDocument`, `FieldSpec`). Keep `emptyValueFor` and `genId` as-is.
+
+- [ ] **Step 5: Rewrite `record-detail-drawer.tsx` to fetch by id**
+
+```tsx
+'use client'
+
+import {
+  Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle,
+} from '@/components/ui/drawer'
+import { Skeleton } from '@/components/ui/skeleton'
+import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from '@/components/ui/empty'
+import { RecordForm } from '@/components/data-management/record-form'
+import { FieldCell } from '@/components/data-management/field-cell'
+import { RecordStatusBadge } from '@/components/data-management/record-status-badge'
+import { useIsAdmin } from '@/lib/hooks/use-permission'
+import { useRecord } from '@/lib/hooks/use-record'
+import { useDataManagementStore } from '@/lib/state-management/data-management.store'
+import type { FieldSpec } from '@/lib/interfaces/search.interface'
+
+export function RecordDetailDrawer({ fields, collection }: { fields: FieldSpec[]; collection: string }) {
+  const isAdmin = useIsAdmin()
+  const detailId = useDataManagementStore((s) => s.detailId)
+  const closeDetail = useDataManagementStore((s) => s.closeDetail)
+  const { record, isLoading, error } = useRecord(collection, detailId)
+  const editable = isAdmin && !!record?.externalId
+
+  return (
+    <Drawer open={detailId !== null} onOpenChange={(o) => { if (!o) closeDetail() }} direction="right">
+      <DrawerContent>
+        <DrawerHeader>
+          <DrawerTitle className="flex items-center gap-2">
+            {editable ? 'Edit record' : 'Record details'}
+            {record && <RecordStatusBadge state={record.indexState} error={record.indexError} />}
+          </DrawerTitle>
+          <DrawerDescription>
+            {record?.externalId
+              ? `External ID: ${record.externalId}`
+              : record ? 'This record has no external ID and is read-only.' : ''}
+          </DrawerDescription>
+        </DrawerHeader>
+        <div className="overflow-y-auto px-4 pb-6">
+          {isLoading ? (
+            <div className="flex flex-col gap-3">{Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-8 w-full" />)}</div>
+          ) : error || !record ? (
+            <Empty>
+              <EmptyHeader>
+                <EmptyTitle>Record not found</EmptyTitle>
+                <EmptyDescription>It may have been deleted.</EmptyDescription>
+              </EmptyHeader>
+            </Empty>
+          ) : editable ? (
+            <RecordForm
+              fields={fields}
+              collection={collection}
+              mode="edit"
+              initialDocument={record.document}
+              externalId={record.externalId ?? undefined}
+              onDone={closeDetail}
+            />
+          ) : (
+            <dl className="flex flex-col gap-3">
+              {fields.map((f) => (
+                <div key={f.name} className="flex flex-col gap-1">
+                  <dt className="text-sm font-medium text-muted-foreground">{f.name}</dt>
+                  <dd><FieldCell field={f} value={record.document[f.name]} /></dd>
+                </div>
+              ))}
+            </dl>
+          )}
+        </div>
+      </DrawerContent>
+    </Drawer>
+  )
+}
+```
+
+- [ ] **Step 6: Update `data-management-view.tsx`** — stop passing `results` to the drawer:
+
+```tsx
+<RecordDetailDrawer fields={fields} collection={collection} />
+```
+
+- [ ] **Step 7: Update the record-form test** — in `record-form.test.tsx`, replace any `record={…}` usage with `initialDocument`/`externalId`. Add:
+
+```tsx
+it('seeds edit values from initialDocument', () => {
+  render(
+    <RecordForm
+      fields={[{ name: 'title', type: 'string', required: true }]}
+      collection="c" mode="edit" initialDocument={{ title: 'Seeded' }} externalId="ext-1" onDone={() => {}}
+    />,
+  )
+  expect((screen.getByLabelText(/title/) as HTMLInputElement).value).toBe('Seeded')
+})
+```
+
+- [ ] **Step 8: Run the affected tests**
+
+Run: `cd frontend && npx vitest run components/data-management/__tests__/record-status-badge.test.tsx components/data-management/__tests__/record-form.test.tsx`
+Expected: PASS.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add frontend/components/data-management/record-status-badge.tsx frontend/components/data-management/record-form.tsx frontend/components/data-management/record-detail-drawer.tsx frontend/components/data-management/data-management-view.tsx frontend/components/data-management/__tests__/record-status-badge.test.tsx frontend/components/data-management/__tests__/record-form.test.tsx
+git commit -m "feat(data-mgmt): PG-backed detail drawer with live index status"
+```
+
+---
+
+## Task 4: Creation flow redesign (View → PG detail + bounded revalidate)
+
+**Files:**
+- Modify: `frontend/lib/hooks/use-record-mutations.ts`
+- Test: `frontend/lib/hooks/__tests__/use-record-mutations.test.tsx`
+
+**Interfaces:**
+- Consumes: `recordService.persist`, `useRecords().mutate`, store `openDetail`.
+- Produces: `create` opens the new record's PG detail via a toast **View** action and revalidates the list on a bounded schedule (no fixed-delay-as-correctness). `update`, `remove`, `reindex` unchanged in contract.
+
+- [ ] **Step 1: Rewrite `use-record-mutations.ts`**
 
 ```ts
-// frontend/lib/hooks/use-record-mutations.ts
 'use client'
 import { useCallback } from 'react'
 import { toast } from 'sonner'
 import { recordService } from '@/lib/services/record.service'
-import { useCollection } from '@/lib/state-management/data-management.store'
+import { useCollection, useDataManagementStore } from '@/lib/state-management/data-management.store'
 import { useRecords } from '@/lib/hooks/use-records'
 import type { PersistRecordInput, SearchResults } from '@/lib/interfaces/search.interface'
 
-const REVALIDATE_DELAY_MS = 1200 // async-indexing settle window
+const REVALIDATE_DELAYS_MS = [900, 2500] // bounded catch-up while Meili indexes
 
 export function useRecordMutations() {
   const collection = useCollection()
+  const openDetail = useDataManagementStore((s) => s.openDetail)
   const { mutate } = useRecords()
 
   const revalidateSoon = useCallback(() => {
-    setTimeout(() => void mutate(), REVALIDATE_DELAY_MS)
+    for (const d of REVALIDATE_DELAYS_MS) setTimeout(() => void mutate(), d)
   }, [mutate])
 
   const create = useCallback(
     async (input: PersistRecordInput) => {
       if (!collection) throw new Error('No collection selected')
       const [res] = await recordService.persist(collection, [input])
-      toast.success('Record queued for indexing', {
-        description: `Status: ${res?.indexState ?? 'PENDING'} — it will appear shortly.`,
-      })
+      if (res) {
+        toast.success('Record queued for indexing', {
+          description: 'View it now to watch indexing complete.',
+          action: { label: 'View', onClick: () => openDetail(res.id) },
+        })
+      }
       revalidateSoon()
       return res
     },
-    [collection, revalidateSoon],
+    [collection, openDetail, revalidateSoon],
   )
 
   const remove = useCallback(
@@ -1510,11 +602,7 @@ export function useRecordMutations() {
       await mutate(
         (prev?: SearchResults) =>
           prev
-            ? {
-                ...prev,
-                hits: prev.hits.filter((h) => !ids.includes(h.id)),
-                totalHits: Math.max(0, prev.totalHits - ids.length),
-              }
+            ? { ...prev, hits: prev.hits.filter((h) => !ids.includes(h.id)), totalHits: Math.max(0, prev.totalHits - ids.length) }
             : prev,
         { revalidate: false },
       )
@@ -1534,1350 +622,1268 @@ export function useRecordMutations() {
 }
 ```
 
-- [ ] **Step 2: Create the upload hook**
+(`useDataManagementStore` is already exported from the store module alongside `useCollection`.)
 
-```ts
-// frontend/lib/hooks/use-file-upload.ts
-'use client'
-import { useCallback, useState } from 'react'
-import { fileService } from '@/lib/services/file.service'
-
-export interface UploadItem {
-  file: File
-  status: 'pending' | 'uploading' | 'done' | 'error'
-  fileId?: string
-  error?: string
-}
-
-export function useFileUpload() {
-  const [items, setItems] = useState<UploadItem[]>([])
-
-  const patch = (file: File, p: Partial<UploadItem>) =>
-    setItems((prev) => prev.map((it) => (it.file === file ? { ...it, ...p } : it)))
-
-  const uploadAll = useCallback(
-    async (files: File[], metadata?: Record<string, unknown>): Promise<string[]> => {
-      setItems((prev) => [...prev, ...files.map((file) => ({ file, status: 'pending' as const }))])
-      const ids: string[] = []
-      for (const file of files) {
-        try {
-          patch(file, { status: 'uploading' })
-          const init = await fileService.initiate({
-            filename: file.name,
-            mimeType: file.type || 'application/octet-stream',
-            size: file.size,
-            metadata,
-          })
-          if (!init.deduplicated && init.upload) {
-            await fileService.uploadToPolicy(init.upload, file)
-            await fileService.complete(init.fileId)
-          }
-          patch(file, { status: 'done', fileId: init.fileId })
-          ids.push(init.fileId)
-        } catch (err) {
-          patch(file, { status: 'error', error: err instanceof Error ? err.message : 'Upload failed' })
-          throw err
-        }
-      }
-      return ids
-    },
-    [],
-  )
-
-  const reset = useCallback(() => setItems([]), [])
-  return { items, uploadAll, reset }
-}
-```
-
-- [ ] **Step 3: Write the failing test**
+- [ ] **Step 2: Write the test** — `use-record-mutations.test.tsx`:
 
 ```tsx
-// frontend/lib/hooks/__tests__/use-file-upload.test.tsx
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 
-vi.mock('@/lib/services/file.service', () => ({
-  fileService: { initiate: vi.fn(), uploadToPolicy: vi.fn(), complete: vi.fn() },
+vi.mock('@/lib/services/record.service', () => ({ recordService: { persist: vi.fn(), remove: vi.fn(), reload: vi.fn() } }))
+const mutate = vi.fn()
+vi.mock('@/lib/hooks/use-records', () => ({ useRecords: () => ({ mutate }) }))
+const openDetail = vi.fn()
+vi.mock('@/lib/state-management/data-management.store', () => ({
+  useCollection: () => 'products',
+  useDataManagementStore: (sel: (s: unknown) => unknown) => sel({ openDetail }),
 }))
+vi.mock('sonner', () => ({ toast: { success: vi.fn(), info: vi.fn() } }))
 
-import { fileService } from '@/lib/services/file.service'
-import { useFileUpload } from '@/lib/hooks/use-file-upload'
+import { recordService } from '@/lib/services/record.service'
+import { toast } from 'sonner'
+import { useRecordMutations } from '@/lib/hooks/use-record-mutations'
 
 beforeEach(() => vi.clearAllMocks())
 
-describe('useFileUpload', () => {
-  it('runs initiate → upload → complete and returns file ids', async () => {
-    vi.mocked(fileService.initiate).mockResolvedValue({ fileId: 'f1', deduplicated: false, upload: { url: 'u', expiresIn: 60 } })
-    vi.mocked(fileService.uploadToPolicy).mockResolvedValue()
-    vi.mocked(fileService.complete).mockResolvedValue({} as never)
-    const { result } = renderHook(() => useFileUpload())
-    let ids: string[] = []
-    await act(async () => {
-      ids = await result.current.uploadAll([new File(['x'], 'a.pdf', { type: 'application/pdf' })])
-    })
-    expect(ids).toEqual(['f1'])
-    expect(fileService.complete).toHaveBeenCalledWith('f1')
-  })
-
-  it('skips upload+complete when deduplicated', async () => {
-    vi.mocked(fileService.initiate).mockResolvedValue({ fileId: 'dup', deduplicated: true })
-    const { result } = renderHook(() => useFileUpload())
-    let ids: string[] = []
-    await act(async () => {
-      ids = await result.current.uploadAll([new File(['x'], 'a.pdf')])
-    })
-    expect(ids).toEqual(['dup'])
-    expect(fileService.uploadToPolicy).not.toHaveBeenCalled()
-    expect(fileService.complete).not.toHaveBeenCalled()
+describe('useRecordMutations.create', () => {
+  it('persists then wires a View action to the new record id', async () => {
+    vi.mocked(recordService.persist).mockResolvedValue([{ id: 'new-1', externalId: 'e', indexState: 'PENDING' }])
+    const { result } = renderHook(() => useRecordMutations())
+    await act(async () => { await result.current.create({ externalId: 'e', document: { a: 1 } }) })
+    expect(recordService.persist).toHaveBeenCalledWith('products', [{ externalId: 'e', document: { a: 1 } }])
+    const opts = vi.mocked(toast.success).mock.calls[0][1] as { action: { onClick: () => void } }
+    opts.action.onClick()
+    expect(openDetail).toHaveBeenCalledWith('new-1')
   })
 })
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 3: Run to verify it passes**
 
-Run: `cd frontend && npx vitest run lib/hooks/__tests__/use-file-upload.test.tsx`
-Expected: PASS (2 tests).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add frontend/lib/hooks/use-record-mutations.ts frontend/lib/hooks/use-file-upload.ts frontend/lib/hooks/__tests__/use-file-upload.test.tsx
-git commit -m "feat(data-mgmt): record mutation + file upload hooks"
-```
-
----
-
-## Task 11: Controlled data table
-
-**Files:**
-- Create: `frontend/components/data-management/record-data-table.tsx`
-- Test: `frontend/components/data-management/__tests__/record-data-table.test.tsx`
-
-**Interfaces:**
-- Consumes: `buildColumns` (Task 6), `RecordColumnMeta`, store (selection/columnVisibility/sort/page/limit + actions), `useIsAdmin`, `DataPagination` (`@/components/ui/data-pagination`), shadcn `Table*`, `Checkbox`, `Button`, `DropdownMenu*`, `Select*`, `Skeleton`, `Empty*`, Hugeicons.
-- Produces: `RecordDataTable({ fields, results, isLoading, error, onRetry }: { fields: FieldSpec[]; results?: SearchResults; isLoading: boolean; error?: unknown; onRetry: () => void })`.
-
-Behavior: prepends a select column and appends an actions column (admin-only Edit/Delete → `openDetail`/`requestDelete`). Sortable headers are buttons calling `toggleSort` with an asc/desc indicator from store `sort`. Column-visibility dropdown uses the table instance. Footer: rows-per-page Select (`setLimit`) + `DataPagination` (`setPage`). Loading→skeleton rows; empty→`Empty`; error→retry.
-
-- [ ] **Step 1: Implement the table**
-
-```tsx
-// frontend/components/data-management/record-data-table.tsx
-'use client'
-
-import * as React from 'react'
-import {
-  flexRender, getCoreRowModel, useReactTable, type ColumnDef,
-} from '@tanstack/react-table'
-import { HugeiconsIcon } from '@hugeicons/react'
-import {
-  ArrowUp01Icon, ArrowDown01Icon, ArrowUpDownIcon, LeftToRightListBulletIcon,
-  MoreVerticalCircle01Icon, RefreshIcon,
-} from '@hugeicons/core-free-icons'
-import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
-import { Skeleton } from '@/components/ui/skeleton'
-import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from '@/components/ui/empty'
-import {
-  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
-} from '@/components/ui/table'
-import {
-  DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem,
-  DropdownMenuSeparator, DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu'
-import {
-  Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select'
-import { Label } from '@/components/ui/label'
-import { DataPagination } from '@/components/ui/data-pagination'
-import { useIsAdmin } from '@/lib/hooks/use-permission'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
-import { buildColumns, type RecordColumnMeta } from '@/lib/schema/field-to-column'
-import type { FieldSpec, RecordHit, SearchResults } from '@/lib/interfaces/search.interface'
-
-const PAGE_SIZES = [10, 20, 30, 50]
-
-export function RecordDataTable({
-  fields,
-  results,
-  isLoading,
-  error,
-  onRetry,
-}: {
-  fields: FieldSpec[]
-  results?: SearchResults
-  isLoading: boolean
-  error?: unknown
-  onRetry: () => void
-}) {
-  const isAdmin = useIsAdmin()
-  const s = useDataManagementStore()
-
-  const columns = React.useMemo<ColumnDef<RecordHit>[]>(() => {
-    const dataCols = buildColumns(fields)
-    const select: ColumnDef<RecordHit> = {
-      id: 'select',
-      enableHiding: false,
-      header: ({ table }) => (
-        <Checkbox
-          checked={table.getIsAllPageRowsSelected() || (table.getIsSomePageRowsSelected() && 'indeterminate')}
-          onCheckedChange={(v) => table.toggleAllPageRowsSelected(!!v)}
-          aria-label="Select all"
-        />
-      ),
-      cell: ({ row }) => (
-        <Checkbox
-          checked={row.getIsSelected()}
-          onCheckedChange={(v) => row.toggleSelected(!!v)}
-          aria-label="Select row"
-        />
-      ),
-    }
-    const actions: ColumnDef<RecordHit> = {
-      id: 'actions',
-      enableHiding: false,
-      cell: ({ row }) => (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="size-8 text-muted-foreground">
-              <HugeiconsIcon icon={MoreVerticalCircle01Icon} strokeWidth={2} />
-              <span className="sr-only">Open menu</span>
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-32">
-            <DropdownMenuItem onClick={() => s.openDetail(row.original.id)}>
-              {isAdmin ? 'Edit' : 'View'}
-            </DropdownMenuItem>
-            {isAdmin && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem variant="destructive" onClick={() => s.requestDelete([row.original.id])}>
-                  Delete
-                </DropdownMenuItem>
-              </>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      ),
-    }
-    return [select, ...dataCols, actions]
-  }, [fields, isAdmin, s])
-
-  const table = useReactTable({
-    data: results?.hits ?? [],
-    columns,
-    state: { rowSelection: s.selection, columnVisibility: s.columnVisibility },
-    getRowId: (row) => row.id,
-    enableRowSelection: true,
-    onRowSelectionChange: s.setSelection,
-    onColumnVisibilityChange: s.setColumnVisibility,
-    manualPagination: true,
-    manualSorting: true,
-    manualFiltering: true,
-    pageCount: results?.totalPages ?? 0,
-    getCoreRowModel: getCoreRowModel(),
-  })
-
-  return (
-    <div className="flex flex-col gap-4 px-4 lg:px-6">
-      <div className="flex items-center justify-between">
-        <div className="text-sm text-muted-foreground">
-          {Object.keys(s.selection).length > 0
-            ? `${Object.keys(s.selection).length} selected`
-            : results
-              ? `${results.totalHits} record(s)`
-              : ''}
-        </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline" size="sm">
-              <HugeiconsIcon icon={LeftToRightListBulletIcon} strokeWidth={2} />
-              Columns
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-40">
-            {table.getAllColumns().filter((c) => c.getCanHide()).map((c) => (
-              <DropdownMenuCheckboxItem
-                key={c.id}
-                className="capitalize"
-                checked={c.getIsVisible()}
-                onCheckedChange={(v) => c.toggleVisibility(!!v)}
-              >
-                {c.id}
-              </DropdownMenuCheckboxItem>
-            ))}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </div>
-
-      <div className="overflow-hidden rounded-lg border">
-        <Table>
-          <TableHeader className="sticky top-0 z-10 bg-muted">
-            {table.getHeaderGroups().map((hg) => (
-              <TableRow key={hg.id}>
-                {hg.headers.map((header) => {
-                  const meta = header.column.columnDef.meta as RecordColumnMeta | undefined
-                  const sortable = meta?.field.sortable
-                  const active = s.sort[0]?.field === meta?.field.name ? s.sort[0] : undefined
-                  return (
-                    <TableHead key={header.id}>
-                      {header.isPlaceholder ? null : sortable ? (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="-ml-2 h-8"
-                          onClick={() => s.toggleSort(meta!.field.name)}
-                        >
-                          {flexRender(header.column.columnDef.header, header.getContext())}
-                          <HugeiconsIcon
-                            icon={active ? (active.dir === 'asc' ? ArrowUp01Icon : ArrowDown01Icon) : ArrowUpDownIcon}
-                            strokeWidth={2}
-                            className="size-3.5"
-                          />
-                        </Button>
-                      ) : (
-                        flexRender(header.column.columnDef.header, header.getContext())
-                      )}
-                    </TableHead>
-                  )
-                })}
-              </TableRow>
-            ))}
-          </TableHeader>
-          <TableBody>
-            {error ? (
-              <TableRow>
-                <TableCell colSpan={columns.length} className="h-40">
-                  <Empty>
-                    <EmptyHeader>
-                      <EmptyTitle>Could not load records</EmptyTitle>
-                      <EmptyDescription>The search service may be unavailable.</EmptyDescription>
-                    </EmptyHeader>
-                    <Button variant="outline" onClick={onRetry}>
-                      <HugeiconsIcon icon={RefreshIcon} strokeWidth={2} /> Retry
-                    </Button>
-                  </Empty>
-                </TableCell>
-              </TableRow>
-            ) : isLoading && !results ? (
-              Array.from({ length: 6 }).map((_, i) => (
-                <TableRow key={i}>
-                  {columns.map((_c, j) => (
-                    <TableCell key={j}><Skeleton className="h-5 w-full" /></TableCell>
-                  ))}
-                </TableRow>
-              ))
-            ) : table.getRowModel().rows.length ? (
-              table.getRowModel().rows.map((row) => (
-                <TableRow key={row.id} data-state={row.getIsSelected() && 'selected'}>
-                  {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</TableCell>
-                  ))}
-                </TableRow>
-              ))
-            ) : (
-              <TableRow>
-                <TableCell colSpan={columns.length} className="h-40">
-                  <Empty>
-                    <EmptyHeader>
-                      <EmptyTitle>No records</EmptyTitle>
-                      <EmptyDescription>Try adjusting your search or filters.</EmptyDescription>
-                    </EmptyHeader>
-                  </Empty>
-                </TableCell>
-              </TableRow>
-            )}
-          </TableBody>
-        </Table>
-      </div>
-
-      <div className="flex items-center justify-between gap-4">
-        <div className="hidden items-center gap-2 lg:flex">
-          <Label htmlFor="rows-per-page" className="text-sm font-medium">Rows per page</Label>
-          <Select value={String(s.limit)} onValueChange={(v) => s.setLimit(Number(v))}>
-            <SelectTrigger size="sm" className="w-20" id="rows-per-page"><SelectValue /></SelectTrigger>
-            <SelectContent side="top">
-              <SelectGroup>
-                {PAGE_SIZES.map((n) => <SelectItem key={n} value={String(n)}>{n}</SelectItem>)}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-        </div>
-        <DataPagination
-          page={s.page}
-          pageSize={s.limit}
-          total={results?.totalHits ?? 0}
-          onPageChange={s.setPage}
-          isLoading={isLoading}
-        />
-      </div>
-    </div>
-  )
-}
-```
-
-- [ ] **Step 2: Write the failing test**
-
-```tsx
-// frontend/components/data-management/__tests__/record-data-table.test.tsx
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
-
-vi.mock('@/lib/hooks/use-permission', () => ({ useIsAdmin: () => true }))
-
-import { RecordDataTable } from '@/components/data-management/record-data-table'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
-import type { FieldSpec, SearchResults } from '@/lib/interfaces/search.interface'
-
-const fields: FieldSpec[] = [{ name: 'title', type: 'string' }, { name: 'price', type: 'number', sortable: true }]
-
-beforeEach(() => {
-  useDataManagementStore.setState({ collection: 'products', q: '', page: 1, limit: 20, filters: {}, sort: [], selection: {}, columnVisibility: {} })
-})
-
-describe('RecordDataTable', () => {
-  it('renders rows from results', () => {
-    const results: SearchResults = { hits: [{ id: 'r1', title: 'Laptop', price: 999 }], page: 1, limit: 20, totalHits: 1, totalPages: 1, processingTimeMs: 1 }
-    render(<RecordDataTable fields={fields} results={results} isLoading={false} onRetry={() => {}} />)
-    expect(screen.getByText('Laptop')).toBeInTheDocument()
-    expect(screen.getByText('1 record(s)')).toBeInTheDocument()
-  })
-
-  it('shows an empty state when there are no hits', () => {
-    const results: SearchResults = { hits: [], page: 1, limit: 20, totalHits: 0, totalPages: 0, processingTimeMs: 1 }
-    render(<RecordDataTable fields={fields} results={results} isLoading={false} onRetry={() => {}} />)
-    expect(screen.getByText('No records')).toBeInTheDocument()
-  })
-
-  it('shows an error state with retry', () => {
-    render(<RecordDataTable fields={fields} results={undefined} isLoading={false} error={new Error('x')} onRetry={() => {}} />)
-    expect(screen.getByText('Could not load records')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
-  })
-})
-```
-
-- [ ] **Step 3: Run test to verify it passes**
-
-Run: `cd frontend && npx vitest run components/data-management/__tests__/record-data-table.test.tsx`
-Expected: PASS (3 tests). If a Hugeicons icon name is unresolved, replace it with any existing exported icon from `@hugeicons/core-free-icons` (verify with `grep -o "[A-Za-z0-9]*Icon" node_modules/@hugeicons/core-free-icons/dist/esm/index.d.ts | sort -u`).
+Run: `cd frontend && npx vitest run lib/hooks/__tests__/use-record-mutations.test.tsx`
+Expected: PASS.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add frontend/components/data-management/record-data-table.tsx frontend/components/data-management/__tests__/record-data-table.test.tsx
-git commit -m "feat(data-mgmt): controlled server-side data table"
+git add frontend/lib/hooks/use-record-mutations.ts frontend/lib/hooks/__tests__/use-record-mutations.test.tsx
+git commit -m "feat(data-mgmt): creation opens PG-backed detail; bounded revalidation"
 ```
 
 ---
 
-## Task 12: Toolbar + filters
+# Phase 2 — Schema / collection management
+
+## Task 5: Collection mutations service + hook
 
 **Files:**
-- Create: `frontend/components/data-management/record-filters.tsx`
-- Create: `frontend/components/data-management/record-toolbar.tsx`
-- Test: `frontend/components/data-management/__tests__/record-toolbar.test.tsx`
+- Modify: `frontend/lib/interfaces/search.interface.ts`
+- Modify: `frontend/lib/services/collection.service.ts`
+- Create: `frontend/lib/hooks/use-collection-mutations.ts`
+- Test: `frontend/lib/services/__tests__/collection.service.test.ts` (new)
+- Test: `frontend/lib/hooks/__tests__/use-collection-mutations.test.tsx`
 
 **Interfaces:**
-- Consumes: `FilterControl` (Task 8); store; `useCollections`; `useIsAdmin`; shadcn `Select*`, `Input`, `Popover*`, `Button`, `Badge`; Hugeicons.
-- Produces: `RecordFilters({ fields })`; `RecordToolbar({ fields }: { fields: FieldSpec[] })`.
+- Produces (types): `CreateCollectionInput`, `UpdateCollectionInput`.
+- Produces (service): `collectionService.create/update/remove`.
+- Produces (hook): `useCollectionMutations(): { create, update, remove }` — service + revalidate `'/search/collections'` (+ the `':name'` key on update) + toast.
 
-Behavior: collection `Select` (→ `setCollection`); debounced search `Input` (→ `setSearch`); a Filters `Popover` containing `RecordFilters` with an active-filter count badge + "Clear all"; admin-only "New record" (→ `openCreate`) and "Delete selected" (→ `requestDelete(Object.keys(selection))`, shown when selection non-empty).
+- [ ] **Step 1: Add input types to `search.interface.ts`**
 
-- [ ] **Step 1: Create the filters panel**
+```ts
+export interface CreateCollectionInput {
+  name: string
+  displayName: string
+  description?: string
+  fields: FieldSpec[]
+}
+export interface UpdateCollectionInput {
+  displayName?: string
+  description?: string | null
+  fields?: FieldSpec[]
+}
+```
+
+- [ ] **Step 2: Add mutations to `collection.service.ts`** (extend the import + object):
+
+```ts
+import type { CollectionView, CreateCollectionInput, UpdateCollectionInput } from '@/lib/interfaces/search.interface'
+
+// inside collectionService:
+  create(input: CreateCollectionInput): Promise<CollectionView> {
+    return apiClient.post<CollectionView>('/search/collections', input).then((r) => r.data)
+  },
+  update(name: string, patch: UpdateCollectionInput): Promise<CollectionView> {
+    return apiClient
+      .patch<CollectionView>(`/search/collections/${encodeURIComponent(name)}`, patch)
+      .then((r) => r.data)
+  },
+  remove(name: string): Promise<void> {
+    return apiClient.delete(`/search/collections/${encodeURIComponent(name)}`).then(() => undefined)
+  },
+```
+
+- [ ] **Step 3: Write the service test** — `collection.service.test.ts`:
+
+```ts
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+vi.mock('@/lib/http/api-client', () => ({ apiClient: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() } }))
+import { apiClient } from '@/lib/http/api-client'
+import { collectionService } from '@/lib/services/collection.service'
+
+beforeEach(() => vi.clearAllMocks())
+
+describe('collectionService mutations', () => {
+  it('create posts to /search/collections', async () => {
+    vi.mocked(apiClient.post).mockResolvedValue({ data: {} })
+    await collectionService.create({ name: 'c', displayName: 'C', fields: [{ name: 'a', type: 'string', searchable: true }] })
+    expect(apiClient.post).toHaveBeenCalledWith('/search/collections', expect.objectContaining({ name: 'c' }))
+  })
+  it('update patches by name', async () => {
+    vi.mocked(apiClient.patch).mockResolvedValue({ data: {} })
+    await collectionService.update('c', { displayName: 'C2' })
+    expect(apiClient.patch).toHaveBeenCalledWith('/search/collections/c', { displayName: 'C2' })
+  })
+  it('remove deletes by name', async () => {
+    vi.mocked(apiClient.delete).mockResolvedValue({ data: undefined })
+    await collectionService.remove('c')
+    expect(apiClient.delete).toHaveBeenCalledWith('/search/collections/c')
+  })
+})
+```
+
+- [ ] **Step 4: Implement `use-collection-mutations.ts`**
+
+```ts
+'use client'
+import { useCallback } from 'react'
+import { useSWRConfig } from 'swr'
+import { toast } from 'sonner'
+import { collectionService } from '@/lib/services/collection.service'
+import type { CreateCollectionInput, UpdateCollectionInput } from '@/lib/interfaces/search.interface'
+
+export function useCollectionMutations() {
+  const { mutate } = useSWRConfig()
+  const refreshList = useCallback(() => mutate('/search/collections'), [mutate])
+
+  const create = useCallback(async (input: CreateCollectionInput) => {
+    const view = await collectionService.create(input)
+    await refreshList()
+    toast.success(`Collection “${view.displayName}” created`)
+    return view
+  }, [refreshList])
+
+  const update = useCallback(async (name: string, patch: UpdateCollectionInput) => {
+    const view = await collectionService.update(name, patch)
+    await Promise.all([refreshList(), mutate(`/search/collections/${encodeURIComponent(name)}`)])
+    toast.success('Collection updated')
+    return view
+  }, [refreshList, mutate])
+
+  const remove = useCallback(async (name: string) => {
+    await collectionService.remove(name)
+    await refreshList()
+    toast.success('Collection deleted')
+  }, [refreshList])
+
+  return { create, update, remove }
+}
+```
+
+- [ ] **Step 5: Write the hook test** — `use-collection-mutations.test.tsx`:
 
 ```tsx
-// frontend/components/data-management/record-filters.tsx
-'use client'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { renderHook, act } from '@testing-library/react'
+const mutate = vi.fn()
+vi.mock('swr', () => ({ useSWRConfig: () => ({ mutate }) }))
+vi.mock('sonner', () => ({ toast: { success: vi.fn() } }))
+vi.mock('@/lib/services/collection.service', () => ({ collectionService: { create: vi.fn(), update: vi.fn(), remove: vi.fn() } }))
+import { collectionService } from '@/lib/services/collection.service'
+import { useCollectionMutations } from '@/lib/hooks/use-collection-mutations'
 
-import { Button } from '@/components/ui/button'
-import { FilterControl } from '@/components/data-management/field-to-filter'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
+beforeEach(() => vi.clearAllMocks())
+
+describe('useCollectionMutations', () => {
+  it('create calls service and revalidates the list', async () => {
+    vi.mocked(collectionService.create).mockResolvedValue({ displayName: 'C' } as never)
+    const { result } = renderHook(() => useCollectionMutations())
+    await act(async () => { await result.current.create({ name: 'c', displayName: 'C', fields: [] }) })
+    expect(collectionService.create).toHaveBeenCalled()
+    expect(mutate).toHaveBeenCalledWith('/search/collections')
+  })
+})
+```
+
+- [ ] **Step 6: Run tests**
+
+Run: `cd frontend && npx vitest run lib/services/__tests__/collection.service.test.ts lib/hooks/__tests__/use-collection-mutations.test.tsx`
+Expected: PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add frontend/lib/interfaces/search.interface.ts frontend/lib/services/collection.service.ts frontend/lib/hooks/use-collection-mutations.ts frontend/lib/services/__tests__/collection.service.test.ts frontend/lib/hooks/__tests__/use-collection-mutations.test.tsx
+git commit -m "feat(data-mgmt): collection mutation service + hook"
+```
+
+---
+
+## Task 6: Client field-spec validation + editor zod schema
+
+**Files:**
+- Create: `frontend/lib/schema/validate-field-spec.ts`
+- Create: `frontend/lib/schema/field-spec-to-zod.ts`
+- Test: `frontend/lib/schema/__tests__/validate-field-spec.test.ts`
+
+**Interfaces:**
+- Produces: `validateFieldSpec(fields): string[]` (mirror of backend rules); `RESERVED_FIELD_NAMES`; `canBeSearchable(type)`, `canBeSortable(type)`; `collectionFormSchema` + `CollectionFormValues`.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+import { describe, it, expect } from 'vitest'
+import { validateFieldSpec, canBeSearchable, canBeSortable } from '@/lib/schema/validate-field-spec'
 import type { FieldSpec } from '@/lib/interfaces/search.interface'
 
-export function RecordFilters({ fields }: { fields: FieldSpec[] }) {
-  const filters = useDataManagementStore((s) => s.filters)
-  const setFilter = useDataManagementStore((s) => s.setFilter)
-  const clearFilters = useDataManagementStore((s) => s.clearFilters)
-  const filterable = fields.filter((f) => f.filterable)
+describe('validateFieldSpec (client mirror)', () => {
+  it('requires at least one searchable field', () => {
+    expect(validateFieldSpec([{ name: 'a', type: 'string' }])).toContain('At least one field must be searchable')
+  })
+  it('rejects reserved + duplicate + bad names', () => {
+    const fields: FieldSpec[] = [
+      { name: 'id', type: 'string', searchable: true },
+      { name: '1bad', type: 'string' },
+      { name: 'dup', type: 'string' }, { name: 'dup', type: 'string' },
+    ]
+    const errs = validateFieldSpec(fields)
+    expect(errs).toContain('"id" is a reserved field name')
+    expect(errs).toContain('Invalid field name "1bad"')
+    expect(errs).toContain('Duplicate field "dup"')
+  })
+  it('flags searchable on non-string and sortable on arrays', () => {
+    const errs = validateFieldSpec([{ name: 'n', type: 'number', searchable: true, sortable: true }, { name: 't', type: 'string', searchable: true }])
+    expect(errs).toContain('Field "n" cannot be searchable (type number)')
+    expect(canBeSearchable('number')).toBe(false)
+    expect(canBeSortable('string[]')).toBe(false)
+  })
+})
+```
 
-  if (filterable.length === 0) {
-    return <p className="text-sm text-muted-foreground">No filterable fields in this collection.</p>
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cd frontend && npx vitest run lib/schema/__tests__/validate-field-spec.test.ts`
+Expected: FAIL — module missing.
+
+- [ ] **Step 3: Implement `validate-field-spec.ts`** (mirrors `api/.../document-validator.ts`)
+
+```ts
+import type { FieldSpec, FieldType } from '@/lib/interfaces/search.interface'
+
+export const RESERVED_FIELD_NAMES = ['id', 'externalId', 'collection', 'createdAt', 'updatedAt']
+const FIELD_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_]*$/
+const SCALARS: FieldType[] = ['string', 'number', 'boolean', 'date']
+
+export const canBeSearchable = (t: FieldType) => t === 'string' || t === 'string[]'
+export const canBeSortable = (t: FieldType) => SCALARS.includes(t)
+
+export function validateFieldSpec(fields: FieldSpec[]): string[] {
+  const errors: string[] = []
+  if (fields.length === 0) return ['A collection must declare at least one field']
+  const seen = new Set<string>()
+  for (const f of fields) {
+    if (!FIELD_NAME_RE.test(f.name)) errors.push(`Invalid field name "${f.name}"`)
+    if (RESERVED_FIELD_NAMES.includes(f.name)) errors.push(`"${f.name}" is a reserved field name`)
+    if (seen.has(f.name)) errors.push(`Duplicate field "${f.name}"`)
+    seen.add(f.name)
+    if (f.searchable && !canBeSearchable(f.type)) errors.push(`Field "${f.name}" cannot be searchable (type ${f.type})`)
+    if (f.sortable && !canBeSortable(f.type)) errors.push(`Field "${f.name}" cannot be sortable (type ${f.type})`)
   }
+  if (!fields.some((f) => f.searchable)) errors.push('At least one field must be searchable')
+  return errors
+}
+```
+
+- [ ] **Step 4: Implement `field-spec-to-zod.ts`**
+
+```ts
+import { z } from 'zod'
+
+export const collectionFormSchema = z.object({
+  name: z.string().regex(/^[a-z][a-z0-9_]*$/, 'Use lower_snake_case').max(100),
+  displayName: z.string().min(1, 'Required').max(255),
+  description: z.string().max(500).optional(),
+})
+export type CollectionFormValues = z.infer<typeof collectionFormSchema>
+```
+
+- [ ] **Step 5: Run to verify it passes**
+
+Run: `cd frontend && npx vitest run lib/schema/__tests__/validate-field-spec.test.ts`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add frontend/lib/schema/validate-field-spec.ts frontend/lib/schema/field-spec-to-zod.ts frontend/lib/schema/__tests__/validate-field-spec.test.ts
+git commit -m "feat(data-mgmt): client field-spec validation mirror + editor schema"
+```
+
+---
+
+## Task 7: FieldSpec editor component
+
+**Files:**
+- Create: `frontend/components/data-management/field-spec-editor.tsx`
+- Test: `frontend/components/data-management/__tests__/field-spec-editor.test.tsx`
+
+**Interfaces:**
+- Consumes: `FieldSpec`, `FieldType`, `canBeSearchable`, `canBeSortable`.
+- Produces: `FieldSpecEditor({ value, onChange }: { value: FieldSpec[]; onChange: (next: FieldSpec[]) => void })`.
+
+- [ ] **Step 1: Write the failing test**
+
+```tsx
+import { describe, it, expect, vi } from 'vitest'
+import { render, screen, fireEvent } from '@testing-library/react'
+import { FieldSpecEditor } from '@/components/data-management/field-spec-editor'
+
+describe('FieldSpecEditor', () => {
+  it('adds a new empty field row', () => {
+    const onChange = vi.fn()
+    render(<FieldSpecEditor value={[]} onChange={onChange} />)
+    fireEvent.click(screen.getByRole('button', { name: /add field/i }))
+    expect(onChange).toHaveBeenCalledWith([expect.objectContaining({ name: '', type: 'string' })])
+  })
+  it('disables searchable for a number field', () => {
+    render(<FieldSpecEditor value={[{ name: 'price', type: 'number' }]} onChange={() => {}} />)
+    expect(screen.getByLabelText(/searchable/i)).toBeDisabled()
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cd frontend && npx vitest run components/data-management/__tests__/field-spec-editor.test.tsx`
+Expected: FAIL — module missing.
+
+- [ ] **Step 3: Implement `field-spec-editor.tsx`**
+
+```tsx
+'use client'
+
+import { HugeiconsIcon } from '@hugeicons/react'
+import { Add01Icon, Delete02Icon } from '@hugeicons/core-free-icons'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Checkbox } from '@/components/ui/checkbox'
+import { Label } from '@/components/ui/label'
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from '@/components/ui/select'
+import { canBeSearchable, canBeSortable } from '@/lib/schema/validate-field-spec'
+import type { FieldSpec, FieldType } from '@/lib/interfaces/search.interface'
+
+const TYPES: FieldType[] = ['string', 'number', 'boolean', 'date', 'string[]', 'number[]']
+const FLAGS = ['required', 'searchable', 'filterable', 'sortable'] as const
+
+export function FieldSpecEditor({
+  value, onChange,
+}: {
+  value: FieldSpec[]
+  onChange: (next: FieldSpec[]) => void
+}) {
+  const patch = (i: number, next: Partial<FieldSpec>) =>
+    onChange(value.map((f, idx) => (idx === i ? sanitize({ ...f, ...next }) : f)))
+  const add = () => onChange([...value, { name: '', type: 'string' }])
+  const removeRow = (i: number) => onChange(value.filter((_, idx) => idx !== i))
 
   return (
-    <div className="flex flex-col gap-4">
-      {filterable.map((field) => (
-        <FilterControl
-          key={field.name}
-          field={field}
-          value={filters[field.name]}
-          onChange={(v) => setFilter(field.name, v)}
-        />
+    <div className="flex flex-col gap-3">
+      {value.map((f, i) => (
+        <div key={i} className="flex flex-col gap-2 rounded-md border p-3">
+          <div className="flex items-center gap-2">
+            <Input aria-label={`field-name-${i}`} placeholder="field_name" value={f.name} onChange={(e) => patch(i, { name: e.target.value })} />
+            <Select value={f.type} onValueChange={(t) => patch(i, { type: t as FieldType })}>
+              <SelectTrigger className="w-36" aria-label={`field-type-${i}`}><SelectValue /></SelectTrigger>
+              <SelectContent>{TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
+            </Select>
+            <Button type="button" variant="ghost" size="icon" onClick={() => removeRow(i)} aria-label={`remove-field-${i}`}>
+              <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} />
+            </Button>
+          </div>
+          <div className="flex flex-wrap gap-4">
+            {FLAGS.map((flag) => {
+              const disabled =
+                (flag === 'searchable' && !canBeSearchable(f.type)) ||
+                (flag === 'sortable' && !canBeSortable(f.type))
+              return (
+                <div key={flag} className="flex items-center gap-2">
+                  <Checkbox id={`f-${i}-${flag}`} checked={!!f[flag]} disabled={disabled} onCheckedChange={(c) => patch(i, { [flag]: !!c })} />
+                  <Label htmlFor={`f-${i}-${flag}`} className="capitalize">{flag}</Label>
+                </div>
+              )
+            })}
+          </div>
+        </div>
       ))}
-      <Button variant="ghost" size="sm" className="self-end" onClick={clearFilters}>
-        Clear all
+      <Button type="button" variant="outline" onClick={add} className="self-start">
+        <HugeiconsIcon icon={Add01Icon} strokeWidth={2} /> Add field
       </Button>
     </div>
   )
 }
-```
 
-- [ ] **Step 2: Create the toolbar**
-
-```tsx
-// frontend/components/data-management/record-toolbar.tsx
-'use client'
-
-import * as React from 'react'
-import { HugeiconsIcon } from '@hugeicons/react'
-import { Add01Icon, FilterIcon, Delete02Icon, SearchIcon } from '@hugeicons/core-free-icons'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Badge } from '@/components/ui/badge'
-import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import {
-  Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select'
-import { RecordFilters } from '@/components/data-management/record-filters'
-import { useCollections } from '@/lib/hooks/use-collections'
-import { useIsAdmin } from '@/lib/hooks/use-permission'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
-
-export function RecordToolbar({ fields }: { fields: FieldSpec[] }) {
-  const isAdmin = useIsAdmin()
-  const { collections } = useCollections()
-  const s = useDataManagementStore()
-  const activeFilters = Object.keys(s.filters).length
-  const selectedIds = Object.keys(s.selection)
-
-  return (
-    <div className="flex flex-wrap items-center gap-2 px-4 lg:px-6">
-      <Select value={s.collection ?? ''} onValueChange={s.setCollection}>
-        <SelectTrigger className="w-56" size="sm">
-          <SelectValue placeholder="Select a collection" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectGroup>
-            {collections.map((c) => (
-              <SelectItem key={c.name} value={c.name}>{c.displayName}</SelectItem>
-            ))}
-          </SelectGroup>
-        </SelectContent>
-      </Select>
-
-      <SearchBox value={s.q} onChange={s.setSearch} />
-
-      <Popover>
-        <PopoverTrigger asChild>
-          <Button variant="outline" size="sm">
-            <HugeiconsIcon icon={FilterIcon} strokeWidth={2} />
-            Filters
-            {activeFilters > 0 && <Badge variant="secondary">{activeFilters}</Badge>}
-          </Button>
-        </PopoverTrigger>
-        <PopoverContent align="start" className="w-72">
-          <RecordFilters fields={fields} />
-        </PopoverContent>
-      </Popover>
-
-      <div className="ml-auto flex items-center gap-2">
-        {isAdmin && selectedIds.length > 0 && (
-          <Button variant="outline" size="sm" onClick={() => s.requestDelete(selectedIds)}>
-            <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} />
-            Delete ({selectedIds.length})
-          </Button>
-        )}
-        {isAdmin && (
-          <Button size="sm" onClick={s.openCreate} disabled={!s.collection}>
-            <HugeiconsIcon icon={Add01Icon} strokeWidth={2} />
-            New record
-          </Button>
-        )}
-      </div>
-    </div>
-  )
-}
-
-/** Local draft + debounce so keystrokes don't refetch on every character. */
-function SearchBox({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const [draft, setDraft] = React.useState(value)
-  React.useEffect(() => setDraft(value), [value])
-  React.useEffect(() => {
-    const id = setTimeout(() => {
-      if (draft !== value) onChange(draft)
-    }, 300)
-    return () => clearTimeout(id)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft])
-
-  return (
-    <div className="relative">
-      <HugeiconsIcon
-        icon={SearchIcon}
-        strokeWidth={2}
-        className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-      />
-      <Input
-        className="h-8 w-56 pl-8"
-        placeholder="Search…"
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-      />
-    </div>
-  )
+/** Clear flags a type can no longer support after a type change. */
+function sanitize(f: FieldSpec): FieldSpec {
+  const out = { ...f }
+  if (out.searchable && !canBeSearchable(out.type)) out.searchable = false
+  if (out.sortable && !canBeSortable(out.type)) out.sortable = false
+  return out
 }
 ```
 
-- [ ] **Step 3: Write the failing test**
+- [ ] **Step 4: Run to verify it passes**
 
-```tsx
-// frontend/components/data-management/__tests__/record-toolbar.test.tsx
-import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
-
-vi.mock('@/lib/hooks/use-permission', () => ({ useIsAdmin: () => true }))
-vi.mock('@/lib/hooks/use-collections', () => ({
-  useCollections: () => ({ collections: [{ name: 'products', displayName: 'Products', fields: [] }], isLoading: false }),
-}))
-
-import { RecordToolbar } from '@/components/data-management/record-toolbar'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
-
-const fields: FieldSpec[] = [{ name: 'status', type: 'string', enum: ['active'], filterable: true }]
-
-beforeEach(() => {
-  useDataManagementStore.setState({ collection: 'products', q: '', page: 1, limit: 20, filters: {}, sort: [], selection: {}, panel: 'closed' })
-})
-
-describe('RecordToolbar', () => {
-  it('admin sees the New record button and opens the create panel', () => {
-    render(<RecordToolbar fields={fields} />)
-    fireEvent.click(screen.getByRole('button', { name: /new record/i }))
-    expect(useDataManagementStore.getState().panel).toBe('create')
-  })
-
-  it('shows a bulk-delete button when rows are selected', () => {
-    useDataManagementStore.setState({ selection: { r1: true, r2: true } })
-    render(<RecordToolbar fields={fields} />)
-    expect(screen.getByRole('button', { name: /delete \(2\)/i })).toBeInTheDocument()
-  })
-})
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd frontend && npx vitest run components/data-management/__tests__/record-toolbar.test.tsx`
-Expected: PASS (2 tests). (If an icon name is unresolved, substitute an existing one per the Task 11 note.)
+Run: `cd frontend && npx vitest run components/data-management/__tests__/field-spec-editor.test.tsx`
+Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/components/data-management/record-filters.tsx frontend/components/data-management/record-toolbar.tsx frontend/components/data-management/__tests__/record-toolbar.test.tsx
-git commit -m "feat(data-mgmt): toolbar (collection switch, search, filters, actions)"
+git add frontend/components/data-management/field-spec-editor.tsx frontend/components/data-management/__tests__/field-spec-editor.test.tsx
+git commit -m "feat(data-mgmt): schema field-spec editor"
 ```
 
 ---
 
-## Task 13: Record form + attachments field
+## Task 8: Collection editor sheet (create + edit)
 
 **Files:**
-- Create: `frontend/components/data-management/attachments-field.tsx`
-- Create: `frontend/components/data-management/record-form.tsx`
-- Test: `frontend/components/data-management/__tests__/record-form.test.tsx`
+- Create: `frontend/components/data-management/collection-editor-sheet.tsx`
+- Test: `frontend/components/data-management/__tests__/collection-editor-sheet.test.tsx`
 
 **Interfaces:**
-- Consumes: `buildRecordSchema` (Task 5), `RecordFieldInput` (Task 7), `useRecordMutations` (Task 10), `useFileUpload` (Task 10), `fileService` (Task 3), `ApiError` (`@/lib/http/api-client`); shadcn `Button`, `Field*`, `Badge`, `Spinner`.
-- Produces:
-  - `AttachmentsField({ control, name, collection, externalId })` — Controller-bound to a `string[]` document field of file IDs; drop/select files → upload → append IDs; lists existing IDs with a download link + remove.
-  - `RecordForm({ fields, collection, mode, record, onDone }: { fields: FieldSpec[]; collection: string; mode: 'create' | 'edit'; record?: RecordHit; onDone: () => void })`.
+- Consumes: `useCollectionMutations`, `collectionFormSchema`, `validateFieldSpec`, `FieldSpecEditor`, `useCollectionDefinition`, `ApiError`.
+- Produces: `CollectionEditorSheet({ open, mode, name?, onClose })`.
 
-Behavior: `RecordForm` builds a zod resolver from `fields`; a stable `recordExternalId` (`record.externalId` in edit, else a once-generated `crypto.randomUUID()`); renders `RecordFieldInput` per field except an `attachments` (`string[]`) field, which renders `AttachmentsField`. Submit → `create({ externalId: recordExternalId, document })`; `ApiError.fieldErrors` map onto fields via `setError`; then `onDone()`.
-
-- [ ] **Step 1: Create the attachments field**
+- [ ] **Step 1: Write the failing test**
 
 ```tsx
-// frontend/components/data-management/attachments-field.tsx
-'use client'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+const create = vi.fn()
+vi.mock('@/lib/hooks/use-collection-mutations', () => ({ useCollectionMutations: () => ({ create, update: vi.fn() }) }))
+vi.mock('@/lib/hooks/use-collection-definition', () => ({ useCollectionDefinition: () => ({ definition: null, fields: [] }) }))
+import { CollectionEditorSheet } from '@/components/data-management/collection-editor-sheet'
 
-import * as React from 'react'
-import { Controller, type Control } from 'react-hook-form'
-import { HugeiconsIcon } from '@hugeicons/react'
-import { CloudUploadIcon, File01Icon, Cancel01Icon, Download01Icon } from '@hugeicons/core-free-icons'
-import { Button } from '@/components/ui/button'
-import { Field, FieldLabel } from '@/components/ui/field'
-import { Badge } from '@/components/ui/badge'
-import { Spinner } from '@/components/ui/spinner'
-import { useFileUpload } from '@/lib/hooks/use-file-upload'
-import { fileService } from '@/lib/services/file.service'
+beforeEach(() => vi.clearAllMocks())
 
-export function AttachmentsField({
-  control,
-  name,
-  collection,
-  externalId,
-}: {
-  control: Control<Record<string, unknown>>
-  name: string
-  collection: string
-  externalId: string
-}) {
-  const { items, uploadAll } = useFileUpload()
-
-  return (
-    <Controller
-      control={control}
-      name={name}
-      render={({ field: f }) => {
-        const ids: string[] = Array.isArray(f.value) ? (f.value as string[]) : []
-
-        const onFiles = async (files: FileList | null) => {
-          if (!files || files.length === 0) return
-          const newIds = await uploadAll(Array.from(files), { collection, externalId })
-          f.onChange([...ids, ...newIds])
-        }
-
-        return (
-          <Field>
-            <FieldLabel htmlFor={`att-${name}`}>{name}</FieldLabel>
-            <label
-              htmlFor={`att-${name}`}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => { e.preventDefault(); void onFiles(e.dataTransfer.files) }}
-              className="flex cursor-pointer flex-col items-center gap-2 rounded-lg border border-dashed p-6 text-sm text-muted-foreground hover:bg-muted/40"
-            >
-              <HugeiconsIcon icon={CloudUploadIcon} strokeWidth={2} className="size-6" />
-              Drop files here or click to upload
-              <input
-                id={`att-${name}`}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(e) => void onFiles(e.target.files)}
-              />
-            </label>
-
-            {items.some((it) => it.status === 'uploading') && (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Spinner /> Uploading…
-              </div>
-            )}
-
-            {ids.length > 0 && (
-              <ul className="flex flex-col gap-1">
-                {ids.map((id) => (
-                  <AttachmentRow
-                    key={id}
-                    id={id}
-                    onRemove={() => f.onChange(ids.filter((x) => x !== id))}
-                  />
-                ))}
-              </ul>
-            )}
-          </Field>
-        )
-      }}
-    />
-  )
-}
-
-function AttachmentRow({ id, onRemove }: { id: string; onRemove: () => void }) {
-  const [filename, setFilename] = React.useState<string>(id)
-  React.useEffect(() => {
-    let alive = true
-    fileService.get(id).then((m) => { if (alive) setFilename(m.filename) }).catch(() => {})
-    return () => { alive = false }
-  }, [id])
-
-  const download = async () => {
-    const url = await fileService.downloadUrl(id)
-    window.open(url, '_blank', 'noopener')
-  }
-
-  return (
-    <li className="flex items-center gap-2 rounded-md border px-2 py-1 text-sm">
-      <HugeiconsIcon icon={File01Icon} strokeWidth={2} className="size-4 text-muted-foreground" />
-      <span className="flex-1 truncate">{filename}</span>
-      <Button type="button" variant="ghost" size="icon" className="size-7" onClick={download}>
-        <HugeiconsIcon icon={Download01Icon} strokeWidth={2} className="size-4" />
-        <span className="sr-only">Download</span>
-      </Button>
-      <Button type="button" variant="ghost" size="icon" className="size-7" onClick={onRemove}>
-        <HugeiconsIcon icon={Cancel01Icon} strokeWidth={2} className="size-4" />
-        <span className="sr-only">Remove</span>
-      </Button>
-    </li>
-  )
-}
+describe('CollectionEditorSheet (create)', () => {
+  it('blocks submit when no field is searchable', async () => {
+    render(<CollectionEditorSheet open mode="create" onClose={() => {}} />)
+    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: 'products' } })
+    fireEvent.change(screen.getByLabelText(/display name/i), { target: { value: 'Products' } })
+    fireEvent.click(screen.getByRole('button', { name: /add field/i }))
+    fireEvent.change(screen.getByLabelText('field-name-0'), { target: { value: 'title' } })
+    fireEvent.click(screen.getByRole('button', { name: /create collection/i }))
+    await waitFor(() => expect(screen.getByText(/at least one field must be searchable/i)).toBeInTheDocument())
+    expect(create).not.toHaveBeenCalled()
+  })
+})
 ```
 
-- [ ] **Step 2: Create the record form**
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cd frontend && npx vitest run components/data-management/__tests__/collection-editor-sheet.test.tsx`
+Expected: FAIL — module missing.
+
+- [ ] **Step 3: Implement `collection-editor-sheet.tsx`**
 
 ```tsx
-// frontend/components/data-management/record-form.tsx
 'use client'
 
 import * as React from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { toast } from 'sonner'
+import {
+  Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
+} from '@/components/ui/sheet'
 import { Button } from '@/components/ui/button'
-import { FieldGroup } from '@/components/ui/field'
-import { RecordFieldInput } from '@/components/data-management/field-to-input'
-import { AttachmentsField } from '@/components/data-management/attachments-field'
-import { buildRecordSchema } from '@/lib/schema/field-to-zod'
-import { useRecordMutations } from '@/lib/hooks/use-record-mutations'
+import { Field, FieldLabel, FieldError } from '@/components/ui/field'
+import { Input } from '@/components/ui/input'
+import { Alert, AlertDescription } from '@/components/ui/alert'
+import { FieldSpecEditor } from '@/components/data-management/field-spec-editor'
+import { useCollectionMutations } from '@/lib/hooks/use-collection-mutations'
+import { useCollectionDefinition } from '@/lib/hooks/use-collection-definition'
+import { validateFieldSpec } from '@/lib/schema/validate-field-spec'
+import { collectionFormSchema, type CollectionFormValues } from '@/lib/schema/field-spec-to-zod'
 import { ApiError } from '@/lib/http/api-client'
-import type { FieldSpec, RecordDocument, RecordHit } from '@/lib/interfaces/search.interface'
+import type { FieldSpec } from '@/lib/interfaces/search.interface'
 
-const SYSTEM_KEYS = new Set(['id', 'externalId', 'createdAt', 'updatedAt'])
-const ATTACHMENTS_FIELD = 'attachments'
-
-function documentOf(record?: RecordHit): RecordDocument {
-  if (!record) return {}
-  const out: RecordDocument = {}
-  for (const [k, v] of Object.entries(record)) if (!SYSTEM_KEYS.has(k)) out[k] = v
-  return out
-}
-
-function genId(): string {
-  return typeof crypto !== 'undefined' && crypto.randomUUID
-    ? crypto.randomUUID()
-    : `rec_${Date.now()}_${Math.floor(Math.random() * 1e6)}`
-}
-
-export function RecordForm({
-  fields,
-  collection,
-  mode,
-  record,
-  onDone,
+export function CollectionEditorSheet({
+  open, mode, name, onClose,
 }: {
-  fields: FieldSpec[]
-  collection: string
+  open: boolean
   mode: 'create' | 'edit'
-  record?: RecordHit
-  onDone: () => void
+  name?: string
+  onClose: () => void
 }) {
-  const { create } = useRecordMutations()
-  const [externalId] = React.useState<string>(() => record?.externalId ?? genId())
-  const schema = React.useMemo(() => buildRecordSchema(fields), [fields])
-
-  const form = useForm<Record<string, unknown>>({
-    resolver: zodResolver(schema),
-    defaultValues: documentOf(record),
+  const { create, update } = useCollectionMutations()
+  const { definition, fields: existing } = useCollectionDefinition(mode === 'edit' ? (name ?? null) : null)
+  const form = useForm<CollectionFormValues>({
+    resolver: zodResolver(collectionFormSchema),
+    defaultValues: { name: '', displayName: '', description: '' },
   })
+  const [fields, setFields] = React.useState<FieldSpec[]>([])
+  const [specErrors, setSpecErrors] = React.useState<string[]>([])
 
-  const attachmentsField = fields.find((f) => f.name === ATTACHMENTS_FIELD && f.type === 'string[]')
+  React.useEffect(() => {
+    if (open && mode === 'edit' && definition) {
+      form.reset({ name: definition.name, displayName: definition.displayName, description: definition.description ?? '' })
+      setFields(existing)
+    }
+    if (open && mode === 'create') { form.reset({ name: '', displayName: '', description: '' }); setFields([]) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, mode, definition])
 
-  const onSubmit = async (values: Record<string, unknown>) => {
+  const onSubmit = async (values: CollectionFormValues) => {
+    const errs = validateFieldSpec(fields)
+    setSpecErrors(errs)
+    if (errs.length) return
     try {
-      await create({ externalId, document: values })
-      onDone()
+      if (mode === 'create') await create({ ...values, fields })
+      else await update(name as string, { displayName: values.displayName, description: values.description ?? null, fields })
+      onClose()
     } catch (err) {
-      if (err instanceof ApiError) {
-        const fieldErrors = err.fieldErrors
-        let mapped = false
-        for (const [path, message] of Object.entries(fieldErrors)) {
-          if (path !== '_root') { form.setError(path, { message }); mapped = true }
-        }
-        if (!mapped) toast.error(err.message)
-      } else {
-        toast.error('Failed to save record')
-      }
+      toast.error(err instanceof ApiError ? err.message : 'Failed to save collection')
     }
   }
 
   return (
-    <form onSubmit={form.handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4">
-      <FieldGroup>
-        {fields.map((field) =>
-          field === attachmentsField ? (
-            <AttachmentsField
-              key={field.name}
-              control={form.control}
-              name={field.name}
-              collection={collection}
-              externalId={externalId}
-            />
-          ) : (
-            <RecordFieldInput key={field.name} field={field} control={form.control} />
-          ),
-        )}
-      </FieldGroup>
-      <div className="flex justify-end gap-2">
-        <Button type="button" variant="outline" onClick={onDone}>Cancel</Button>
-        <Button type="submit" disabled={form.formState.isSubmitting}>
-          {form.formState.isSubmitting ? 'Saving…' : mode === 'create' ? 'Create record' : 'Save changes'}
-        </Button>
-      </div>
-    </form>
-  )
-}
-```
-
-- [ ] **Step 3: Write the failing test**
-
-```tsx
-// frontend/components/data-management/__tests__/record-form.test.tsx
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-
-const create = vi.fn()
-vi.mock('@/lib/hooks/use-record-mutations', () => ({ useRecordMutations: () => ({ create, update: create, remove: vi.fn(), reindex: vi.fn() }) }))
-
-import { RecordForm } from '@/components/data-management/record-form'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
-
-const fields: FieldSpec[] = [{ name: 'title', type: 'string', required: true }]
-
-beforeEach(() => vi.clearAllMocks())
-
-describe('RecordForm', () => {
-  it('blocks submit and shows a validation error when required is empty', async () => {
-    render(<RecordForm fields={fields} collection="products" mode="create" onDone={() => {}} />)
-    fireEvent.click(screen.getByRole('button', { name: /create record/i }))
-    await waitFor(() => expect(screen.getByText(/title is required/i)).toBeInTheDocument())
-    expect(create).not.toHaveBeenCalled()
-  })
-
-  it('persists a valid record with a generated externalId', async () => {
-    create.mockResolvedValue({ id: 'x', externalId: 'e', indexState: 'PENDING' })
-    const onDone = vi.fn()
-    render(<RecordForm fields={fields} collection="products" mode="create" onDone={onDone} />)
-    fireEvent.change(screen.getByLabelText(/title/i), { target: { value: 'Laptop' } })
-    fireEvent.click(screen.getByRole('button', { name: /create record/i }))
-    await waitFor(() => expect(create).toHaveBeenCalled())
-    const arg = create.mock.calls[0][0]
-    expect(arg.document).toEqual({ title: 'Laptop' })
-    expect(typeof arg.externalId).toBe('string')
-    expect(arg.externalId.length).toBeGreaterThan(0)
-    await waitFor(() => expect(onDone).toHaveBeenCalled())
-  })
-})
-```
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `cd frontend && npx vitest run components/data-management/__tests__/record-form.test.tsx`
-Expected: PASS (2 tests). (If `Spinner` import path differs, confirm with `grep -n "export" frontend/components/ui/spinner.tsx`.)
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add frontend/components/data-management/attachments-field.tsx frontend/components/data-management/record-form.tsx frontend/components/data-management/__tests__/record-form.test.tsx
-git commit -m "feat(data-mgmt): schema-driven record form + attachments"
-```
-
----
-
-## Task 14: Panels (create sheet, detail drawer, delete dialog)
-
-**Files:**
-- Create: `frontend/components/data-management/record-input-panel.tsx`
-- Create: `frontend/components/data-management/record-detail-drawer.tsx`
-- Create: `frontend/components/data-management/record-delete-dialog.tsx`
-- Test: `frontend/components/data-management/__tests__/record-delete-dialog.test.tsx`
-
-**Interfaces:**
-- Consumes: store (`panel`/`detailId`/`deleteTarget` + actions), `RecordForm` (Task 13), `FieldCell` (Task 6), `useRecordMutations` (Task 10), `useIsAdmin`; shadcn `Sheet*`, `Drawer*`, `AlertDialog*`.
-- Produces: `RecordInputPanel({ fields, collection })`; `RecordDetailDrawer({ fields, collection, results }: { …; results?: SearchResults })`; `RecordDeleteDialog()`.
-
-- [ ] **Step 1: Create the input panel**
-
-```tsx
-// frontend/components/data-management/record-input-panel.tsx
-'use client'
-
-import {
-  Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
-} from '@/components/ui/sheet'
-import { RecordForm } from '@/components/data-management/record-form'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
-
-export function RecordInputPanel({ fields, collection }: { fields: FieldSpec[]; collection: string }) {
-  const open = useDataManagementStore((s) => s.panel === 'create')
-  const closeCreate = useDataManagementStore((s) => s.closeCreate)
-
-  return (
-    <Sheet open={open} onOpenChange={(o) => { if (!o) closeCreate() }}>
-      <SheetContent side="right" className="w-full gap-0 overflow-y-auto sm:max-w-lg">
+    <Sheet open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+      <SheetContent side="right" className="w-full gap-0 overflow-y-auto sm:max-w-2xl">
         <SheetHeader>
-          <SheetTitle>New record</SheetTitle>
-          <SheetDescription>Add a record to “{collection}”.</SheetDescription>
+          <SheetTitle>{mode === 'create' ? 'New collection' : `Edit “${name}”`}</SheetTitle>
+          <SheetDescription>Define the collection identity and its field schema.</SheetDescription>
         </SheetHeader>
-        <div className="px-4 pb-6">
-          {open && (
-            <RecordForm fields={fields} collection={collection} mode="create" onDone={closeCreate} />
+        <form onSubmit={form.handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4 px-4 pb-6">
+          <Field data-invalid={form.formState.errors.name ? 'true' : undefined}>
+            <FieldLabel htmlFor="name">Name</FieldLabel>
+            <Input id="name" disabled={mode === 'edit'} {...form.register('name')} />
+            {form.formState.errors.name && <FieldError>{form.formState.errors.name.message}</FieldError>}
+          </Field>
+          <Field data-invalid={form.formState.errors.displayName ? 'true' : undefined}>
+            <FieldLabel htmlFor="displayName">Display name</FieldLabel>
+            <Input id="displayName" {...form.register('displayName')} />
+            {form.formState.errors.displayName && <FieldError>{form.formState.errors.displayName.message}</FieldError>}
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="description">Description</FieldLabel>
+            <Input id="description" {...form.register('description')} />
+          </Field>
+
+          {mode === 'edit' && (
+            <Alert>
+              <AlertDescription>
+                Changing fields triggers a background reindex and does not re-validate existing records.
+              </AlertDescription>
+            </Alert>
           )}
-        </div>
+
+          <div className="flex flex-col gap-2">
+            <span className="text-sm font-medium">Fields</span>
+            <FieldSpecEditor value={fields} onChange={(f) => { setFields(f); setSpecErrors([]) }} />
+            {specErrors.length > 0 && (
+              <ul className="text-sm text-destructive">{specErrors.map((e) => <li key={e}>{e}</li>)}</ul>
+            )}
+          </div>
+
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+            <Button type="submit" disabled={form.formState.isSubmitting}>
+              {mode === 'create' ? 'Create collection' : 'Save changes'}
+            </Button>
+          </div>
+        </form>
       </SheetContent>
     </Sheet>
   )
 }
 ```
 
-- [ ] **Step 2: Create the detail drawer**
+- [ ] **Step 4: Run to verify it passes**
 
-```tsx
-// frontend/components/data-management/record-detail-drawer.tsx
-'use client'
+Run: `cd frontend && npx vitest run components/data-management/__tests__/collection-editor-sheet.test.tsx`
+Expected: PASS. (If `Alert`/`AlertDescription` export names differ, confirm with `grep -n export frontend/components/ui/alert.tsx`.)
 
-import {
-  Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle,
-} from '@/components/ui/drawer'
-import { RecordForm } from '@/components/data-management/record-form'
-import { FieldCell } from '@/components/data-management/field-cell'
-import { useIsAdmin } from '@/lib/hooks/use-permission'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
-import type { FieldSpec, RecordHit, SearchResults } from '@/lib/interfaces/search.interface'
-
-export function RecordDetailDrawer({
-  fields,
-  collection,
-  results,
-}: {
-  fields: FieldSpec[]
-  collection: string
-  results?: SearchResults
-}) {
-  const isAdmin = useIsAdmin()
-  const detailId = useDataManagementStore((s) => s.detailId)
-  const closeDetail = useDataManagementStore((s) => s.closeDetail)
-
-  const record: RecordHit | undefined = results?.hits.find((h) => h.id === detailId)
-  const editable = isAdmin && !!record?.externalId
-
-  return (
-    <Drawer open={detailId !== null} onOpenChange={(o) => { if (!o) closeDetail() }} direction="right">
-      <DrawerContent>
-        <DrawerHeader>
-          <DrawerTitle>{editable ? 'Edit record' : 'Record details'}</DrawerTitle>
-          <DrawerDescription>
-            {record?.externalId ? `External ID: ${record.externalId}` : 'This record has no external ID and is read-only.'}
-          </DrawerDescription>
-        </DrawerHeader>
-        <div className="overflow-y-auto px-4 pb-6">
-          {record && editable ? (
-            <RecordForm fields={fields} collection={collection} mode="edit" record={record} onDone={closeDetail} />
-          ) : record ? (
-            <dl className="flex flex-col gap-3">
-              {fields.map((f) => (
-                <div key={f.name} className="flex flex-col gap-1">
-                  <dt className="text-sm font-medium text-muted-foreground">{f.name}</dt>
-                  <dd><FieldCell field={f} value={record[f.name]} /></dd>
-                </div>
-              ))}
-            </dl>
-          ) : null}
-        </div>
-      </DrawerContent>
-    </Drawer>
-  )
-}
-```
-
-- [ ] **Step 3: Create the delete dialog**
-
-```tsx
-// frontend/components/data-management/record-delete-dialog.tsx
-'use client'
-
-import * as React from 'react'
-import {
-  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
-  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
-} from '@/components/ui/alert-dialog'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
-import { useRecordMutations } from '@/lib/hooks/use-record-mutations'
-
-export function RecordDeleteDialog() {
-  const deleteTarget = useDataManagementStore((s) => s.deleteTarget)
-  const cancelDelete = useDataManagementStore((s) => s.cancelDelete)
-  const clearSelection = useDataManagementStore((s) => s.clearSelection)
-  const { remove } = useRecordMutations()
-  const [busy, setBusy] = React.useState(false)
-
-  const count = deleteTarget?.length ?? 0
-
-  const confirm = async () => {
-    if (!deleteTarget) return
-    setBusy(true)
-    try {
-      await remove(deleteTarget)
-      clearSelection()
-      cancelDelete()
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <AlertDialog open={deleteTarget !== null} onOpenChange={(o) => { if (!o) cancelDelete() }}>
-      <AlertDialogContent>
-        <AlertDialogHeader>
-          <AlertDialogTitle>Delete {count} record(s)?</AlertDialogTitle>
-          <AlertDialogDescription>
-            This permanently removes the selected record(s). This action cannot be undone.
-          </AlertDialogDescription>
-        </AlertDialogHeader>
-        <AlertDialogFooter>
-          <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
-          <AlertDialogAction
-            disabled={busy}
-            onClick={(e) => { e.preventDefault(); void confirm() }}
-          >
-            {busy ? 'Deleting…' : 'Delete'}
-          </AlertDialogAction>
-        </AlertDialogFooter>
-      </AlertDialogContent>
-    </AlertDialog>
-  )
-}
-```
-
-- [ ] **Step 4: Write the failing test**
-
-```tsx
-// frontend/components/data-management/__tests__/record-delete-dialog.test.tsx
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-
-const remove = vi.fn().mockResolvedValue(undefined)
-vi.mock('@/lib/hooks/use-record-mutations', () => ({ useRecordMutations: () => ({ remove, create: vi.fn(), update: vi.fn(), reindex: vi.fn() }) }))
-
-import { RecordDeleteDialog } from '@/components/data-management/record-delete-dialog'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
-
-beforeEach(() => {
-  vi.clearAllMocks()
-  useDataManagementStore.setState({ deleteTarget: ['r1', 'r2'], selection: { r1: true, r2: true } })
-})
-
-describe('RecordDeleteDialog', () => {
-  it('confirms deletion of the targeted ids and clears state', async () => {
-    render(<RecordDeleteDialog />)
-    expect(screen.getByText(/delete 2 record/i)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /^delete$/i }))
-    await waitFor(() => expect(remove).toHaveBeenCalledWith(['r1', 'r2']))
-    await waitFor(() => expect(useDataManagementStore.getState().deleteTarget).toBeNull())
-    expect(useDataManagementStore.getState().selection).toEqual({})
-  })
-})
-```
-
-- [ ] **Step 5: Run test to verify it passes**
-
-Run: `cd frontend && npx vitest run components/data-management/__tests__/record-delete-dialog.test.tsx`
-Expected: PASS (1 test).
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/components/data-management/record-input-panel.tsx frontend/components/data-management/record-detail-drawer.tsx frontend/components/data-management/record-delete-dialog.tsx frontend/components/data-management/__tests__/record-delete-dialog.test.tsx
-git commit -m "feat(data-mgmt): create/detail/delete panels"
+git add frontend/components/data-management/collection-editor-sheet.tsx frontend/components/data-management/__tests__/collection-editor-sheet.test.tsx
+git commit -m "feat(data-mgmt): collection editor sheet (create + edit)"
 ```
 
 ---
 
-## Task 15: Orchestrator, page, and nav wiring
+## Task 9: Collection manager dialog + store panel + toolbar wiring
 
 **Files:**
-- Create: `frontend/components/data-management/data-management-view.tsx`
-- Create: `frontend/app/dashboard/data-management/page.tsx`
-- Modify: `frontend/components/app-sidebar.tsx` (add a nav item)
-- Test: `frontend/components/data-management/__tests__/data-management-view.test.tsx`
+- Modify: `frontend/lib/state-management/data-management.store.ts`
+- Create: `frontend/components/data-management/collection-manager-dialog.tsx`
+- Modify: `frontend/components/data-management/record-toolbar.tsx`
+- Modify: `frontend/components/data-management/data-management-view.tsx`
+- Test: `frontend/lib/state-management/__tests__/data-management.store.test.ts` (extend)
+- Test: `frontend/components/data-management/__tests__/collection-manager-dialog.test.tsx`
 
 **Interfaces:**
-- Consumes: `useCollections`, `useCollectionDefinition`, `useRecords`, store, and all Task 11–14 components.
-- Produces: `DataManagementView()`; the route `page.tsx`; a sidebar link to `/dashboard/data-management`.
+- Produces (store): `CollectionPanel` + `collectionPanel` + `openCollections()`, `openCreateCollection()`, `openEditCollection(name)`, `closeCollectionPanel()`.
+- Produces (UI): `CollectionManagerDialog()`; toolbar **Manage…** + **Reindex** (admin).
 
-- [ ] **Step 1: Create the orchestrator**
+- [ ] **Step 1: Extend the store** — add above the creator and into the interface/creator:
+
+```ts
+export type CollectionPanel =
+  | { kind: 'closed' } | { kind: 'list' } | { kind: 'create' } | { kind: 'edit'; name: string }
+```
+
+```ts
+// interface:
+  collectionPanel: CollectionPanel
+  openCollections: () => void
+  openCreateCollection: () => void
+  openEditCollection: (name: string) => void
+  closeCollectionPanel: () => void
+// creator:
+  collectionPanel: { kind: 'closed' },
+  openCollections: () => set({ collectionPanel: { kind: 'list' } }, false, 'dm/openCollections'),
+  openCreateCollection: () => set({ collectionPanel: { kind: 'create' } }, false, 'dm/openCreateCollection'),
+  openEditCollection: (name) => set({ collectionPanel: { kind: 'edit', name } }, false, 'dm/openEditCollection'),
+  closeCollectionPanel: () => set({ collectionPanel: { kind: 'closed' } }, false, 'dm/closeCollectionPanel'),
+```
+
+- [ ] **Step 2: Extend the store test** (add `collectionPanel: { kind: 'closed' }` to the `beforeEach` reset):
+
+```ts
+it('collection panel transitions', () => {
+  get().openCollections(); expect(get().collectionPanel).toEqual({ kind: 'list' })
+  get().openEditCollection('products'); expect(get().collectionPanel).toEqual({ kind: 'edit', name: 'products' })
+  get().closeCollectionPanel(); expect(get().collectionPanel).toEqual({ kind: 'closed' })
+})
+```
+
+- [ ] **Step 3: Implement `collection-manager-dialog.tsx`**
 
 ```tsx
-// frontend/components/data-management/data-management-view.tsx
 'use client'
 
-import * as React from 'react'
-import { RecordToolbar } from '@/components/data-management/record-toolbar'
-import { RecordDataTable } from '@/components/data-management/record-data-table'
-import { RecordInputPanel } from '@/components/data-management/record-input-panel'
-import { RecordDetailDrawer } from '@/components/data-management/record-detail-drawer'
-import { RecordDeleteDialog } from '@/components/data-management/record-delete-dialog'
+import {
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
+} from '@/components/ui/dialog'
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
+import { CollectionEditorSheet } from '@/components/data-management/collection-editor-sheet'
 import { useCollections } from '@/lib/hooks/use-collections'
-import { useCollectionDefinition } from '@/lib/hooks/use-collection-definition'
-import { useRecords } from '@/lib/hooks/use-records'
-import { useCollection, useSetCollection } from '@/lib/state-management/data-management.store'
+import { useCollectionMutations } from '@/lib/hooks/use-collection-mutations'
+import { useDataManagementStore } from '@/lib/state-management/data-management.store'
 
-export function DataManagementView() {
+export function CollectionManagerDialog() {
+  const panel = useDataManagementStore((s) => s.collectionPanel)
+  const openCreate = useDataManagementStore((s) => s.openCreateCollection)
+  const openEdit = useDataManagementStore((s) => s.openEditCollection)
+  const close = useDataManagementStore((s) => s.closeCollectionPanel)
   const { collections } = useCollections()
-  const collection = useCollection()
-  const setCollection = useSetCollection()
-  const { fields, isLoading: defLoading } = useCollectionDefinition(collection)
-  const { results, isLoading, error, mutate } = useRecords()
-
-  // Default to the first collection once the list resolves.
-  React.useEffect(() => {
-    if (!collection && collections.length > 0) setCollection(collections[0].name)
-  }, [collection, collections, setCollection])
+  const { remove } = useCollectionMutations()
+  const editing = panel.kind === 'edit' ? panel.name : undefined
 
   return (
-    <div className="flex flex-col gap-4 py-4 md:gap-6 md:py-6">
-      <div className="px-4 lg:px-6">
-        <h1 className="text-2xl font-semibold tracking-tight">Data Management</h1>
-        <p className="text-sm text-muted-foreground">
-          Create, search, and manage records across your collections.
-        </p>
-      </div>
-
-      <RecordToolbar fields={fields} />
-
-      <RecordDataTable
-        fields={fields}
-        results={results}
-        isLoading={isLoading || defLoading}
-        error={error}
-        onRetry={() => void mutate()}
-      />
-
-      {collection && (
-        <>
-          <RecordInputPanel fields={fields} collection={collection} />
-          <RecordDetailDrawer fields={fields} collection={collection} results={results} />
-          <RecordDeleteDialog />
-        </>
-      )}
-    </div>
-  )
-}
-```
-
-- [ ] **Step 2: Create the page shell**
-
-```tsx
-// frontend/app/dashboard/data-management/page.tsx
-import { AppSidebar } from '@/components/app-sidebar'
-import { SiteHeader } from '@/components/site-header'
-import { SidebarInset, SidebarProvider } from '@/components/ui/sidebar'
-import { DataManagementView } from '@/components/data-management/data-management-view'
-
-export default function Page() {
-  return (
-    <SidebarProvider
-      style={
-        {
-          '--sidebar-width': 'calc(var(--spacing) * 72)',
-          '--header-height': 'calc(var(--spacing) * 12)',
-        } as React.CSSProperties
-      }
-    >
-      <AppSidebar variant="inset" />
-      <SidebarInset>
-        <SiteHeader />
-        <div className="flex flex-1 flex-col">
-          <div className="@container/main flex flex-1 flex-col gap-2">
-            <DataManagementView />
+    <>
+      <Dialog open={panel.kind === 'list'} onOpenChange={(o) => { if (!o) close() }}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Collections</DialogTitle>
+            <DialogDescription>Create, edit, or delete collections.</DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-2">
+            {collections.map((c) => (
+              <div key={c.name} className="flex items-center justify-between rounded-md border px-3 py-2">
+                <div>
+                  <div className="text-sm font-medium">{c.displayName}</div>
+                  <div className="text-xs text-muted-foreground">{c.name} · {c.fields.length} fields</div>
+                </div>
+                <div className="flex gap-1">
+                  <Button variant="ghost" size="sm" onClick={() => openEdit(c.name)}>Edit</Button>
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild><Button variant="ghost" size="sm">Delete</Button></AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>Delete “{c.displayName}”?</AlertDialogTitle>
+                        <AlertDialogDescription>This drops the search index and soft-deletes all its records.</AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction onClick={() => void remove(c.name)}>Delete</AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </div>
+              </div>
+            ))}
+            <Button variant="outline" onClick={openCreate} className="self-start">New collection</Button>
           </div>
-        </div>
-      </SidebarInset>
-    </SidebarProvider>
+        </DialogContent>
+      </Dialog>
+
+      <CollectionEditorSheet
+        open={panel.kind === 'create' || panel.kind === 'edit'}
+        mode={panel.kind === 'edit' ? 'edit' : 'create'}
+        name={editing}
+        onClose={close}
+      />
+    </>
   )
 }
 ```
 
-- [ ] **Step 3: Add the sidebar nav item**
-
-In `frontend/components/app-sidebar.tsx`, add an entry to the `navMain` array (after the `Dashboard` item). Reuse the already-imported `Database01Icon`:
+- [ ] **Step 4: Wire the toolbar** — in `record-toolbar.tsx`, import `useRecordMutations`, add the store opener + reindex, and render two admin buttons in the `ml-auto` group:
 
 ```tsx
-    {
-      title: "Data Management",
-      url: "/dashboard/data-management",
-      icon: (
-        <HugeiconsIcon icon={Database01Icon} strokeWidth={2} />
-      ),
-    },
+// near the top of RecordToolbar:
+const openCollections = useDataManagementStore((s) => s.openCollections)
+const { reindex } = useRecordMutations()
+
+// inside the ml-auto action group, before "New record":
+{isAdmin && (<Button variant="outline" size="sm" onClick={openCollections}>Manage…</Button>)}
+{isAdmin && s.collection && (<Button variant="outline" size="sm" onClick={() => void reindex()}>Reindex</Button>)}
 ```
 
-- [ ] **Step 4: Write the failing test**
+Add the import: `import { useRecordMutations } from '@/lib/hooks/use-record-mutations'`.
+
+- [ ] **Step 5: Mount the dialog** — in `data-management-view.tsx`, add the import and render `<CollectionManagerDialog />` at the top level (outside the `collection &&` guard):
 
 ```tsx
-// frontend/components/data-management/__tests__/data-management-view.test.tsx
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { CollectionManagerDialog } from '@/components/data-management/collection-manager-dialog'
+// …after <RecordDataTable/>:
+<CollectionManagerDialog />
+```
 
-const setCollection = vi.fn()
-vi.mock('@/lib/hooks/use-permission', () => ({ useIsAdmin: () => true }))
+- [ ] **Step 6: Write the manager test** — `collection-manager-dialog.test.tsx`:
+
+```tsx
+import { describe, it, expect, vi } from 'vitest'
+import { render, screen } from '@testing-library/react'
 vi.mock('@/lib/hooks/use-collections', () => ({
-  useCollections: () => ({ collections: [{ name: 'products', displayName: 'Products', fields: [] }], isLoading: false }),
+  useCollections: () => ({ collections: [{ name: 'products', displayName: 'Products', fields: [{ name: 'a', type: 'string' }] }] }),
 }))
-vi.mock('@/lib/hooks/use-collection-definition', () => ({
-  useCollectionDefinition: () => ({ definition: null, fields: [{ name: 'title', type: 'string' }], isLoading: false }),
+vi.mock('@/lib/hooks/use-collection-mutations', () => ({ useCollectionMutations: () => ({ remove: vi.fn() }) }))
+vi.mock('@/lib/hooks/use-collection-definition', () => ({ useCollectionDefinition: () => ({ definition: null, fields: [] }) }))
+vi.mock('@/lib/state-management/data-management.store', () => ({
+  useDataManagementStore: (sel: (s: unknown) => unknown) =>
+    sel({ collectionPanel: { kind: 'list' }, openCreateCollection: vi.fn(), openEditCollection: vi.fn(), closeCollectionPanel: vi.fn() }),
 }))
-vi.mock('@/lib/hooks/use-records', () => ({
-  useRecords: () => ({ results: { hits: [], page: 1, limit: 20, totalHits: 0, totalPages: 0, processingTimeMs: 1 }, isLoading: false, error: undefined, mutate: vi.fn() }),
-}))
-vi.mock('@/lib/state-management/data-management.store', async (orig) => {
-  const actual = await orig<typeof import('@/lib/state-management/data-management.store')>()
-  return { ...actual, useCollection: () => null, useSetCollection: () => setCollection }
-})
+import { CollectionManagerDialog } from '@/components/data-management/collection-manager-dialog'
 
-import { DataManagementView } from '@/components/data-management/data-management-view'
-
-beforeEach(() => vi.clearAllMocks())
-
-describe('DataManagementView', () => {
-  it('renders the heading and defaults to the first collection', async () => {
-    render(<DataManagementView />)
-    expect(screen.getByRole('heading', { name: /data management/i })).toBeInTheDocument()
-    await waitFor(() => expect(setCollection).toHaveBeenCalledWith('products'))
+describe('CollectionManagerDialog', () => {
+  it('lists collections with a New button', () => {
+    render(<CollectionManagerDialog />)
+    expect(screen.getByText('Products')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /new collection/i })).toBeInTheDocument()
   })
 })
 ```
 
-- [ ] **Step 5: Run the full test suite + typecheck + build**
+- [ ] **Step 7: Run the tests**
 
-Run: `cd frontend && npx vitest run && npm run typecheck && npm run build`
-Expected: all Vitest suites PASS, `tsc --noEmit` clean, `next build` succeeds.
+Run: `cd frontend && npx vitest run lib/state-management/__tests__/data-management.store.test.ts components/data-management/__tests__/collection-manager-dialog.test.tsx`
+Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add frontend/components/data-management/data-management-view.tsx frontend/app/dashboard/data-management/page.tsx frontend/components/app-sidebar.tsx frontend/components/data-management/__tests__/data-management-view.test.tsx
-git commit -m "feat(data-mgmt): data management page + orchestrator + nav"
+git add frontend/lib/state-management/data-management.store.ts frontend/components/data-management/collection-manager-dialog.tsx frontend/components/data-management/record-toolbar.tsx frontend/components/data-management/data-management-view.tsx frontend/lib/state-management/__tests__/data-management.store.test.ts frontend/components/data-management/__tests__/collection-manager-dialog.test.tsx
+git commit -m "feat(data-mgmt): collection manager dialog + toolbar wiring"
 ```
 
 ---
 
-## Task 16: End-to-end verification against the live backend
+# Phase 3 — Query enrichment
 
-**Files:** none (manual verification). Prereq: backend running, at least one collection exists (create one via `POST /search/collections` if needed — see `development/current_session/current_design.md` §1), and you are logged in as an admin.
+## Task 10: Query plumbing for facets + highlight
 
-- [ ] **Step 1: Start the frontend**
+**Files:**
+- Modify: `frontend/lib/interfaces/search.interface.ts` (extend `SearchRequestBody`)
+- Modify: `frontend/lib/schema/serialize-query.ts`
+- Modify: `frontend/lib/services/record.service.ts`
+- Modify: `frontend/lib/hooks/use-records.ts`
+- Modify: `frontend/components/data-management/data-management-view.tsx` (call `useRecords(fields)`)
+- Test: `frontend/lib/schema/__tests__/serialize-query.test.ts` (extend)
 
-Run: `cd frontend && npm run dev` and open `http://localhost:3000/dashboard/data-management`.
+**Interfaces:**
+- Produces: `toSearchRequestBody(query, opts?: { facets?; highlight? })`; `recordService.query(collection, query, opts?)`; `useRecords(fields?: FieldSpec[])` derives facets (`filterable && enum`) + highlight (`searchable`).
 
-- [ ] **Step 2: Verify read path** — the collection switcher lists collections; selecting one loads columns derived from its fields; search, a filter, a sortable header, rows-per-page, and pagination each trigger a fresh `POST …/query` (confirm in the Network tab) and update the table.
+- [ ] **Step 1: Extend `SearchRequestBody`** — add `facets?: string[]` and `highlight?: string[]`.
 
-- [ ] **Step 3: Verify write path (admin)** — "New record" opens the sheet; submit a valid record → toast "queued for indexing" → the record appears after the short revalidate. Attach a file if the collection declares an `attachments` (`string[]`) field and confirm the presigned POST to storage succeeds (this requires bucket CORS for the browser origin — see design §8/decision 7).
+- [ ] **Step 2: Extend the serializer**
 
-- [ ] **Step 4: Verify edit + delete** — open a record with an `externalId` → edit a field → save → change reflects after revalidate. Select rows → bulk delete → confirm dialog → rows disappear.
+```ts
+export function toSearchRequestBody(
+  query: SearchQuery,
+  opts: { facets?: string[]; highlight?: string[] } = {},
+): SearchRequestBody {
+  const body: SearchRequestBody = { page: query.page, limit: query.limit }
+  if (query.q.trim()) body.q = query.q.trim()
+  const filters: Record<string, SearchQuery['filters'][string]> = {}
+  for (const [field, value] of Object.entries(query.filters)) {
+    if (value === undefined || value === null) continue
+    if (Array.isArray(value) && value.length === 0) continue
+    if (typeof value === 'string' && value === '') continue
+    filters[field] = value
+  }
+  if (Object.keys(filters).length) body.filters = filters
+  if (query.sort.length) body.sort = query.sort.map((s) => `${s.field}:${s.dir}`)
+  if (opts.facets?.length) body.facets = opts.facets
+  if (opts.highlight?.length) body.highlight = opts.highlight
+  return body
+}
+```
 
-- [ ] **Step 5: Verify RBAC** — with a non-admin session, the New/Edit/Delete controls are absent and the read path still works.
+- [ ] **Step 3: Extend the serializer test**
 
-- [ ] **Step 6: Note any gaps** — record follow-ups (e.g. bucket CORS, missing `attachments` field on a collection) in `development/current_session/` rather than forcing them into this plan.
+```ts
+it('includes facets and highlight when provided', () => {
+  const out = toSearchRequestBody(base, { facets: ['status'], highlight: ['title'] })
+  expect(out.facets).toEqual(['status'])
+  expect(out.highlight).toEqual(['title'])
+})
+```
+
+- [ ] **Step 4: Extend `recordService.query`**
+
+```ts
+  query(collection: string, query: SearchQuery, opts?: { facets?: string[]; highlight?: string[] }): Promise<SearchResults> {
+    return apiClient
+      .post<SearchResults>(`${base(collection)}/query`, toSearchRequestBody(query, opts))
+      .then((r) => r.data)
+  },
+```
+
+- [ ] **Step 5: Update `use-records.ts`** to accept `fields` and derive facets/highlight
+
+```ts
+import useSWR from 'swr'
+import { recordService } from '@/lib/services/record.service'
+import { useCollection, useRecordQuery } from '@/lib/state-management/data-management.store'
+import type { FieldSpec, SearchResults } from '@/lib/interfaces/search.interface'
+
+export function useRecords(fields: FieldSpec[] = []) {
+  const collection = useCollection()
+  const query = useRecordQuery()
+  const facets = fields.filter((f) => f.filterable && f.enum?.length).map((f) => f.name)
+  const highlight = fields.filter((f) => f.searchable).map((f) => f.name)
+  const key = collection ? (['records', collection, query] as const) : null
+  const { data, isLoading, isValidating, error, mutate } = useSWR<SearchResults>(
+    key,
+    () => recordService.query(collection as string, query, { facets, highlight }),
+    { keepPreviousData: true },
+  )
+  return { results: data, isLoading, isValidating, error, mutate }
+}
+```
+
+`data-management-view.tsx`: change to `const { results, isLoading, error, mutate } = useRecords(fields)`. `use-record-mutations.ts` keeps `useRecords()` (facets/highlight are not part of the SWR key — they are stable per `collection`, which is in the key — so an empty `fields` there does not fork the cache).
+
+- [ ] **Step 6: Run tests**
+
+Run: `cd frontend && npx vitest run lib/schema/__tests__/serialize-query.test.ts lib/hooks/__tests__/use-records.test.tsx`
+Expected: PASS. If `use-records.test.tsx` asserts exact `query` args, relax it to `expect.objectContaining(...)` to allow the 3rd `opts` arg.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add frontend/lib/interfaces/search.interface.ts frontend/lib/schema/serialize-query.ts frontend/lib/services/record.service.ts frontend/lib/hooks/use-records.ts frontend/components/data-management/data-management-view.tsx frontend/lib/schema/__tests__/serialize-query.test.ts
+git commit -m "feat(data-mgmt): request facets + highlight in queries"
+```
+
+---
+
+## Task 11: Facet counts in the filter panel
+
+**Files:**
+- Modify: `frontend/components/data-management/field-to-filter.tsx`
+- Modify: `frontend/components/data-management/record-filters.tsx`
+- Modify: `frontend/components/data-management/record-toolbar.tsx`
+- Modify: `frontend/components/data-management/data-management-view.tsx`
+- Test: `frontend/components/data-management/__tests__/field-to-filter.test.tsx` (extend)
+
+**Interfaces:**
+- Produces: `FilterControl` accepts optional `counts?: Record<string, number>`; `RecordFilters`/`RecordToolbar` thread `facetDistribution` from results.
+
+- [ ] **Step 1: Extend `FilterControl`** — add `counts?: Record<string, number>` to props; in the enum branch, render the count beside the label:
+
+```tsx
+<Label htmlFor={`f-${field.name}-${key}`}>
+  {key}{counts && key in counts ? ` (${counts[key]})` : ''}
+</Label>
+```
+
+- [ ] **Step 2: Thread through `RecordFilters`** — accept `facetDistribution?: Record<string, Record<string, number>>`; pass `counts={facetDistribution?.[field.name]}` to each `FilterControl`.
+
+- [ ] **Step 3: Thread through `RecordToolbar`** — accept `facetDistribution?` and pass it to `<RecordFilters …/>`.
+
+- [ ] **Step 4: Pass from the view** — `<RecordToolbar fields={fields} facetDistribution={results?.facetDistribution} />`.
+
+- [ ] **Step 5: Extend the filter test**
+
+```tsx
+it('enum: renders facet counts when provided', () => {
+  render(<FilterControl field={{ name: 'status', type: 'string', enum: ['active'] }} value={undefined} counts={{ active: 7 }} onChange={() => {}} />)
+  expect(screen.getByText('active (7)')).toBeInTheDocument()
+})
+```
+
+- [ ] **Step 6: Run tests**
+
+Run: `cd frontend && npx vitest run components/data-management/__tests__/field-to-filter.test.tsx`
+Expected: PASS.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add frontend/components/data-management/field-to-filter.tsx frontend/components/data-management/record-filters.tsx frontend/components/data-management/record-toolbar.tsx frontend/components/data-management/data-management-view.tsx frontend/components/data-management/__tests__/field-to-filter.test.tsx
+git commit -m "feat(data-mgmt): faceted filters with live counts"
+```
+
+---
+
+## Task 12: Hit highlighting in cells
+
+**Files:**
+- Modify: `frontend/components/data-management/field-cell.tsx`
+- Modify: `frontend/lib/schema/field-to-column.tsx`
+- Test: `frontend/components/data-management/__tests__/field-cell.test.tsx` (extend)
+
+**Interfaces:**
+- Produces: `FieldCell` accepts optional `highlighted?: string` (a Meili `_formatted` fragment with `<em>`); when set for a string field, renders it (allowlist-sanitized) instead of the raw value.
+
+- [ ] **Step 1: Extend `FieldCell`** — add `highlighted?: string`; in the default (string) branch, prefer it:
+
+```tsx
+if (typeof highlighted === 'string' && highlighted.length) {
+  return <span className="block max-w-[28ch] truncate" dangerouslySetInnerHTML={{ __html: sanitizeMarks(highlighted) }} />
+}
+return <span className="block max-w-[28ch] truncate">{String(value)}</span>
+```
+
+Add the sanitizer at the bottom of the file:
+
+```tsx
+/** Escape everything, then re-allow only <em>/<mark> tags (Meili's default highlight tags). */
+function sanitizeMarks(html: string): string {
+  const escaped = html.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  return escaped.replace(/&lt;(\/?)(em|mark)&gt;/g, '<$1$2>')
+}
+```
+
+- [ ] **Step 2: Pass `_formatted` in the column cell** — in `field-to-column.tsx`, update the `cell` renderer:
+
+```tsx
+cell: ({ getValue, row }) => {
+  const formatted = (row.original as { _formatted?: Record<string, string> })._formatted
+  return <FieldCell field={field} value={getValue()} highlighted={formatted?.[field.name]} />
+},
+```
+
+- [ ] **Step 3: Extend the cell test**
+
+```tsx
+it('renders highlight marks for a string field', () => {
+  render(<FieldCell field={{ name: 'title', type: 'string' }} value="hello world" highlighted="<em>hello</em> world" />)
+  expect(screen.getByText('hello')).toBeInTheDocument()
+})
+```
+
+- [ ] **Step 4: Run tests**
+
+Run: `cd frontend && npx vitest run components/data-management/__tests__/field-cell.test.tsx`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add frontend/components/data-management/field-cell.tsx frontend/lib/schema/field-to-column.tsx frontend/components/data-management/__tests__/field-cell.test.tsx
+git commit -m "feat(data-mgmt): render search hit highlighting in cells"
+```
+
+---
+
+## Task 13: Multi-column sort
+
+**Files:**
+- Modify: `frontend/lib/state-management/data-management.store.ts`
+- Modify: `frontend/components/data-management/record-data-table.tsx`
+- Test: `frontend/lib/state-management/__tests__/data-management.store.test.ts` (extend)
+
+**Interfaces:**
+- Produces: `toggleSort(field: string, additive?: boolean)` — non-additive replaces (asc→desc→off, single); additive cycles that field within an ordered array, preserving others.
+
+- [ ] **Step 1: Rewrite `toggleSort`** and update its interface signature to `(field: string, additive?: boolean) => void`:
+
+```ts
+  toggleSort: (field, additive = false) =>
+    set(
+      (s) => {
+        const idx = s.sort.findIndex((x) => x.field === field)
+        const cur = idx >= 0 ? s.sort[idx] : undefined
+        const cycle = !cur ? { field, dir: 'asc' as const } : cur.dir === 'asc' ? { field, dir: 'desc' as const } : null
+        if (!additive) return { sort: cycle ? [cycle] : [] }
+        const next = s.sort.filter((x) => x.field !== field)
+        if (cycle) next.splice(idx >= 0 ? idx : next.length, 0, cycle)
+        return { sort: next }
+      },
+      false,
+      'dm/toggleSort',
+    ),
+```
+
+- [ ] **Step 2: Update the table header** — in `record-data-table.tsx`, replace the active-sort lookup and the click handler:
+
+```tsx
+const active = s.sort.find((x) => x.field === meta?.field.name)
+// …
+onClick={(e) => s.toggleSort(meta!.field.name, e.shiftKey)}
+```
+
+- [ ] **Step 3: Extend the store test**
+
+```ts
+it('additive toggleSort keeps prior sorts', () => {
+  get().toggleSort('price')
+  get().toggleSort('name', true)
+  expect(get().sort).toEqual([{ field: 'price', dir: 'asc' }, { field: 'name', dir: 'asc' }])
+  get().toggleSort('price', true)
+  expect(get().sort).toEqual([{ field: 'price', dir: 'desc' }, { field: 'name', dir: 'asc' }])
+})
+it('non-additive toggleSort still replaces', () => {
+  get().toggleSort('price'); get().toggleSort('name')
+  expect(get().sort).toEqual([{ field: 'name', dir: 'asc' }])
+})
+```
+
+- [ ] **Step 4: Run tests**
+
+Run: `cd frontend && npx vitest run lib/state-management/__tests__/data-management.store.test.ts`
+Expected: PASS (the existing single-sort cycle test stays green — the non-additive path is unchanged).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add frontend/lib/state-management/data-management.store.ts frontend/components/data-management/record-data-table.tsx frontend/lib/state-management/__tests__/data-management.store.test.ts
+git commit -m "feat(data-mgmt): multi-column sort (shift-click)"
+```
+
+---
+
+## Task 14: URL sync (collection + query + record deep-link)
+
+**Files:**
+- Create: `frontend/lib/hooks/use-query-url-sync.ts`
+- Modify: `frontend/components/data-management/data-management-view.tsx`
+- Test: `frontend/lib/hooks/__tests__/use-query-url-sync.test.tsx`
+
+**Interfaces:**
+- Consumes: `next/navigation` (`useRouter`, `useSearchParams`, `usePathname`), the store.
+- Produces: `useQueryUrlSync()` — hydrates `collection`, `q`, `page`, `sort`, `detailId` (`?record`) from the URL on mount, then writes back with `router.replace`.
+
+- [ ] **Step 1: Write the failing test**
+
+```tsx
+import { describe, it, expect, vi } from 'vitest'
+import { renderHook } from '@testing-library/react'
+const replace = vi.fn()
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ replace }),
+  usePathname: () => '/dashboard/data-management',
+  useSearchParams: () => new URLSearchParams('collection=products&record=abc&q=laptop'),
+}))
+const actions = { setCollection: vi.fn(), setSearch: vi.fn(), setPage: vi.fn(), toggleSort: vi.fn(), openDetail: vi.fn() }
+vi.mock('@/lib/state-management/data-management.store', () => ({
+  useDataManagementStore: (sel: (s: unknown) => unknown) =>
+    sel({ ...actions, collection: null, q: '', page: 1, sort: [], detailId: null }),
+}))
+import { useQueryUrlSync } from '@/lib/hooks/use-query-url-sync'
+
+describe('useQueryUrlSync', () => {
+  it('hydrates collection, search, and record from the URL on mount', () => {
+    renderHook(() => useQueryUrlSync())
+    expect(actions.setCollection).toHaveBeenCalledWith('products')
+    expect(actions.setSearch).toHaveBeenCalledWith('laptop')
+    expect(actions.openDetail).toHaveBeenCalledWith('abc')
+  })
+})
+```
+
+- [ ] **Step 2: Run to verify it fails**
+
+Run: `cd frontend && npx vitest run lib/hooks/__tests__/use-query-url-sync.test.tsx`
+Expected: FAIL — module missing.
+
+- [ ] **Step 3: Implement `use-query-url-sync.ts`**
+
+```ts
+'use client'
+import * as React from 'react'
+import { usePathname, useRouter, useSearchParams } from 'next/navigation'
+import { useDataManagementStore } from '@/lib/state-management/data-management.store'
+
+/** Two-way projection between the URL and the data-management store. */
+export function useQueryUrlSync() {
+  const router = useRouter()
+  const pathname = usePathname()
+  const params = useSearchParams()
+  const store = useDataManagementStore((s) => s)
+  const hydrated = React.useRef(false)
+
+  React.useEffect(() => {
+    if (hydrated.current) return
+    hydrated.current = true
+    const collection = params.get('collection')
+    const q = params.get('q')
+    const page = params.get('page')
+    const sort = params.get('sort')
+    const record = params.get('record')
+    if (collection) store.setCollection(collection)
+    if (q) store.setSearch(q)
+    if (page) store.setPage(Number(page) || 1)
+    if (sort) {
+      const [field, dir] = sort.split(':')
+      if (field && (dir === 'asc' || dir === 'desc')) {
+        store.toggleSort(field)                 // → asc
+        if (dir === 'desc') store.toggleSort(field) // → desc
+      }
+    }
+    if (record) store.openDetail(record)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  React.useEffect(() => {
+    if (!hydrated.current) return
+    const next = new URLSearchParams()
+    if (store.collection) next.set('collection', store.collection)
+    if (store.q) next.set('q', store.q)
+    if (store.page > 1) next.set('page', String(store.page))
+    if (store.sort[0]) next.set('sort', `${store.sort[0].field}:${store.sort[0].dir}`)
+    if (store.detailId) next.set('record', store.detailId)
+    const qs = next.toString()
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
+  }, [store.collection, store.q, store.page, store.sort, store.detailId, pathname, router])
+}
+```
+
+- [ ] **Step 4: Invoke in the view** — in `DataManagementView`, call `useQueryUrlSync()` before the "default to first collection" effect, and guard that effect so it only fires when the URL did not set a collection (it already checks `!collection`, which the hydration will have populated — no further change needed).
+
+- [ ] **Step 5: Run to verify it passes**
+
+Run: `cd frontend && npx vitest run lib/hooks/__tests__/use-query-url-sync.test.tsx`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add frontend/lib/hooks/use-query-url-sync.ts frontend/components/data-management/data-management-view.tsx frontend/lib/hooks/__tests__/use-query-url-sync.test.tsx
+git commit -m "feat(data-mgmt): URL-synced query + record deep-link"
+```
+
+---
+
+## Phase 3 gate: full suite + build
+
+- [ ] `cd frontend && npx vitest run` — all green.
+- [ ] `cd frontend && npm run build` — clean.
+- [ ] `cd api && npm test && npm run build` — clean.
+
+---
+
+# Phase 4 — Optional: date-range filter
+
+> Implement only if date-range **filtering** is wanted this iteration. Recency **sort** already works (Task 13 + always-sortable `createdAt`/`updatedAt`). This adds range operators to the query filter builder.
+
+## Task 15 (optional): range filter operators + date-range control
+
+**Files:**
+- Modify: `api/src/features/search-service/search.types.ts` (`SearchFilterValue` +range)
+- Modify: `api/src/features/search-service/dto/search-query.dto.ts` (filter union +range)
+- Modify: `api/src/features/search-service/search-record.service.ts` (`toFilterClause` range)
+- Test: `api/src/features/search-service/search-record.service.spec.ts`
+- Modify: `frontend/lib/interfaces/search.interface.ts` (`FilterValue` +range)
+- Modify: `frontend/components/data-management/field-to-filter.tsx` (date/number range inputs)
+
+- [ ] **Step 1: Backend test**
+
+```ts
+it('emits >= / <= for a range filter value', async () => {
+  const { service, engine } = make()
+  await service.search('articles', { q: '', page: 1, filters: { createdAt: { gte: 100, lte: 200 } } as never })
+  expect(searchArg(engine).filter).toEqual(['createdAt >= 100 AND createdAt <= 200'])
+})
+```
+
+(`createdAt` is in the test collection's `filterableAttributes`.)
+
+- [ ] **Step 2: Widen `SearchFilterValue`** in `search.types.ts`:
+
+```ts
+export type SearchFilterValue =
+  | string | number | boolean | Array<string | number>
+  | { gte?: number; lte?: number };
+```
+
+- [ ] **Step 3: Extend `searchQuerySchema`** filter union:
+
+```ts
+z.union([
+  z.string(), z.number(), z.boolean(),
+  z.array(z.union([z.string(), z.number()])),
+  z.object({ gte: z.number().optional(), lte: z.number().optional() }),
+])
+```
+
+- [ ] **Step 4: Extend `toFilterClause`** (handle the range object before the array/scalar branches):
+
+```ts
+if (value && typeof value === 'object' && !Array.isArray(value)) {
+  const parts: string[] = []
+  const r = value as { gte?: number; lte?: number }
+  if (typeof r.gte === 'number') parts.push(`${field} >= ${r.gte}`)
+  if (typeof r.lte === 'number') parts.push(`${field} <= ${r.lte}`)
+  return parts.join(' AND ')
+}
+```
+
+- [ ] **Step 5: Frontend** — add `{ gte?: number; lte?: number }` to `FilterValue`; in `field-to-filter.tsx`, render two `type="date"`/`type="number"` inputs for `date`/`number` fields that emit `{ gte, lte }` (omit empty bounds; emit `undefined` when both empty).
+
+- [ ] **Step 6: Run, build, commit**
+
+```bash
+cd api && npx jest src/features/search-service/search-record.service.spec.ts && npm run build
+cd ../frontend && npx vitest run components/data-management/__tests__/field-to-filter.test.tsx && npm run build
+git add api/src/features/search-service/ frontend/lib/interfaces/search.interface.ts frontend/components/data-management/field-to-filter.tsx
+git commit -m "feat(search): range filter operators + date-range control"
+```
 
 ---
 
 ## Self-Review
 
-**Spec coverage:** every design section maps to a task — types/§1→T1; services/§1→T2,T3; store/§3→T4; schema-driven mappers/§4→T5–T8; SWR hooks/§2,§5→T9,T10; controlled table + reference styling/§4→T11; toolbar/filters/§4→T12; form + attachments/§5→T13; panels + eventual-consistency + RBAC/§5,§6→T13,T14; orchestrator + page + nav/§4→T15; verification/§7→T16.
+**Spec coverage:** §2.2 single-record read → T1; frontend read → T2–T3; §4 detail/edit off-page + live status → T3; deep-link → T14; §5 creation redesign → T4; §6 schema management → T5–T9; §7 facets → T10–T11, highlight → T10, T12, multi-sort + recency → T13, URL-sync → T14, date-range (optional) → T15; §10 RBAC/edge cases → T3 (404/not-found, read-only), T8 (reindex caveat banner), T9 (admin gating).
 
-**Placeholder scan:** no TBD/TODO; every code step shows complete code; every test step shows real assertions and a run command with expected output.
+**Placeholder scan:** no TBD/TODO; every code step shows complete code; every test step shows real assertions + a run command with expected output.
 
-**Type consistency:** `RecordHit.id` (string) is used for `getRowId`/delete throughout; `useRecordMutations` exposes `create/update/remove/reindex` consistently; `FieldSpec`/`SearchQuery`/`SearchResults`/`FilterValue` are defined once in Task 1 and imported everywhere; store action names match between the store (T4) and its consumers (T11–T15).
+**Type consistency:** `RecordDetail` (nested) vs `RecordHit` (flat) kept distinct; `RecordView` (backend) shape mirrors `RecordDetail` (frontend); `toSearchRequestBody(query, opts)` and `recordService.query(collection, query, opts)` share the same `{ facets?, highlight? }` opts; `toggleSort(field, additive?)` is defined once (T13) and called with the modifier in the table (T13) and hydration (T14); `CollectionPanel` union, `Create/UpdateCollectionInput`, and `collectionFormSchema`/`CollectionFormValues` are each defined once and imported consistently.
 
-**Known deviations from the design (intentional, minor):** the column-visibility toggle lives in the table component (Task 11) rather than the toolbar, because it needs the TanStack table instance; `date` inputs use a native `<input type="date">` (an accessible date picker) which can later be swapped for the `Calendar` component. Both are noted here so a reviewer isn't surprised.
+**Known intentional deviations:** the optimistic "pending row" in the table (design §5) is omitted as non-load-bearing now that the PG read authoritatively shows a just-created record — the toast **View** action + bounded revalidation cover the flow; if a visible pending row is later wanted, it is an additive change to `record-data-table.tsx`.
+```
