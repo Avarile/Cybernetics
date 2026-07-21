@@ -5,6 +5,7 @@ import { authConfig } from './configurations/auth.config';
 import { databaseConfig } from './configurations/database.config';
 import { mailboxConfig } from './configurations/mailbox.config';
 import { mastraConfig } from './configurations/mastra.config';
+import { openapiConfig } from './configurations/openapi.config';
 import { redisConfig } from './configurations/redis.config';
 import { searchConfig } from './configurations/search.config';
 import { sentryConfig } from './configurations/sentry.config';
@@ -39,6 +40,7 @@ import { validateEnv } from './env.validation';
         systemConfig,
         mastraConfig,
         mailboxConfig,
+        openapiConfig,
       ],
     }),
   ],

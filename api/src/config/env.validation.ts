@@ -123,6 +123,10 @@ export const envSchema = z
       .int()
       .positive()
       .default(1),
+
+    // OpenAPI / API reference docs (Scalar)
+    OPENAPI_ENABLED: booleanFromEnv.default(true),
+    OPENAPI_SERVER_URL: z.string().default(''),
   })
   .superRefine((env, ctx) => {
     // Refuse the well-known default MinIO credentials in production.

@@ -50,17 +50,24 @@ documents it, so **the docs cannot drift from runtime behavior**.
 
 | Package | Version | Role |
 |---|---|---|
-| `nestjs-zod` | pin **v4.x** | `createZodDto`, `createZodValidationPipe`, `patchNestjsSwagger()` |
-| `@nestjs/swagger` | v11 (matches Nest 11) | `DocumentBuilder`, `SwaggerModule.createDocument`, route decorators |
-| `@scalar/nestjs-api-reference` | latest | `apiReference()` middleware — renders the UI |
+| `nestjs-zod` | pin **v5.4.0** | `createZodDto`, `createZodValidationPipe`, `cleanupOpenApiDoc()` |
+| `@nestjs/swagger` | v11.4.6 (matches Nest 11) | `DocumentBuilder`, `SwaggerModule.createDocument`, route decorators |
+| `@scalar/nestjs-api-reference` | v1.2.11 | `apiReference()` middleware — renders the UI |
 
-**Version notes**
+**Version notes (verified against installed type defs)**
 
-- `nestjs-zod` v4 exposes `patchNestjsSwagger()`. In **v5** that call was renamed to
-  `cleanupOpenApiDoc`. We **pin v4.x** and use `patchNestjsSwagger()`; if a future upgrade to
-  v5 happens, swap that one call.
-- `nestjs-zod` works with the project's Zod `v3.25.76` — it only requires the schema to have
-  a `.parse` method.
+- **Why v5, not v4:** `nestjs-zod` v4's `createZodDto` is typed against `@nest-zod/z` (a
+  deprecated Zod *fork*), which would push that fork into a codebase whose 32 DTOs use plain
+  `import { z } from 'zod'`. **v5 accepts plain `zod` schemas directly** (peerDep
+  `zod: ^3.25.0 || ^4.0.0`, matching the project's `3.25.76`) and replaces the v4
+  `patchNestjsSwagger()` scanner-patch with a post-processing step, `cleanupOpenApiDoc(doc)`.
+- **Integration flow (v5):** build the document with `SwaggerModule.createDocument(app, config)`,
+  then wrap it once: `const doc = cleanupOpenApiDoc(created)`. `cleanupOpenApiDoc` only touches
+  schemas generated from `createZodDto` DTOs. No pre-build patch step is needed.
+- **Global pipe is safe:** `createZodValidationPipe({ createValidationException })` returns a pipe
+  whose `transform` passes through any param whose metatype is **not** a `createZodDto` class
+  (verified: `strictSchemaDeclaration` defaults to `false`), so `@Param('id') id: string`,
+  `@Req()`, etc. are untouched; only DTO params are validated — through our custom exception.
 - We do **not** install the `@nestjs/swagger` CLI/TS plugin (that plugin infers schemas from
   class-validator types). Schema generation comes entirely from `createZodDto`, so the
   existing **SWC-based build stays untouched**.
@@ -255,9 +262,9 @@ query/params follow the same pattern with their DTO classes.
 ```
 Boot: setupOpenApi(app)
   → if !OPENAPI_ENABLED: return (no routes mounted)
-  → patchNestjsSwagger()                 # teach @nestjs/swagger to read Zod DTOs
   → SwaggerModule.createDocument(app, buildDocumentConfig())
                                          # introspect 17 controllers / 69 routes / DTO classes
+  → cleanupOpenApiDoc(created)           # convert createZodDto schemas → correct OpenAPI
   → applyGlobalSecurity(doc)             # global bearer requirement
   → markPublicRoutes(app, doc)           # @Public() → security: []
   → registerErrorComponents(doc)         # ErrorEnvelope + ErrorCode
