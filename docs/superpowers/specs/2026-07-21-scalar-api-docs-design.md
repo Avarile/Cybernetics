@@ -1,6 +1,8 @@
 # Design — Scalar API Documentation (`api/`)
 
-**Status:** Approved (design phase). Next step: implementation plan.
+**Status:** ✅ Implemented (all 4 phases) on branch `feat/api-scalar-docs`. Verified:
+`tsc` clean, 404 unit tests + 10 OpenAPI e2e passing, `nest build` clean. See
+**§13 As-built notes** for deviations from this design.
 **Scope:** Backend only, in `api/`. Adds an auto-generated OpenAPI 3.x contract and an
 interactive Scalar reference UI. No behavioral change to existing endpoints; the request
 validation and error-response contracts are preserved exactly.
@@ -327,3 +329,31 @@ Each phase leaves the app in a working, committable state.
 - Basic-auth / env-gated access control for docs (explicitly declined — docs are fully public).
 - API versioning (`/v1`) and multi-version documents — the structure supports it later.
 - SDK/client generation from the document (the JSON at `/openapi.json` enables it downstream).
+
+---
+
+## 13. As-built notes (deviations from the design above)
+
+Implemented across 4 commits (`849df91` → `bc118e4` → `891cfac` → `628c282`). Deviations,
+all driven by verified facts during implementation:
+
+1. **`nestjs-zod` v5.4.0, not v4** — v4's `createZodDto` is typed against the deprecated
+   `@nest-zod/z` fork; v5 accepts plain `zod` schemas (matching the codebase) and integrates
+   via `cleanupOpenApiDoc(doc)` instead of `patchNestjsSwagger()`. §2/§9 already updated.
+2. **8 tags, not 7** — added a `Health` tag for the infrastructure health controller (the
+   17th controller, outside `features/`).
+3. **Drift guard is source-based**, not document-based. Booting `AppModule` in Jest is
+   impossible (MastraModule ESM dep), so `openapi-metadata.guard.spec.ts` statically asserts
+   every `*.controller.ts` has `@ApiTags` and every route handler has `@ApiOperation`.
+4. **`.env.example` entry deferred** — the environment files are permission-blocked in this
+   workspace. `OPENAPI_ENABLED` / `OPENAPI_SERVER_URL` are in `env.validation.ts` with safe
+   defaults (`enabled=true`, `serverUrl=''`), so nothing breaks; documenting them in
+   `.env.example` is an open follow-up.
+5. **Jest e2e config** gained `transformIgnorePatterns` so `@scalar/*` ESM deps transpile
+   under `@swc/jest`. (Runtime is unaffected — Node 24 handles the ESM interop.)
+6. **Known limitation:** refined schemas (`ZodEffects`, e.g. `updateUserSchema`) validate
+   correctly but their `.refine()` constraint is not surfaced in the generated OpenAPI schema.
+
+**Pre-existing issues left untouched** (out of scope): 3 lint errors in
+`calculate-metric.tool.ts`, `exception.service.spec.ts`, and `global-exception.filter.spec.ts`
+predate this work.
