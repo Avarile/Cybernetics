@@ -2,6 +2,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 
 const setCollection = vi.fn()
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({ replace: vi.fn() }),
+  usePathname: () => '/dashboard/data-management',
+  useSearchParams: () => new URLSearchParams(),
+}))
 vi.mock('@/lib/hooks/use-permission', () => ({ useIsAdmin: () => true }))
 vi.mock('@/lib/hooks/use-collections', () => ({
   useCollections: () => ({ collections: [{ name: 'products', displayName: 'Products', fields: [] }], isLoading: false }),

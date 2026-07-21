@@ -10,16 +10,19 @@ import { CollectionManagerDialog } from '@/components/data-management/collection
 import { useCollections } from '@/lib/hooks/use-collections'
 import { useCollectionDefinition } from '@/lib/hooks/use-collection-definition'
 import { useRecords } from '@/lib/hooks/use-records'
+import { useQueryUrlSync } from '@/lib/hooks/use-query-url-sync'
 import { useCollection, useSetCollection } from '@/lib/state-management/data-management.store'
 
 export function DataManagementView() {
+  useQueryUrlSync()
+
   const { collections } = useCollections()
   const collection = useCollection()
   const setCollection = useSetCollection()
   const { fields, isLoading: defLoading } = useCollectionDefinition(collection)
   const { results, isLoading, error, mutate } = useRecords()
 
-  // Default to the first collection once the list resolves.
+  // Default to the first collection once the list resolves (unless the URL already set one).
   React.useEffect(() => {
     if (!collection && collections.length > 0) setCollection(collections[0].name)
   }, [collection, collections, setCollection])
