@@ -7,6 +7,14 @@ import { cleanupOpenApiDoc } from 'nestjs-zod';
 import type { OpenApiConfig } from '../../config/configurations/openapi.config';
 import { buildDocumentConfig } from './openapi.document';
 import { OPENAPI_JSON_PATH, OPENAPI_REFERENCE_PATH } from './openapi.constants';
+import {
+  applyGlobalSecurity,
+  attachStandardErrors,
+  collectPublicOperationIds,
+  operationId,
+  registerErrorComponents,
+  stripSecurityForPublic,
+} from './openapi.postprocess';
 
 /**
  * Mounts the OpenAPI JSON document and the Scalar reference UI.
@@ -15,8 +23,14 @@ import { OPENAPI_JSON_PATH, OPENAPI_REFERENCE_PATH } from './openapi.constants';
  * OUTSIDE the Nest guard pipeline, so the global `JwtAuthGuard` does not block
  * them — the docs are intentionally public (gated only by `OPENAPI_ENABLED`).
  *
- * `cleanupOpenApiDoc` converts the schemas generated from `createZodDto` DTOs
- * into correct OpenAPI. Call this once during bootstrap, before `app.listen()`.
+ * Pipeline:
+ *  1. `createDocument` — discover routes + zod DTO schemas (deterministic
+ *     operationId so `@Public()` overrides can be matched back to operations).
+ *  2. `cleanupOpenApiDoc` — finalize the createZodDto-derived schemas.
+ *  3. global bearer security + `@Public()` → `security: []` overrides.
+ *  4. register the `ErrorEnvelope` component + attach standard error responses.
+ *
+ * Call this once during bootstrap, before `app.listen()`.
  */
 export function setupOpenApi(app: INestApplication): void {
   const cfg = app.get(ConfigService).getOrThrow<OpenApiConfig>('openapi');
@@ -25,8 +39,17 @@ export function setupOpenApi(app: INestApplication): void {
   }
 
   const document = cleanupOpenApiDoc(
-    SwaggerModule.createDocument(app, buildDocumentConfig(cfg)),
+    SwaggerModule.createDocument(app, buildDocumentConfig(cfg), {
+      operationIdFactory: (controllerKey, methodKey) =>
+        operationId(controllerKey, methodKey),
+    }),
   );
+
+  const publicIds = collectPublicOperationIds(app);
+  applyGlobalSecurity(document);
+  stripSecurityForPublic(document, publicIds);
+  registerErrorComponents(document);
+  attachStandardErrors(document, publicIds);
 
   const httpAdapter = app.getHttpAdapter();
   httpAdapter.get(OPENAPI_JSON_PATH, (_req: Request, res: Response) => {

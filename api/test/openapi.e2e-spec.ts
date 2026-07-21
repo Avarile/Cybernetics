@@ -5,6 +5,7 @@ import { apiReference } from '@scalar/nestjs-api-reference';
 import { createZodDto } from 'nestjs-zod';
 import request from 'supertest';
 import { z } from 'zod';
+import { Public } from '../src/common/decorators/public.decorator';
 import { setupOpenApi } from '../src/infrastructure/openapi/openapi.setup';
 import type { OpenApiConfig } from '../src/config/configurations/openapi.config';
 
@@ -28,6 +29,12 @@ class SampleController {
   @Post()
   create(@Body() body: SampleDto): SampleDto {
     return body;
+  }
+
+  @Public()
+  @Get('ping')
+  ping(): string {
+    return 'pong';
   }
 }
 
@@ -88,6 +95,38 @@ describe('OpenAPI / Scalar (e2e)', () => {
         : schema;
       expect(resolved?.properties?.name).toBeDefined();
       expect(resolved?.required).toContain('name');
+    });
+
+    it('applies a global bearer security requirement', async () => {
+      const res = await request(app.getHttpServer()).get('/openapi.json');
+      expect(res.body.security).toEqual([{ bearer: [] }]);
+    });
+
+    it('marks @Public() operations as security:[] (no auth)', async () => {
+      const res = await request(app.getHttpServer()).get('/openapi.json');
+      expect(res.body.paths['/samples/ping']?.get?.security).toEqual([]);
+      // a non-public operation inherits the global requirement (no per-op override)
+      expect(res.body.paths['/samples']?.get?.security).toBeUndefined();
+    });
+
+    it('registers the ErrorEnvelope component and standard error responses', async () => {
+      const res = await request(app.getHttpServer()).get('/openapi.json');
+
+      expect(
+        res.body.components?.schemas?.ErrorEnvelope?.properties?.error,
+      ).toBeDefined();
+
+      // non-public op has 401/500; public op omits 401
+      const listResponses = res.body.paths['/samples']?.get?.responses;
+      expect(listResponses['401']).toBeDefined();
+      expect(listResponses['500']).toBeDefined();
+      expect(listResponses['401'].content['application/json'].schema.$ref).toBe(
+        '#/components/schemas/ErrorEnvelope',
+      );
+      expect(res.body.paths['/samples/ping']?.get?.responses['401']).toBeUndefined();
+
+      // op with a request body gets a 400
+      expect(res.body.paths['/samples']?.post?.responses['400']).toBeDefined();
     });
 
     it('serves the Scalar reference UI at /reference', async () => {
