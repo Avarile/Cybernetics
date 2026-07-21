@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import { AGENT_ID } from '../mastra.constants';
 
@@ -17,4 +18,4 @@ export const createScheduleSchema = z.object({
   enabled: z.boolean().default(true),
 });
 
-export type CreateScheduleDto = z.infer<typeof createScheduleSchema>;
+export class CreateScheduleDto extends createZodDto(createScheduleSchema) {}

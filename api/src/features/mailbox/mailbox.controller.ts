@@ -10,13 +10,9 @@ import {
   Query,
 } from '@nestjs/common';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
-import {
-  listMessagesSchema,
-  type ListMessagesDto,
-} from './dto/list-messages.dto';
-import { markSeenSchema, type MarkSeenDto } from './dto/mark-seen.dto';
-import { syncSchema, type SyncDto } from './dto/sync.dto';
+import { ListMessagesDto } from './dto/list-messages.dto';
+import { MarkSeenDto } from './dto/mark-seen.dto';
+import { SyncDto } from './dto/sync.dto';
 import { MailboxService } from './mailbox.service';
 
 @Roles('admin')
@@ -25,7 +21,7 @@ export class MailboxController {
   constructor(private readonly mailbox: MailboxService) {}
 
   @Get('messages')
-  list(@Query(new ZodValidationPipe(listMessagesSchema)) q: ListMessagesDto) {
+  list(@Query() q: ListMessagesDto) {
     const accountId = this.mailbox.resolveAccountId(q.accountId);
     return this.mailbox.list(
       accountId,
@@ -53,16 +49,14 @@ export class MailboxController {
   @HttpCode(204)
   async markSeen(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body(new ZodValidationPipe(markSeenSchema)) body: MarkSeenDto,
+    @Body() body: MarkSeenDto,
   ): Promise<void> {
     await this.mailbox.markSeen(id, body.seen);
   }
 
   @Post('sync')
   @HttpCode(202)
-  async sync(
-    @Body(new ZodValidationPipe(syncSchema)) body: SyncDto,
-  ): Promise<{ queued: true }> {
+  async sync(@Body() body: SyncDto): Promise<{ queued: true }> {
     const accountId = this.mailbox.resolveAccountId(body.accountId);
     await this.mailbox.triggerSync(accountId, body.mailbox);
     return { queued: true };

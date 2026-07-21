@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 /** External search request. `filters`/`sort` are structured, never raw Meili. */
@@ -21,4 +22,4 @@ export const searchQuerySchema = z.object({
   highlight: z.array(z.string()).optional(),
 });
 
-export type SearchQueryDto = z.infer<typeof searchQuerySchema>;
+export class SearchQueryDto extends createZodDto(searchQuerySchema) {}

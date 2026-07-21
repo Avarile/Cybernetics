@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 export const updateUserSchema = z
@@ -10,4 +11,4 @@ export const updateUserSchema = z
     message: 'At least one field must be provided',
   });
 
-export type UpdateUserDto = z.infer<typeof updateUserSchema>;
+export class UpdateUserDto extends createZodDto(updateUserSchema) {}

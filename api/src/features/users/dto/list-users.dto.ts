@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 export const listUsersSchema = z.object({
@@ -5,4 +6,4 @@ export const listUsersSchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
-export type ListUsersDto = z.infer<typeof listUsersSchema>;
+export class ListUsersDto extends createZodDto(listUsersSchema) {}

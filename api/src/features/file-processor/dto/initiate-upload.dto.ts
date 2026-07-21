@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 /** Declared metadata for a new upload (validated before any URL is issued). */
@@ -12,4 +13,4 @@ export const initiateUploadSchema = z.object({
   metadata: z.record(z.unknown()).optional(),
 });
 
-export type InitiateUploadDto = z.infer<typeof initiateUploadSchema>;
+export class InitiateUploadDto extends createZodDto(initiateUploadSchema) {}

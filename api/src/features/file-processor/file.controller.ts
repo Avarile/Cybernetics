@@ -10,16 +10,9 @@ import {
   Query,
 } from '@nestjs/common';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
-import {
-  completeUploadSchema,
-  type CompleteUploadDto,
-} from './dto/complete-upload.dto';
-import {
-  initiateUploadSchema,
-  type InitiateUploadDto,
-} from './dto/initiate-upload.dto';
-import { queryFilesSchema, type QueryFilesDto } from './dto/query-files.dto';
-import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import { CompleteUploadDto } from './dto/complete-upload.dto';
+import { InitiateUploadDto } from './dto/initiate-upload.dto';
+import { QueryFilesDto } from './dto/query-files.dto';
 import { FileService } from './file.service';
 import type { FilePrincipal } from './file.types';
 
@@ -37,7 +30,7 @@ export class FileController {
 
   @Post()
   initiate(
-    @Body(new ZodValidationPipe(initiateUploadSchema)) body: InitiateUploadDto,
+    @Body() body: InitiateUploadDto,
     @CurrentUser() user: FilePrincipal,
   ) {
     return this.files.initiateUpload(body, user);
@@ -46,7 +39,7 @@ export class FileController {
   @Post(':id/complete')
   complete(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body(new ZodValidationPipe(completeUploadSchema)) body: CompleteUploadDto,
+    @Body() body: CompleteUploadDto,
     @CurrentUser() user: FilePrincipal,
   ) {
     return this.files.completeUpload(id, user, body);
@@ -74,10 +67,7 @@ export class FileController {
   }
 
   @Get()
-  list(
-    @Query(new ZodValidationPipe(queryFilesSchema)) query: QueryFilesDto,
-    @CurrentUser() user: FilePrincipal,
-  ) {
+  list(@Query() query: QueryFilesDto, @CurrentUser() user: FilePrincipal) {
     return this.files.list(query, user);
   }
 

@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 /** Optional completion payload — a client may confirm the SHA-256 it uploaded. */
@@ -8,4 +9,4 @@ export const completeUploadSchema = z.object({
     .optional(),
 });
 
-export type CompleteUploadDto = z.infer<typeof completeUploadSchema>;
+export class CompleteUploadDto extends createZodDto(completeUploadSchema) {}

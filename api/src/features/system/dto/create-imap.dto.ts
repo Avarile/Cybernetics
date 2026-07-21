@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 export const createImapSchema = z.object({
@@ -9,4 +10,4 @@ export const createImapSchema = z.object({
   secure: z.boolean().default(true),
 });
 
-export type CreateImapDto = z.infer<typeof createImapSchema>;
+export class CreateImapDto extends createZodDto(createImapSchema) {}

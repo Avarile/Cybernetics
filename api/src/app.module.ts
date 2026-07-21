@@ -1,10 +1,11 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_PIPE } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { ConfigModule } from './config/config.module';
 import type { AuthConfig } from './config/configurations/auth.config';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
+import { ZodValidationPipe } from './common/pipes/zod-validation.pipe';
 import { RolesGuard } from './common/guards/roles.guard';
 import { CacheModule } from './infrastructure/cache/cache.module';
 import { SessionCacheModule } from './infrastructure/cache/session/session-cache.module';
@@ -66,6 +67,10 @@ import { UsersModule } from './features/users/users.module';
     MastraModule,
   ],
   providers: [
+    // Validates every handler param typed as a `createZodDto` class, throwing the
+    // app's AppException(VALIDATION_FAILED) → ErrorEnvelope. Non-DTO params pass
+    // through untouched.
+    { provide: APP_PIPE, useClass: ZodValidationPipe },
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },

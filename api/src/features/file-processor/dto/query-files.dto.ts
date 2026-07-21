@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 /** Query params for listing files (coerced from strings). */
@@ -8,4 +9,4 @@ export const queryFilesSchema = z.object({
   mimeType: z.string().min(1).optional(),
 });
 
-export type QueryFilesDto = z.infer<typeof queryFilesSchema>;
+export class QueryFilesDto extends createZodDto(queryFilesSchema) {}

@@ -18,13 +18,27 @@ export const API_DESCRIPTION = [
 ].join('\n');
 
 /** One tag per feature module; drives Scalar's sidebar grouping. */
-export const OPENAPI_TAGS: ReadonlyArray<{ name: string; description: string }> =
-  [
-    { name: 'Auth', description: 'Login, tokens, password reset, service credentials.' },
-    { name: 'Users', description: 'User account management.' },
-    { name: 'Search', description: 'Collections and record search (search-service).' },
-    { name: 'Files', description: 'File upload, download, and processing.' },
-    { name: 'Mailbox', description: 'Inbound mail ingestion and retrieval.' },
-    { name: 'Agent', description: 'Mastra AI agent: chat, schedules, approvals.' },
-    { name: 'System', description: 'SMTP/IMAP config, settings, integration credentials, audit.' },
-  ];
+export const OPENAPI_TAGS: ReadonlyArray<{
+  name: string;
+  description: string;
+}> = [
+  {
+    name: 'Auth',
+    description: 'Login, tokens, password reset, service credentials.',
+  },
+  { name: 'Users', description: 'User account management.' },
+  {
+    name: 'Search',
+    description: 'Collections and record search (search-service).',
+  },
+  { name: 'Files', description: 'File upload, download, and processing.' },
+  { name: 'Mailbox', description: 'Inbound mail ingestion and retrieval.' },
+  {
+    name: 'Agent',
+    description: 'Mastra AI agent: chat, schedules, approvals.',
+  },
+  {
+    name: 'System',
+    description: 'SMTP/IMAP config, settings, integration credentials, audit.',
+  },
+];

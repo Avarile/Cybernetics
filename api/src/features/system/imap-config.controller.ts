@@ -15,10 +15,9 @@ import {
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import type { Principal } from '../../common/principal';
-import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
-import { createImapSchema, type CreateImapDto } from './dto/create-imap.dto';
-import { listQuerySchema, type ListQueryDto } from './dto/list-query.dto';
-import { updateImapSchema, type UpdateImapDto } from './dto/update-imap.dto';
+import { CreateImapDto } from './dto/create-imap.dto';
+import { ListQueryDto } from './dto/list-query.dto';
+import { UpdateImapDto } from './dto/update-imap.dto';
 import { ImapConfigService } from './imap-config.service';
 import type { AuditContext } from './system-audit.types';
 
@@ -33,7 +32,7 @@ export class ImapConfigController {
 
   @Post()
   create(
-    @Body(new ZodValidationPipe(createImapSchema)) dto: CreateImapDto,
+    @Body() dto: CreateImapDto,
     @CurrentUser() user: Principal,
     @Ip() ip: string,
     @Headers('user-agent') ua: string,
@@ -42,7 +41,7 @@ export class ImapConfigController {
   }
 
   @Get()
-  list(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQueryDto) {
+  list(@Query() query: ListQueryDto) {
     return this.imap.list(query.page, query.limit);
   }
 
@@ -54,7 +53,7 @@ export class ImapConfigController {
   @Patch(':id')
   update(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body(new ZodValidationPipe(updateImapSchema)) dto: UpdateImapDto,
+    @Body() dto: UpdateImapDto,
     @CurrentUser() user: Principal,
     @Ip() ip: string,
     @Headers('user-agent') ua: string,

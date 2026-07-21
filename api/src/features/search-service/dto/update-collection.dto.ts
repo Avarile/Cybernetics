@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import type { FieldSpec } from '../../../infrastructure/database/schema/search.schema';
 import { fieldSpecSchema, refineFields } from './create-collection.dto';
@@ -12,4 +13,4 @@ export const updateCollectionSchema = z
     refineFields(val.fields as FieldSpec[] | undefined, ctx),
   );
 
-export type UpdateCollectionDto = z.infer<typeof updateCollectionSchema>;
+export class UpdateCollectionDto extends createZodDto(updateCollectionSchema) {}

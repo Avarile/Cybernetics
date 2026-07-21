@@ -7,11 +7,7 @@ import {
   Post,
 } from '@nestjs/common';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
-import {
-  persistRecordsSchema,
-  type PersistRecordsDto,
-} from './dto/persist-records.dto';
+import { PersistRecordsDto } from './dto/persist-records.dto';
 import { SearchRecordService } from './search-record.service';
 
 /**
@@ -25,10 +21,7 @@ export class RecordController {
 
   @Post()
   @HttpCode(202)
-  persist(
-    @Param('name') name: string,
-    @Body(new ZodValidationPipe(persistRecordsSchema)) dto: PersistRecordsDto,
-  ) {
+  persist(@Param('name') name: string, @Body() dto: PersistRecordsDto) {
     return this.records.persist(name, dto.records);
   }
 

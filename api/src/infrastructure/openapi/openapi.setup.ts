@@ -6,10 +6,7 @@ import type { Request, Response } from 'express';
 import { cleanupOpenApiDoc } from 'nestjs-zod';
 import type { OpenApiConfig } from '../../config/configurations/openapi.config';
 import { buildDocumentConfig } from './openapi.document';
-import {
-  OPENAPI_JSON_PATH,
-  OPENAPI_REFERENCE_PATH,
-} from './openapi.constants';
+import { OPENAPI_JSON_PATH, OPENAPI_REFERENCE_PATH } from './openapi.constants';
 
 /**
  * Mounts the OpenAPI JSON document and the Scalar reference UI.

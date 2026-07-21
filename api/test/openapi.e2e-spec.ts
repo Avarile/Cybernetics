@@ -81,8 +81,7 @@ describe('OpenAPI / Scalar (e2e)', () => {
       const res = await request(app.getHttpServer()).get('/openapi.json');
 
       const post = res.body.paths['/samples']?.post;
-      const schema =
-        post?.requestBody?.content?.['application/json']?.schema;
+      const schema = post?.requestBody?.content?.['application/json']?.schema;
       // either inline or a $ref into components.schemas
       const resolved = schema?.$ref
         ? res.body.components.schemas[schema.$ref.split('/').pop()]

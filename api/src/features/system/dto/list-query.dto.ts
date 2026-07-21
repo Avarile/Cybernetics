@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 /** Shared pagination for system list endpoints. */
@@ -6,7 +7,7 @@ export const listQuerySchema = z.object({
   limit: z.coerce.number().int().positive().max(100).default(20),
 });
 
-export type ListQueryDto = z.infer<typeof listQuerySchema>;
+export class ListQueryDto extends createZodDto(listQuerySchema) {}
 
 /** Audit list filters (extends pagination). */
 export const auditQuerySchema = listQuerySchema.extend({
@@ -15,4 +16,4 @@ export const auditQuerySchema = listQuerySchema.extend({
   actorId: z.string().uuid().optional(),
 });
 
-export type AuditQueryDto = z.infer<typeof auditQuerySchema>;
+export class AuditQueryDto extends createZodDto(auditQuerySchema) {}

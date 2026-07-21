@@ -14,28 +14,15 @@ import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import { LocalAuthGuard } from '../../common/guards/local-auth.guard';
 import type { Principal } from '../../common/principal';
-import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import type { UserRow } from '../../infrastructure/database/schema/identity.schema';
 import { AuthService } from './auth.service';
-import {
-  changePasswordSchema,
-  type ChangePasswordDto,
-} from './dto/change-password.dto';
-import {
-  forgotPasswordSchema,
-  type ForgotPasswordDto,
-} from './dto/forgot-password.dto';
-import { loginSchema, type LoginDto } from './dto/login.dto';
-import { logoutSchema, type LogoutDto } from './dto/logout.dto';
-import { refreshSchema, type RefreshDto } from './dto/refresh.dto';
-import {
-  resetPasswordSchema,
-  type ResetPasswordDto,
-} from './dto/reset-password.dto';
-import {
-  serviceTokenSchema,
-  type ServiceTokenDto,
-} from './dto/service-token.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { LoginDto } from './dto/login.dto';
+import { LogoutDto } from './dto/logout.dto';
+import { RefreshDto } from './dto/refresh.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
+import { ServiceTokenDto } from './dto/service-token.dto';
 import { PasswordResetService } from './password-reset.service';
 import { ServiceCredentialService } from './service-credential.service';
 
@@ -56,10 +43,7 @@ export class AuthController {
   @UseGuards(LocalAuthGuard)
   @Post('login')
   @HttpCode(200)
-  login(
-    @Body(new ZodValidationPipe(loginSchema)) _body: LoginDto,
-    @Req() req: Request & { user: UserRow },
-  ) {
+  login(@Body() _body: LoginDto, @Req() req: Request & { user: UserRow }) {
     // LocalAuthGuard validated credentials and set req.user = UserRow.
     return this.auth.login(req.user, reqContext(req));
   }
@@ -68,17 +52,14 @@ export class AuthController {
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('refresh')
   @HttpCode(200)
-  refresh(
-    @Body(new ZodValidationPipe(refreshSchema)) body: RefreshDto,
-    @Req() req: Request,
-  ) {
+  refresh(@Body() body: RefreshDto, @Req() req: Request) {
     return this.auth.refresh(body.refreshToken, reqContext(req));
   }
 
   @Public()
   @Post('logout')
   @HttpCode(204)
-  async logout(@Body(new ZodValidationPipe(logoutSchema)) body: LogoutDto) {
+  async logout(@Body() body: LogoutDto) {
     await this.auth.logout(body.refreshToken);
   }
 
@@ -102,7 +83,7 @@ export class AuthController {
   @HttpCode(204)
   async changePassword(
     @CurrentUser() user: Principal,
-    @Body(new ZodValidationPipe(changePasswordSchema)) body: ChangePasswordDto,
+    @Body() body: ChangePasswordDto,
   ) {
     await this.auth.changePassword(
       user.id as string,
@@ -115,9 +96,7 @@ export class AuthController {
   @Throttle({ default: { limit: 3, ttl: 900_000 } })
   @Post('forgot-password')
   @HttpCode(204)
-  async forgotPassword(
-    @Body(new ZodValidationPipe(forgotPasswordSchema)) body: ForgotPasswordDto,
-  ): Promise<void> {
+  async forgotPassword(@Body() body: ForgotPasswordDto): Promise<void> {
     await this.passwordReset.request(body.email);
   }
 
@@ -125,9 +104,7 @@ export class AuthController {
   @Throttle({ default: { limit: 10, ttl: 900_000 } })
   @Post('reset-password')
   @HttpCode(204)
-  async resetPassword(
-    @Body(new ZodValidationPipe(resetPasswordSchema)) body: ResetPasswordDto,
-  ): Promise<void> {
+  async resetPassword(@Body() body: ResetPasswordDto): Promise<void> {
     await this.passwordReset.reset(body.email, body.code, body.newPassword);
   }
 
@@ -135,9 +112,7 @@ export class AuthController {
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @Post('service-token')
   @HttpCode(200)
-  serviceToken(
-    @Body(new ZodValidationPipe(serviceTokenSchema)) body: ServiceTokenDto,
-  ) {
+  serviceToken(@Body() body: ServiceTokenDto) {
     return this.credentials.exchangeForToken(body.apiKey);
   }
 }

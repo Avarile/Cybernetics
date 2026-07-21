@@ -11,11 +11,7 @@ import {
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import type { Principal } from '../../common/principal';
-import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
-import {
-  createServiceCredentialSchema,
-  type CreateServiceCredentialDto,
-} from './dto/create-service-credential.dto';
+import { CreateServiceCredentialDto } from './dto/create-service-credential.dto';
 import { ServiceCredentialService } from './service-credential.service';
 
 /** Admin management of agent API keys. */
@@ -26,8 +22,7 @@ export class ServiceCredentialsController {
 
   @Post()
   create(
-    @Body(new ZodValidationPipe(createServiceCredentialSchema))
-    dto: CreateServiceCredentialDto,
+    @Body() dto: CreateServiceCredentialDto,
     @CurrentUser() admin: Principal,
   ) {
     return this.credentials.issue(dto.name, admin.id);

@@ -1,9 +1,12 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import { createIntegrationSchema } from './create-integration.dto';
 
 export const updateIntegrationSchema = createIntegrationSchema.partial();
 
-export type UpdateIntegrationDto = z.infer<typeof updateIntegrationSchema>;
+export class UpdateIntegrationDto extends createZodDto(
+  updateIntegrationSchema,
+) {}
 
 /** Integration list filter (pagination + optional provider). */
 export const integrationQuerySchema = z.object({
@@ -12,4 +15,4 @@ export const integrationQuerySchema = z.object({
   provider: z.string().min(1).max(100).optional(),
 });
 
-export type IntegrationQueryDto = z.infer<typeof integrationQuerySchema>;
+export class IntegrationQueryDto extends createZodDto(integrationQuerySchema) {}

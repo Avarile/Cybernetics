@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 export const createSmtpSchema = z.object({
@@ -11,4 +12,4 @@ export const createSmtpSchema = z.object({
   fromName: z.string().max(255).optional(),
 });
 
-export type CreateSmtpDto = z.infer<typeof createSmtpSchema>;
+export class CreateSmtpDto extends createZodDto(createSmtpSchema) {}

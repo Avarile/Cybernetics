@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 export const listMessagesSchema = z.object({
@@ -13,4 +14,4 @@ export const listMessagesSchema = z.object({
     .preprocess((v) => v === true || v === 'true' || v === '1', z.boolean())
     .default(false),
 });
-export type ListMessagesDto = z.infer<typeof listMessagesSchema>;
+export class ListMessagesDto extends createZodDto(listMessagesSchema) {}

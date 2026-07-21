@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 export const chatSchema = z.object({
@@ -5,4 +6,4 @@ export const chatSchema = z.object({
   message: z.string().min(1).max(8000),
 });
 
-export type ChatDto = z.infer<typeof chatSchema>;
+export class ChatDto extends createZodDto(chatSchema) {}

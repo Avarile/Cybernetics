@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 /**
@@ -28,7 +29,7 @@ export const upsertSettingSchema = z
     }
   });
 
-export type UpsertSettingDto = z.infer<typeof upsertSettingSchema>;
+export class UpsertSettingDto extends createZodDto(upsertSettingSchema) {}
 
 /** Settings list filter (pagination + optional category). */
 export const settingsQuerySchema = z.object({
@@ -37,4 +38,4 @@ export const settingsQuerySchema = z.object({
   category: z.string().min(1).max(100).optional(),
 });
 
-export type SettingsQueryDto = z.infer<typeof settingsQuerySchema>;
+export class SettingsQueryDto extends createZodDto(settingsQuerySchema) {}

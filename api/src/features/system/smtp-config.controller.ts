@@ -15,10 +15,9 @@ import {
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import type { Principal } from '../../common/principal';
-import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
-import { createSmtpSchema, type CreateSmtpDto } from './dto/create-smtp.dto';
-import { listQuerySchema, type ListQueryDto } from './dto/list-query.dto';
-import { updateSmtpSchema, type UpdateSmtpDto } from './dto/update-smtp.dto';
+import { CreateSmtpDto } from './dto/create-smtp.dto';
+import { ListQueryDto } from './dto/list-query.dto';
+import { UpdateSmtpDto } from './dto/update-smtp.dto';
 import { SmtpConfigService } from './smtp-config.service';
 import type { AuditContext } from './system-audit.types';
 
@@ -33,7 +32,7 @@ export class SmtpConfigController {
 
   @Post()
   create(
-    @Body(new ZodValidationPipe(createSmtpSchema)) dto: CreateSmtpDto,
+    @Body() dto: CreateSmtpDto,
     @CurrentUser() user: Principal,
     @Ip() ip: string,
     @Headers('user-agent') ua: string,
@@ -42,7 +41,7 @@ export class SmtpConfigController {
   }
 
   @Get()
-  list(@Query(new ZodValidationPipe(listQuerySchema)) query: ListQueryDto) {
+  list(@Query() query: ListQueryDto) {
     return this.smtp.list(query.page, query.limit);
   }
 
@@ -54,7 +53,7 @@ export class SmtpConfigController {
   @Patch(':id')
   update(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body(new ZodValidationPipe(updateSmtpSchema)) dto: UpdateSmtpDto,
+    @Body() dto: UpdateSmtpDto,
     @CurrentUser() user: Principal,
     @Ip() ip: string,
     @Headers('user-agent') ua: string,

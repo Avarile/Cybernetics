@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 import type { FieldSpec } from '../../../infrastructure/database/schema/search.schema';
 import { validateFieldSpec } from '../document-validator';
@@ -45,4 +46,4 @@ export const createCollectionSchema = z
   })
   .superRefine((val, ctx) => refineFields(val.fields as FieldSpec[], ctx));
 
-export type CreateCollectionDto = z.infer<typeof createCollectionSchema>;
+export class CreateCollectionDto extends createZodDto(createCollectionSchema) {}

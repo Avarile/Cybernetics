@@ -1,8 +1,7 @@
 import { Body, Controller, Get, Post, Query } from '@nestjs/common';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import type { Principal } from '../../../common/principal';
-import { ZodValidationPipe } from '../../../common/pipes/zod-validation.pipe';
-import { chatSchema, type ChatDto } from '../dto/chat.dto';
+import { ChatDto } from '../dto/chat.dto';
 import { AgentRunnerService } from '../services/agent-runner.service';
 import { ConversationService } from '../services/conversation.service';
 
@@ -14,10 +13,7 @@ export class ChatController {
   ) {}
 
   @Post('chat')
-  chat(
-    @CurrentUser() user: Principal,
-    @Body(new ZodValidationPipe(chatSchema)) dto: ChatDto,
-  ) {
+  chat(@CurrentUser() user: Principal, @Body() dto: ChatDto) {
     return this.runner.runChat(user, dto);
   }
 

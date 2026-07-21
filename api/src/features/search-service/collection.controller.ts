@@ -9,16 +9,9 @@ import {
   Post,
 } from '@nestjs/common';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
 import { CollectionService } from './collection.service';
-import {
-  createCollectionSchema,
-  type CreateCollectionDto,
-} from './dto/create-collection.dto';
-import {
-  updateCollectionSchema,
-  type UpdateCollectionDto,
-} from './dto/update-collection.dto';
+import { CreateCollectionDto } from './dto/create-collection.dto';
+import { UpdateCollectionDto } from './dto/update-collection.dto';
 
 /**
  * Collection management. Mutations are admin-only; reads are open to any
@@ -30,9 +23,7 @@ export class CollectionController {
 
   @Post()
   @Roles('admin')
-  create(
-    @Body(new ZodValidationPipe(createCollectionSchema)) dto: CreateCollectionDto,
-  ) {
+  create(@Body() dto: CreateCollectionDto) {
     return this.collections.create(dto);
   }
 
@@ -48,10 +39,7 @@ export class CollectionController {
 
   @Patch(':name')
   @Roles('admin')
-  update(
-    @Param('name') name: string,
-    @Body(new ZodValidationPipe(updateCollectionSchema)) dto: UpdateCollectionDto,
-  ) {
+  update(@Param('name') name: string, @Body() dto: UpdateCollectionDto) {
     return this.collections.update(name, dto);
   }
 

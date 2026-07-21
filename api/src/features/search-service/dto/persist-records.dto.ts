@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 /** A batch of records to persist. `externalId` enables idempotent upsert. */
@@ -13,4 +14,4 @@ export const persistRecordsSchema = z.object({
     .max(1000),
 });
 
-export type PersistRecordsDto = z.infer<typeof persistRecordsSchema>;
+export class PersistRecordsDto extends createZodDto(persistRecordsSchema) {}

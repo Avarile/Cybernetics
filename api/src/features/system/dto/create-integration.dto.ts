@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 export const createIntegrationSchema = z.object({
@@ -9,4 +10,6 @@ export const createIntegrationSchema = z.object({
   expiresAt: z.coerce.date().optional(),
 });
 
-export type CreateIntegrationDto = z.infer<typeof createIntegrationSchema>;
+export class CreateIntegrationDto extends createZodDto(
+  createIntegrationSchema,
+) {}

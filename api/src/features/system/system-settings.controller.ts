@@ -13,13 +13,7 @@ import {
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import type { Principal } from '../../common/principal';
-import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
-import {
-  settingsQuerySchema,
-  type SettingsQueryDto,
-  upsertSettingSchema,
-  type UpsertSettingDto,
-} from './dto/upsert-setting.dto';
+import { SettingsQueryDto, UpsertSettingDto } from './dto/upsert-setting.dto';
 import { SystemSettingsService } from './system-settings.service';
 import type { AuditContext } from './system-audit.types';
 
@@ -33,9 +27,7 @@ export class SystemSettingsController {
   }
 
   @Get()
-  list(
-    @Query(new ZodValidationPipe(settingsQuerySchema)) query: SettingsQueryDto,
-  ) {
+  list(@Query() query: SettingsQueryDto) {
     return this.settings.list(query);
   }
 
@@ -47,7 +39,7 @@ export class SystemSettingsController {
   @Put(':key')
   upsert(
     @Param('key') key: string,
-    @Body(new ZodValidationPipe(upsertSettingSchema)) dto: UpsertSettingDto,
+    @Body() dto: UpsertSettingDto,
     @CurrentUser() user: Principal,
     @Ip() ip: string,
     @Headers('user-agent') ua: string,

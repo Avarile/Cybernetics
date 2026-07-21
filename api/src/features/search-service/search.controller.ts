@@ -1,7 +1,6 @@
 import { Body, Controller, HttpCode, Param, Post } from '@nestjs/common';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
-import { searchQuerySchema, type SearchQueryDto } from './dto/search-query.dto';
+import { SearchQueryDto } from './dto/search-query.dto';
 import { SearchRecordService } from './search-record.service';
 
 /**
@@ -15,10 +14,7 @@ export class SearchQueryController {
 
   @Post('query')
   @HttpCode(200)
-  query(
-    @Param('name') name: string,
-    @Body(new ZodValidationPipe(searchQuerySchema)) body: SearchQueryDto,
-  ) {
+  query(@Param('name') name: string, @Body() body: SearchQueryDto) {
     return this.records.search(name, body);
   }
 

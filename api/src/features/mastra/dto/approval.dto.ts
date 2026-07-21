@@ -1,3 +1,4 @@
+import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
 
 export const decisionSchema = z.object({
@@ -5,4 +6,4 @@ export const decisionSchema = z.object({
   note: z.string().max(1000).optional(),
 });
 
-export type DecisionDto = z.infer<typeof decisionSchema>;
+export class DecisionDto extends createZodDto(decisionSchema) {}

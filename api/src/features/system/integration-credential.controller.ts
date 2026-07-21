@@ -15,16 +15,10 @@ import {
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import type { Principal } from '../../common/principal';
-import { ZodValidationPipe } from '../../common/pipes/zod-validation.pipe';
+import { CreateIntegrationDto } from './dto/create-integration.dto';
 import {
-  createIntegrationSchema,
-  type CreateIntegrationDto,
-} from './dto/create-integration.dto';
-import {
-  integrationQuerySchema,
-  type IntegrationQueryDto,
-  updateIntegrationSchema,
-  type UpdateIntegrationDto,
+  IntegrationQueryDto,
+  UpdateIntegrationDto,
 } from './dto/update-integration.dto';
 import { IntegrationCredentialService } from './integration-credential.service';
 import type { AuditContext } from './system-audit.types';
@@ -40,8 +34,7 @@ export class IntegrationCredentialController {
 
   @Post()
   create(
-    @Body(new ZodValidationPipe(createIntegrationSchema))
-    dto: CreateIntegrationDto,
+    @Body() dto: CreateIntegrationDto,
     @CurrentUser() user: Principal,
     @Ip() ip: string,
     @Headers('user-agent') ua: string,
@@ -50,10 +43,7 @@ export class IntegrationCredentialController {
   }
 
   @Get()
-  list(
-    @Query(new ZodValidationPipe(integrationQuerySchema))
-    query: IntegrationQueryDto,
-  ) {
+  list(@Query() query: IntegrationQueryDto) {
     return this.integrations.list(query);
   }
 
@@ -65,8 +55,7 @@ export class IntegrationCredentialController {
   @Patch(':id')
   update(
     @Param('id', ParseUUIDPipe) id: string,
-    @Body(new ZodValidationPipe(updateIntegrationSchema))
-    dto: UpdateIntegrationDto,
+    @Body() dto: UpdateIntegrationDto,
     @CurrentUser() user: Principal,
     @Ip() ip: string,
     @Headers('user-agent') ua: string,
