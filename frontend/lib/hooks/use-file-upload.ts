@@ -2,11 +2,21 @@
 import { useCallback, useState } from 'react'
 import { fileService } from '@/lib/services/file.service'
 
+export type UploadStatus = 'pending' | 'hashing' | 'uploading' | 'deduplicated' | 'done' | 'error'
+
 export interface UploadItem {
   file: File
-  status: 'pending' | 'uploading' | 'done' | 'error'
+  status: UploadStatus
   fileId?: string
   error?: string
+}
+
+async function sha256Hex(file: File): Promise<string> {
+  const buf = await file.arrayBuffer()
+  const digest = await crypto.subtle.digest('SHA-256', buf)
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('')
 }
 
 export function useFileUpload() {
@@ -15,43 +25,44 @@ export function useFileUpload() {
   const patch = (file: File, p: Partial<UploadItem>) =>
     setItems((prev) => prev.map((it) => (it.file === file ? { ...it, ...p } : it)))
 
+  const uploadOne = useCallback(
+    async (file: File, metadata?: Record<string, unknown>): Promise<string | null> => {
+      try {
+        patch(file, { status: 'hashing' })
+        const sha256 = await sha256Hex(file)
+        patch(file, { status: 'uploading' })
+        const init = await fileService.initiate({
+          filename: file.name,
+          mimeType: file.type || 'application/octet-stream',
+          size: file.size,
+          sha256,
+          metadata,
+        })
+        if (init.deduplicated) {
+          patch(file, { status: 'deduplicated', fileId: init.fileId })
+          return init.fileId
+        }
+        if (init.upload) {
+          await fileService.uploadToPolicy(init.upload, file)
+          await fileService.complete(init.fileId, sha256)
+        }
+        patch(file, { status: 'done', fileId: init.fileId })
+        return init.fileId
+      } catch (err) {
+        patch(file, { status: 'error', error: err instanceof Error ? err.message : 'Upload failed' })
+        return null
+      }
+    },
+    [],
+  )
+
   const uploadAll = useCallback(
     async (files: File[], metadata?: Record<string, unknown>): Promise<string[]> => {
       setItems((prev) => [...prev, ...files.map((file) => ({ file, status: 'pending' as const }))])
-      const ids: string[] = []
-      for (const file of files) {
-        try {
-          patch(file, { status: 'uploading' })
-          const init = await fileService.initiate({
-            filename: file.name,
-            mimeType: file.type || 'application/octet-stream',
-            size: file.size,
-            metadata,
-          })
-          if (!init.deduplicated && init.upload) {
-            await fileService.uploadToPolicy(init.upload, file)
-            await fileService.complete(init.fileId)
-          }
-          patch(file, { status: 'done', fileId: init.fileId })
-          ids.push(init.fileId)
-        } catch (err) {
-          patch(file, { status: 'error', error: err instanceof Error ? err.message : 'Upload failed' })
-          const rest = files.slice(files.indexOf(file) + 1)
-          if (rest.length) {
-            setItems((prev) =>
-              prev.map((it) =>
-                rest.includes(it.file)
-                  ? { ...it, status: 'error' as const, error: 'Skipped — a previous upload failed' }
-                  : it,
-              ),
-            )
-          }
-          throw err
-        }
-      }
-      return ids
+      const results = await Promise.all(files.map((file) => uploadOne(file, metadata)))
+      return results.filter((id): id is string => id !== null)
     },
-    [],
+    [uploadOne],
   )
 
   const reset = useCallback(() => setItems([]), [])
