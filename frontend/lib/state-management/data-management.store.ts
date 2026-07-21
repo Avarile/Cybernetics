@@ -11,6 +11,9 @@ const DEFAULT_LIMIT = 20
 type RowSelection = Record<string, boolean>
 type ColumnVisibility = Record<string, boolean>
 
+export type CollectionPanel =
+  | { kind: 'closed' } | { kind: 'list' } | { kind: 'create' } | { kind: 'edit'; name: string }
+
 interface DataManagementState {
   collection: string | null
   setCollection: (name: string) => void
@@ -44,6 +47,12 @@ interface DataManagementState {
   closeDetail: () => void
   requestDelete: (ids: string[]) => void
   cancelDelete: () => void
+
+  collectionPanel: CollectionPanel
+  openCollections: () => void
+  openCreateCollection: () => void
+  openEditCollection: (name: string) => void
+  closeCollectionPanel: () => void
 }
 
 const QUERY_DEFAULTS = {
@@ -119,6 +128,12 @@ const creator: StateCreator<
   closeDetail: () => set({ detailId: null }, false, 'dm/closeDetail'),
   requestDelete: (ids) => set({ deleteTarget: ids }, false, 'dm/requestDelete'),
   cancelDelete: () => set({ deleteTarget: null }, false, 'dm/cancelDelete'),
+
+  collectionPanel: { kind: 'closed' },
+  openCollections: () => set({ collectionPanel: { kind: 'list' } }, false, 'dm/openCollections'),
+  openCreateCollection: () => set({ collectionPanel: { kind: 'create' } }, false, 'dm/openCreateCollection'),
+  openEditCollection: (name) => set({ collectionPanel: { kind: 'edit', name } }, false, 'dm/openEditCollection'),
+  closeCollectionPanel: () => set({ collectionPanel: { kind: 'closed' } }, false, 'dm/closeCollectionPanel'),
 })
 
 export const useDataManagementStore = create<DataManagementState>()(

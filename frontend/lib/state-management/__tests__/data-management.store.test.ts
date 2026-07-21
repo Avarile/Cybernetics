@@ -7,6 +7,7 @@ beforeEach(() => {
   useDataManagementStore.setState({
     collection: 'products', q: '', page: 1, limit: 20, filters: {}, sort: [],
     selection: {}, columnVisibility: {}, panel: 'closed', detailId: null, deleteTarget: null,
+    collectionPanel: { kind: 'closed' },
   })
 })
 
@@ -63,5 +64,11 @@ describe('data-management store', () => {
     get().openDetail('r1'); expect(get().detailId).toBe('r1')
     get().requestDelete(['r1', 'r2']); expect(get().deleteTarget).toEqual(['r1', 'r2'])
     get().cancelDelete(); expect(get().deleteTarget).toBeNull()
+  })
+
+  it('collection panel transitions', () => {
+    get().openCollections(); expect(get().collectionPanel).toEqual({ kind: 'list' })
+    get().openEditCollection('products'); expect(get().collectionPanel).toEqual({ kind: 'edit', name: 'products' })
+    get().closeCollectionPanel(); expect(get().collectionPanel).toEqual({ kind: 'closed' })
   })
 })

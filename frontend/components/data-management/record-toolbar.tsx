@@ -13,6 +13,7 @@ import {
 import { RecordFilters } from '@/components/data-management/record-filters'
 import { useCollections } from '@/lib/hooks/use-collections'
 import { useIsAdmin } from '@/lib/hooks/use-permission'
+import { useRecordMutations } from '@/lib/hooks/use-record-mutations'
 import { useDataManagementStore } from '@/lib/state-management/data-management.store'
 import type { FieldSpec } from '@/lib/interfaces/search.interface'
 
@@ -20,6 +21,8 @@ export function RecordToolbar({ fields }: { fields: FieldSpec[] }) {
   const isAdmin = useIsAdmin()
   const { collections } = useCollections()
   const s = useDataManagementStore()
+  const openCollections = useDataManagementStore((state) => state.openCollections)
+  const { reindex } = useRecordMutations()
   const activeFilters = Object.keys(s.filters).length
   const selectedIds = Object.keys(s.selection)
 
@@ -60,6 +63,8 @@ export function RecordToolbar({ fields }: { fields: FieldSpec[] }) {
             Delete ({selectedIds.length})
           </Button>
         )}
+        {isAdmin && (<Button variant="outline" size="sm" onClick={openCollections}>Manage…</Button>)}
+        {isAdmin && s.collection && (<Button variant="outline" size="sm" onClick={() => void reindex()}>Reindex</Button>)}
         {isAdmin && (
           <Button size="sm" onClick={s.openCreate} disabled={!s.collection}>
             <HugeiconsIcon icon={Add01Icon} strokeWidth={2} />
