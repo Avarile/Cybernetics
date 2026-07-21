@@ -32,4 +32,14 @@ describe('RecordForm', () => {
     expect(arg.externalId.length).toBeGreaterThan(0)
     await waitFor(() => expect(onDone).toHaveBeenCalled())
   })
+
+  it('seeds edit values from initialDocument', () => {
+    render(
+      <RecordForm
+        fields={[{ name: 'title', type: 'string', required: true }]}
+        collection="c" mode="edit" initialDocument={{ title: 'Seeded' }} externalId="ext-1" onDone={() => {}}
+      />,
+    )
+    expect((screen.getByLabelText(/title/) as HTMLInputElement).value).toBe('Seeded')
+  })
 })

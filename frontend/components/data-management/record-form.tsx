@@ -11,18 +11,10 @@ import { AttachmentsField } from '@/components/data-management/attachments-field
 import { buildRecordSchema } from '@/lib/schema/field-to-zod'
 import { useRecordMutations } from '@/lib/hooks/use-record-mutations'
 import { ApiError } from '@/lib/http/api-client'
-import type { FieldSpec, RecordDocument, RecordHit } from '@/lib/interfaces/search.interface'
+import type { FieldSpec, RecordDocument } from '@/lib/interfaces/search.interface'
 import type { ZodType } from 'zod'
 
-const SYSTEM_KEYS = new Set(['id', 'externalId', 'createdAt', 'updatedAt'])
 const ATTACHMENTS_FIELD = 'attachments'
-
-function documentOf(record?: RecordHit): RecordDocument {
-  if (!record) return {}
-  const out: RecordDocument = {}
-  for (const [k, v] of Object.entries(record)) if (!SYSTEM_KEYS.has(k)) out[k] = v
-  return out
-}
 
 /** Per-type empty default so an untouched required field is e.g. '' (triggers the
  * schema's custom "X is required" message) rather than undefined (which fails zod's
@@ -39,8 +31,7 @@ function emptyValueFor(f: FieldSpec): unknown {
   }
 }
 
-function defaultValuesFor(fields: FieldSpec[], record?: RecordHit): RecordDocument {
-  const doc = documentOf(record)
+function defaultValuesFor(fields: FieldSpec[], doc: RecordDocument = {}): RecordDocument {
   const out: RecordDocument = {}
   for (const f of fields) out[f.name] = f.name in doc ? doc[f.name] : emptyValueFor(f)
   return out
@@ -56,17 +47,19 @@ export function RecordForm({
   fields,
   collection,
   mode,
-  record,
+  initialDocument,
+  externalId: externalIdProp,
   onDone,
 }: {
   fields: FieldSpec[]
   collection: string
   mode: 'create' | 'edit'
-  record?: RecordHit
+  initialDocument?: RecordDocument
+  externalId?: string
   onDone: () => void
 }) {
   const { create } = useRecordMutations()
-  const [externalId] = React.useState<string>(() => record?.externalId ?? genId())
+  const [externalId] = React.useState<string>(() => externalIdProp ?? genId())
   // buildRecordSchema's declared return type leaves the zod "Input" generic at its
   // `unknown` default, which zodResolver's overloads reject (they require Input to
   // extend RHF's FieldValues). The schema is a plain z.object() of concrete fields,
@@ -78,7 +71,7 @@ export function RecordForm({
 
   const form = useForm<Record<string, unknown>>({
     resolver: zodResolver(schema),
-    defaultValues: defaultValuesFor(fields, record),
+    defaultValues: defaultValuesFor(fields, initialDocument),
   })
 
   const attachmentsField = fields.find((f) => f.name === ATTACHMENTS_FIELD && f.type === 'string[]')

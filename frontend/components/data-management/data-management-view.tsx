@@ -45,7 +45,7 @@ export function DataManagementView() {
       {collection && (
         <>
           <RecordInputPanel fields={fields} collection={collection} />
-          <RecordDetailDrawer fields={fields} collection={collection} results={results} />
+          <RecordDetailDrawer fields={fields} collection={collection} />
           <RecordDeleteDialog />
         </>
       )}
