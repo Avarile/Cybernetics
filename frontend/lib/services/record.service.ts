@@ -3,6 +3,7 @@ import { toSearchRequestBody } from '@/lib/schema/serialize-query'
 import type {
   PersistRecordInput,
   PersistResult,
+  RecordDetail,
   SearchQuery,
   SearchResults,
 } from '@/lib/interfaces/search.interface'
@@ -13,6 +14,11 @@ export const recordService = {
   query(collection: string, query: SearchQuery): Promise<SearchResults> {
     return apiClient
       .post<SearchResults>(`${base(collection)}/query`, toSearchRequestBody(query))
+      .then((r) => r.data)
+  },
+  get(collection: string, id: string): Promise<RecordDetail> {
+    return apiClient
+      .get<RecordDetail>(`${base(collection)}/records/${encodeURIComponent(id)}`)
       .then((r) => r.data)
   },
   persist(collection: string, records: PersistRecordInput[]): Promise<PersistResult[]> {

@@ -26,6 +26,11 @@ describe('recordService', () => {
     await recordService.remove('products', 'abc')
     expect(apiClient.delete).toHaveBeenCalledWith('/search/collections/products/records/abc')
   })
+  it('get fetches a single record by id', async () => {
+    vi.mocked(apiClient.get).mockResolvedValue({ data: { id: 'abc', document: {} } })
+    await recordService.get('products', 'abc')
+    expect(apiClient.get).toHaveBeenCalledWith('/search/collections/products/records/abc')
+  })
 })
 
 describe('collectionService', () => {

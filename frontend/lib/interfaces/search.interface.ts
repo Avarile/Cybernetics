@@ -75,6 +75,17 @@ export interface PersistResult {
   indexState: IndexState
 }
 
+/** GET /search/collections/:name/records/:id — Postgres read (document nested). */
+export interface RecordDetail {
+  id: string
+  externalId: string | null
+  document: RecordDocument
+  indexState: IndexState
+  indexError?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
 // ── Files (presigned upload) ────────────────────────────────────────
 export interface InitiateUploadInput {
   filename: string
