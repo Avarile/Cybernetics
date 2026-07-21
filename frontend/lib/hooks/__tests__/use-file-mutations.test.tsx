@@ -18,5 +18,13 @@ describe('useFileMutations.remove', () => {
     await act(async () => { res = await result.current.remove(['a', 'b', 'c']) })
     expect(res).toEqual({ ok: 2, failed: 1 })
     expect(mutate).toHaveBeenCalled()
+
+    const predicate = mutate.mock.calls[0][0]
+    expect(typeof predicate).toBe('function')
+    expect(predicate(['files', { status: 'ALL', page: 1, limit: 20 }])).toBe(true)
+    expect(predicate(['file', 'abc'])).toBe(false)
+    expect(predicate(['records', {}])).toBe(false)
+    expect(predicate('files')).toBe(false)
+    expect(predicate(undefined)).toBe(false)
   })
 })
