@@ -1,7 +1,7 @@
 import type { FieldSpec, FieldType } from '@/lib/interfaces/search.interface'
 
 /** System field names on the Meili doc; a field-spec may not reuse them. Mirrors api/.../document-validator.ts. */
-export const RESERVED_FIELD_NAMES = ['id', 'externalId', 'collection', 'createdAt', 'updatedAt']
+export const RESERVED_FIELD_NAMES: readonly string[] = ['id', 'externalId', 'collection', 'createdAt', 'updatedAt']
 const FIELD_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_]*$/
 const SCALARS: FieldType[] = ['string', 'number', 'boolean', 'date']
 
@@ -11,7 +11,7 @@ export const canBeSortable = (t: FieldType) => SCALARS.includes(t)
 /** Client mirror of the backend's validateFieldSpec. Returns human-readable errors (empty = valid). */
 export function validateFieldSpec(fields: FieldSpec[]): string[] {
   const errors: string[] = []
-  if (fields.length === 0) return ['A collection must declare at least one field']
+  if (!Array.isArray(fields) || fields.length === 0) return ['A collection must declare at least one field']
   const seen = new Set<string>()
   for (const f of fields) {
     if (!FIELD_NAME_RE.test(f.name)) errors.push(`Invalid field name "${f.name}"`)

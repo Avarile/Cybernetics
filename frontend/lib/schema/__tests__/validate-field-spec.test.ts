@@ -23,4 +23,11 @@ describe('validateFieldSpec (client mirror)', () => {
     expect(canBeSearchable('number')).toBe(false)
     expect(canBeSortable('string[]')).toBe(false)
   })
+  it('flags sortable on a string[] field', () => {
+    const errs = validateFieldSpec([
+      { name: 'tags', type: 'string[]', sortable: true },
+      { name: 't', type: 'string', searchable: true },
+    ])
+    expect(errs).toContain('Field "tags" cannot be sortable (type string[])')
+  })
 })
