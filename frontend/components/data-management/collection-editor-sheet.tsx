@@ -35,13 +35,24 @@ export function CollectionEditorSheet({
   })
   const [fields, setFields] = React.useState<FieldSpec[]>([])
   const [specErrors, setSpecErrors] = React.useState<string[]>([])
+  const prefilledFor = React.useRef<string | null>(null)
 
+  // Prefill at most once per open, per collection: SWR revalidating `definition`
+  // while the sheet is open in edit mode must not refire form.reset and wipe
+  // unsaved edits.
   React.useEffect(() => {
-    if (open && mode === 'edit' && definition) {
+    if (!open) { prefilledFor.current = null; return }
+    if (mode === 'create') {
+      form.reset({ name: '', displayName: '', description: '' })
+      setFields([])
+      prefilledFor.current = '__create__'
+      return
+    }
+    if (mode === 'edit' && definition && prefilledFor.current !== definition.name) {
       form.reset({ name: definition.name, displayName: definition.displayName, description: definition.description ?? '' })
       setFields(existing)
+      prefilledFor.current = definition.name
     }
-    if (open && mode === 'create') { form.reset({ name: '', displayName: '', description: '' }); setFields([]) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, mode, definition])
 
