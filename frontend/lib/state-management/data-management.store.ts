@@ -28,7 +28,7 @@ interface DataManagementState {
   setLimit: (limit: number) => void
   setFilter: (field: string, value: FilterValue | undefined) => void
   clearFilters: () => void
-  toggleSort: (field: string) => void
+  toggleSort: (field: string, additive?: boolean) => void
   resetQuery: () => void
 
   selection: RowSelection
@@ -97,13 +97,16 @@ const creator: StateCreator<
       'dm/setFilter',
     ),
   clearFilters: () => set({ filters: {}, page: 1 }, false, 'dm/clearFilters'),
-  toggleSort: (field) =>
+  toggleSort: (field, additive = false) =>
     set(
       (s) => {
-        const current = s.sort[0]
-        if (!current || current.field !== field) return { sort: [{ field, dir: 'asc' }] }
-        if (current.dir === 'asc') return { sort: [{ field, dir: 'desc' }] }
-        return { sort: [] }
+        const idx = s.sort.findIndex((x) => x.field === field)
+        const cur = idx >= 0 ? s.sort[idx] : undefined
+        const cycle = !cur ? { field, dir: 'asc' as const } : cur.dir === 'asc' ? { field, dir: 'desc' as const } : null
+        if (!additive) return { sort: cycle ? [cycle] : [] }
+        const next = s.sort.filter((x) => x.field !== field)
+        if (cycle) next.splice(idx >= 0 ? idx : next.length, 0, cycle)
+        return { sort: next }
       },
       false,
       'dm/toggleSort',

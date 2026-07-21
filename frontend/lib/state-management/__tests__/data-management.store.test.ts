@@ -34,6 +34,19 @@ describe('data-management store', () => {
     expect(get().sort).toEqual([{ field: 'name', dir: 'asc' }])
   })
 
+  it('additive toggleSort keeps prior sorts', () => {
+    get().toggleSort('price')
+    get().toggleSort('name', true)
+    expect(get().sort).toEqual([{ field: 'price', dir: 'asc' }, { field: 'name', dir: 'asc' }])
+    get().toggleSort('price', true)
+    expect(get().sort).toEqual([{ field: 'price', dir: 'desc' }, { field: 'name', dir: 'asc' }])
+  })
+
+  it('non-additive toggleSort still replaces', () => {
+    get().toggleSort('price'); get().toggleSort('name')
+    expect(get().sort).toEqual([{ field: 'name', dir: 'asc' }])
+  })
+
   it('setFilter adds then clears, resetting page each time', () => {
     get().setPage(3)
     get().setFilter('status', ['active'])

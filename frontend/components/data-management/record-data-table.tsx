@@ -161,7 +161,7 @@ export function RecordDataTable({
                 {hg.headers.map((header) => {
                   const meta = header.column.columnDef.meta as RecordColumnMeta | undefined
                   const sortable = meta?.field.sortable
-                  const active = s.sort[0]?.field === meta?.field.name ? s.sort[0] : undefined
+                  const active = s.sort.find((x) => x.field === meta?.field.name)
                   return (
                     <TableHead key={header.id}>
                       {header.isPlaceholder ? null : sortable ? (
@@ -169,7 +169,7 @@ export function RecordDataTable({
                           variant="ghost"
                           size="sm"
                           className="-ml-2 h-8"
-                          onClick={() => s.toggleSort(meta!.field.name)}
+                          onClick={(e) => s.toggleSort(meta!.field.name, e.shiftKey)}
                         >
                           {flexRender(header.column.columnDef.header, header.getContext())}
                           <HugeiconsIcon
