@@ -2,31 +2,35 @@
 import { useCallback } from 'react'
 import { toast } from 'sonner'
 import { recordService } from '@/lib/services/record.service'
-import { useCollection } from '@/lib/state-management/data-management.store'
+import { useCollection, useDataManagementStore } from '@/lib/state-management/data-management.store'
 import { useRecords } from '@/lib/hooks/use-records'
 import type { PersistRecordInput, SearchResults } from '@/lib/interfaces/search.interface'
 
-const REVALIDATE_DELAY_MS = 1200 // async-indexing settle window
+const REVALIDATE_DELAYS_MS = [900, 2500] // bounded catch-up while Meili indexes
 
 export function useRecordMutations() {
   const collection = useCollection()
+  const openDetail = useDataManagementStore((s) => s.openDetail)
   const { mutate } = useRecords()
 
   const revalidateSoon = useCallback(() => {
-    setTimeout(() => void mutate(), REVALIDATE_DELAY_MS)
+    for (const d of REVALIDATE_DELAYS_MS) setTimeout(() => void mutate(), d)
   }, [mutate])
 
   const create = useCallback(
     async (input: PersistRecordInput) => {
       if (!collection) throw new Error('No collection selected')
       const [res] = await recordService.persist(collection, [input])
-      toast.success('Record queued for indexing', {
-        description: `Status: ${res?.indexState ?? 'PENDING'} — it will appear shortly.`,
-      })
+      if (res) {
+        toast.success('Record queued for indexing', {
+          description: 'View it now to watch indexing complete.',
+          action: { label: 'View', onClick: () => openDetail(res.id) },
+        })
+      }
       revalidateSoon()
       return res
     },
-    [collection, revalidateSoon],
+    [collection, openDetail, revalidateSoon],
   )
 
   const remove = useCallback(
@@ -37,11 +41,7 @@ export function useRecordMutations() {
       await mutate(
         (prev?: SearchResults) =>
           prev
-            ? {
-                ...prev,
-                hits: prev.hits.filter((h) => !ids.includes(h.id)),
-                totalHits: Math.max(0, prev.totalHits - ids.length),
-              }
+            ? { ...prev, hits: prev.hits.filter((h) => !ids.includes(h.id)), totalHits: Math.max(0, prev.totalHits - ids.length) }
             : prev,
         { revalidate: false },
       )
