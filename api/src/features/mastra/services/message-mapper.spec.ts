@@ -56,6 +56,58 @@ describe('toChatMessages', () => {
     expect(typeof out[1].createdAt).toBe('string');
   });
 
+  it('maps nested bare "source" and flat "source-document" parts, keeping fields populated', () => {
+    const db = [
+      {
+        id: 'm3',
+        role: 'assistant',
+        createdAt: new Date('2026-01-03'),
+        content: {
+          format: 2,
+          parts: [
+            {
+              type: 'source',
+              source: {
+                id: 's1',
+                url: 'https://example.com',
+                title: 'Example',
+                sourceType: 'url',
+              },
+            },
+            {
+              type: 'source-document',
+              sourceId: 'd1',
+              title: 'Doc',
+              mediaType: 'application/pdf',
+            },
+          ],
+        },
+      },
+    ];
+    const out = toChatMessages(db as never);
+    expect(out[0].parts).toHaveLength(2);
+
+    const nestedSource = out[0].parts[0] as Record<string, unknown>;
+    expect(nestedSource).toMatchObject({
+      type: 'source',
+      sourceId: 's1',
+      url: 'https://example.com',
+      title: 'Example',
+    });
+    expect(nestedSource.sourceId).not.toBeUndefined();
+    expect(nestedSource.title).not.toBeUndefined();
+
+    const flatSource = out[0].parts[1] as Record<string, unknown>;
+    expect(flatSource).toMatchObject({
+      type: 'source',
+      sourceId: 'd1',
+      title: 'Doc',
+      mediaType: 'application/pdf',
+    });
+    expect(flatSource.sourceId).not.toBeUndefined();
+    expect(flatSource.title).not.toBeUndefined();
+  });
+
   it('ignores signal-role messages', () => {
     const db = [
       {

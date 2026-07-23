@@ -69,15 +69,24 @@ export function toChatMessages(dbMessages: DbMessageLike[]): ChatMessageDto[] {
         }
         case 'source':
         case 'source-url':
-        case 'source-document':
+        case 'source-document': {
+          const src =
+            part.source && typeof part.source === 'object'
+              ? (part.source as Record<string, unknown>)
+              : part;
           parts.push({
             type: 'source',
-            sourceId: part.sourceId as string | undefined,
-            title: part.title as string | undefined,
-            url: part.url as string | undefined,
-            mediaType: part.mediaType as string | undefined,
+            sourceId: (src.id ?? src.sourceId ?? part.sourceId) as
+              | string
+              | undefined,
+            title: (src.title ?? part.title) as string | undefined,
+            url: (src.url ?? part.url) as string | undefined,
+            mediaType: (src.mediaType ?? src.sourceType ?? part.mediaType) as
+              | string
+              | undefined,
           });
           break;
+        }
         default:
           break; // step-start, file, etc. — ignored in v1
       }
