@@ -2,9 +2,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
 const refreshSession = vi.fn()
 vi.mock('@/lib/auth/session', () => ({ refreshSession: (...a: unknown[]) => refreshSession(...a) }))
-vi.mock('@/lib/http/token-store', () => ({ getAccessToken: () => 'tok-1' }))
+vi.mock('@/lib/http/token-store', () => ({ getAccessToken: vi.fn() }))
 
 import { streamAgentChat } from '@/lib/services/agent-stream'
+import { getAccessToken } from '@/lib/http/token-store'
 import type { SseEvent } from '@/lib/interfaces/chat.interface'
 
 function sseBody(frames: string[]): ReadableStream<Uint8Array> {
@@ -19,7 +20,10 @@ const FRAMES = [
   'data: {"type":"done","status":"succeeded"}\n\n',
 ]
 
-beforeEach(() => vi.clearAllMocks())
+beforeEach(() => {
+  vi.clearAllMocks()
+  vi.mocked(getAccessToken).mockReturnValue('tok-1')
+})
 afterEach(() => vi.unstubAllGlobals())
 
 describe('streamAgentChat', () => {
@@ -37,6 +41,7 @@ describe('streamAgentChat', () => {
   })
 
   it('refreshes once and retries on an AUTH_TOKEN_EXPIRED response', async () => {
+    vi.mocked(getAccessToken).mockReturnValueOnce('tok-1').mockReturnValue('tok-2')
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({ ok: false, status: 401, json: () => Promise.resolve({ error: { code: 'AUTH_TOKEN_EXPIRED', message: 'expired' } }) })
       .mockResolvedValueOnce({ ok: true, status: 200, body: sseBody(['data: {"type":"done","status":"succeeded"}\n\n']) })
@@ -47,10 +52,22 @@ describe('streamAgentChat', () => {
     expect(refreshSession).toHaveBeenCalledTimes(1)
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(events.map((e) => e.type)).toEqual(['done'])
+    expect(fetchMock.mock.calls[1][1].headers.Authorization).toBe('Bearer tok-2')
   })
 
   it('throws with the envelope message on a non-refreshable error', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: false, status: 403, json: () => Promise.resolve({ error: { code: 'FORBIDDEN', message: 'nope' } }) }))
     await expect(streamAgentChat({ message: 'x' }, { onEvent: () => {} })).rejects.toThrow('nope')
+  })
+
+  it('throws with the retry response message when refresh succeeds but the retry still fails', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 401, json: () => Promise.resolve({ error: { code: 'AUTH_TOKEN_EXPIRED', message: 'expired' } }) })
+      .mockResolvedValueOnce({ ok: false, status: 403, json: () => Promise.resolve({ error: { code: 'FORBIDDEN', message: 'nope after retry' } }) })
+    vi.stubGlobal('fetch', fetchMock)
+    refreshSession.mockResolvedValue({ accessToken: 'tok-2' })
+    await expect(streamAgentChat({ message: 'x' }, { onEvent: () => {} })).rejects.toThrow('nope after retry')
+    expect(refreshSession).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
   })
 })

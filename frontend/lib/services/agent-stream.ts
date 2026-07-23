@@ -12,11 +12,12 @@ interface StreamOpts {
 }
 
 async function postStream(body: ChatStreamBody, signal?: AbortSignal): Promise<Response> {
+  const token = getAccessToken()
   return fetch(ENDPOINT, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      ...(getAccessToken() ? { Authorization: `Bearer ${getAccessToken()}` } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
     },
     body: JSON.stringify(body),
     signal,
@@ -29,15 +30,14 @@ export async function streamAgentChat(body: ChatStreamBody, opts: StreamOpts): P
   let res = await postStream(body, opts.signal)
 
   if (!res.ok) {
-    const envelope = await res.json().catch(() => null)
-    const code = envelope?.error?.code
-    if (code === ERROR_CODES.AUTH_TOKEN_EXPIRED) {
+    let envelope = await res.json().catch(() => null)
+    if (envelope?.error?.code === ERROR_CODES.AUTH_TOKEN_EXPIRED) {
       await refreshSession()
       res = await postStream(body, opts.signal)
+      if (!res.ok) envelope = await res.json().catch(() => null)
     }
     if (!res.ok) {
-      const msg = envelope?.error?.message ?? `Stream failed (${res.status})`
-      throw new Error(msg)
+      throw new Error(envelope?.error?.message ?? `Stream failed (${res.status})`)
     }
   }
 
