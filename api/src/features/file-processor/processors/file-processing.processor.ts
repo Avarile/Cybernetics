@@ -1,9 +1,14 @@
-import { Processor, WorkerHost } from '@nestjs/bullmq';
+import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
 import { Inject, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import type { Job } from 'bullmq';
+import { Queue, type Job } from 'bullmq';
 import { createHash } from 'node:crypto';
 import type { StorageConfig } from '../../../config/configurations/storage.config';
+import {
+  INGEST_DOCUMENT_JOB,
+  INGEST_DOCUMENT_QUEUE,
+  isIngestableDocMime,
+} from '../../document-ingest/document-ingest.constants';
 import { OBJECT_STORAGE } from '../../../infrastructure/file-manage/minio.constants';
 import type { ObjectStorage } from '../../../infrastructure/file-manage/object-storage.interface';
 import {
@@ -16,7 +21,8 @@ import { isDeclaredMimeMismatch } from '../file.util';
 
 /**
  * Consumes the `file-processing` queue:
- *  - process-file:    verify/backfill SHA-256 + magic-byte check → AVAILABLE or QUARANTINED.
+ *  - process-file:    verify/backfill SHA-256 + magic-byte check → AVAILABLE or QUARANTINED;
+ *                      enqueues `document-ingest` for ingestable MIME types that pass integrity.
  *  - reconcile-files: expire stale PENDING rows; purge unreferenced objects.
  */
 @Processor(FILE_PROCESSING_QUEUE)
@@ -28,6 +34,7 @@ export class FileProcessingProcessor extends WorkerHost {
     private readonly repo: FileRepository,
     @Inject(OBJECT_STORAGE) private readonly storage: ObjectStorage,
     config: ConfigService,
+    @InjectQueue(INGEST_DOCUMENT_QUEUE) private readonly ingestQueue: Queue,
   ) {
     super();
     this.pendingTtlMs =
@@ -90,6 +97,20 @@ export class FileProcessingProcessor extends WorkerHost {
       await this.repo.markStatus(fileId, 'AVAILABLE', {
         checksumSha256: digest,
       });
+    }
+
+    // Integrity passed — hand ingestable document types to the ingest pipeline.
+    if (isIngestableDocMime(row.mimeType)) {
+      await this.ingestQueue.add(
+        INGEST_DOCUMENT_JOB,
+        { fileId, ownerId: row.ownerId },
+        {
+          removeOnComplete: true,
+          removeOnFail: 100,
+          attempts: 3,
+          backoff: { type: 'exponential', delay: 1000 },
+        },
+      );
     }
   }
 
