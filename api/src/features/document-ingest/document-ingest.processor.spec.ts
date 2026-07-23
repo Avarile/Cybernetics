@@ -33,12 +33,16 @@ describe('DocumentIngestProcessor', () => {
   it('reads the file, extracts text, and persists a scoped record', async () => {
     await proc.process({
       name: INGEST_DOCUMENT_JOB,
-      data: { fileId: 'file-1' },
+      data: { fileId: 'file-1', ownerId: 'user-1' },
     } as never);
-    expect(files.getContentStream).toHaveBeenCalledWith(
-      'file-1',
-      expect.anything(),
-    );
+    expect(files.getMetadata).toHaveBeenCalledWith('file-1', {
+      id: 'user-1',
+      role: 'agent',
+    });
+    expect(files.getContentStream).toHaveBeenCalledWith('file-1', {
+      id: 'user-1',
+      role: 'agent',
+    });
     expect(extraction.extract).toHaveBeenCalledWith(
       'text/markdown',
       expect.anything(),
