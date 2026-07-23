@@ -21,4 +21,9 @@ describe('agentService', () => {
     const res = await agentService.listConversations(2, 10)
     expect(res.page).toBe(2)
   })
+  it('getMessages GETs the conversation thread', async () => {
+    mock.onGet('/agent/conversations/c1/messages').reply(200, [{ id: 'm1', role: 'user', parts: [{ type: 'text', text: 'hi' }] }])
+    const res = await agentService.getMessages('c1')
+    expect(res[0].parts[0]).toEqual({ type: 'text', text: 'hi' })
+  })
 })

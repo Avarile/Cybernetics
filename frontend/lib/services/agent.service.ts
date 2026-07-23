@@ -1,6 +1,7 @@
 import { apiClient } from '@/lib/http/api-client'
 import type { ChatResult, Conversation, PendingApproval } from '@/lib/interfaces/mastra.interface'
 import type { Paginated } from '@/lib/interfaces/auth.interface'
+import type { ChatMessage } from '@/lib/interfaces/chat.interface'
 
 export const agentService = {
   chat(input: { conversationId?: string; message: string }): Promise<ChatResult> {
@@ -9,6 +10,11 @@ export const agentService = {
   listConversations(page = 1, limit = 20): Promise<Paginated<Conversation>> {
     return apiClient
       .get<Paginated<Conversation>>('/agent/conversations', { params: { page, limit } })
+      .then((r) => r.data)
+  },
+  getMessages(conversationId: string): Promise<ChatMessage[]> {
+    return apiClient
+      .get<ChatMessage[]>(`/agent/conversations/${conversationId}/messages`)
       .then((r) => r.data)
   },
   listApprovals(): Promise<PendingApproval[]> {
