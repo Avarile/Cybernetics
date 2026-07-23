@@ -73,10 +73,13 @@ describe('useAgentChat', () => {
     expect(onConversationId).toHaveBeenCalledWith('c1')
 
     // Simulate the SWR history fetch resolving late with a brand-new array reference
-    // for the SAME conversationId the stream just created.
+    // for the SAME conversationId the stream just created. Its assistant text is
+    // DELIBERATELY different from the live-streamed text so this test actually
+    // discriminates: if the reset bug wiped-and-replaced messages with this stale
+    // history, the persisted text would show up instead of the live one.
     const lateHistory: ChatMessage[] = [
       { id: 'm1', role: 'user', parts: [{ type: 'text', text: 'hi' }] },
-      { id: 'm2', role: 'assistant', parts: [{ type: 'text', text: 'Hello' }] },
+      { id: 'm2', role: 'assistant', parts: [{ type: 'text', text: 'PERSISTED-VERSION' }] },
     ]
     rerender({ conversationId: 'c1', initialMessages: lateHistory })
 
@@ -84,6 +87,23 @@ describe('useAgentChat', () => {
       .find((m) => m.role === 'assistant')
       ?.parts.find((p) => p.type === 'text')
     expect(assistantText).toEqual({ type: 'text', text: 'Hello' })
+    expect(JSON.stringify(result.current.messages)).not.toContain('PERSISTED-VERSION')
     expect(result.current.status).toBe('ready')
+  })
+
+  it('a mid-stream error followed by a terminal done keeps status as error', async () => {
+    streamAgentChat.mockImplementationOnce(emits([
+      { type: 'start', conversationId: 'c1', runId: 'r1' },
+      { type: 'error', message: 'boom' },
+      { type: 'done', status: 'failed' },
+    ]))
+    const { result } = renderHook(() => useAgentChat({ conversationId: null, initialMessages: [], onConversationId: vi.fn() }))
+    await act(async () => { await result.current.sendMessage('hi') })
+    await waitFor(() => expect(result.current.status).toBe('error'))
+    expect(result.current.status).toBe('error')
+    const assistantText = result.current.messages
+      .find((m) => m.role === 'assistant')
+      ?.parts.find((p) => p.type === 'text')
+    expect((assistantText as { type: 'text'; text: string })?.text).toContain('boom')
   })
 })

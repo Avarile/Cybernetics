@@ -93,17 +93,26 @@ export function useAgentChat({ conversationId, initialMessages, onConversationId
         setStatus('error')
         break
       case 'done':
-        setStatus('ready')
+        // A mid-stream 'error' event may still be followed by a terminal 'done'
+        // (e.g. status: 'failed'). Don't let that flip the status back to
+        // 'ready' and hide the error from the user.
+        setStatus((s) => (s === 'error' ? s : 'ready'))
         break
     }
   }, [onConversationId])
 
   const run = useCallback(async (body: Parameters<typeof streamAgentChat>[0]) => {
-    abortRef.current = new AbortController()
+    // Tag this run with its own AbortController so a stale run's catch clause
+    // can detect it has been superseded by a newer run (e.g. stop() followed
+    // immediately by another sendMessage()) and avoid clobbering that newer
+    // run's status.
+    const controller = new AbortController()
+    abortRef.current = controller
     setStatus('submitted')
     try {
-      await streamAgentChat(body, { onEvent: handleEvent, signal: abortRef.current.signal })
+      await streamAgentChat(body, { onEvent: handleEvent, signal: controller.signal })
     } catch (err) {
+      if (abortRef.current !== controller) return // superseded by a newer run — ignore
       if ((err as Error).name !== 'AbortError') {
         setMessages((m) => patchAssistant(m, (p) => upsertText(p, `\n\n_Error: ${(err as Error).message}_`, 'text')))
         setStatus('error')
