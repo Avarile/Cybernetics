@@ -180,7 +180,14 @@ export class ChatStreamService {
         decidedByUserId: principal.id,
         decidedAt: new Date(),
       } as never);
-      await this.runs.finish(appr.runId, { status: resume.approved ? 'succeeded' : 'cancelled', finishedAt: new Date() } as never);
+      const [text, usage] = await Promise.all([output.text, output.usage]);
+      await this.runs.finish(appr.runId, {
+        status: resume.approved ? 'succeeded' : 'cancelled',
+        output: { text },
+        tokensInput: usage.inputTokens,
+        tokensOutput: usage.outputTokens,
+        finishedAt: new Date(),
+      } as never);
       emit({ type: 'done', status: resume.approved ? 'succeeded' : 'cancelled' });
     } catch (err) {
       await this.approvals.decide(resume.approvalId, { status: 'failed', decidedByUserId: principal.id, decidedAt: new Date(), result: { error: err instanceof Error ? err.message : String(err) } } as never);

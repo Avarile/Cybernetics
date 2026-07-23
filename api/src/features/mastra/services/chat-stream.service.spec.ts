@@ -132,4 +132,94 @@ describe('ChatStreamService.stream (resume)', () => {
     expect(runs.finish).toHaveBeenCalledWith('run-1', expect.objectContaining({ status: 'succeeded' }));
     expect(frames.at(-1)).toContain('"status":"succeeded"');
   });
+
+  it('when the approval is missing, emits error + done:failed and never calls the agent', async () => {
+    const conversations = { ensure: jest.fn(), touch: jest.fn(), getOwned: jest.fn() };
+    const runs = { create: jest.fn(), finish: jest.fn() };
+    const approvals = { findById: jest.fn().mockResolvedValue(null), decide: jest.fn(), create: jest.fn() };
+    const agent = { approveToolCall: jest.fn(), declineToolCall: jest.fn() };
+    const mastra = { getAgent: () => agent };
+    const frames: string[] = [];
+    const svc = new ChatStreamService(conversations as never, runs as never, approvals as never, mastra as never);
+    await svc.stream({ id: 'user-1', role: 'user' }, { resume: { approvalId: 'missing-appr', approved: true } } as never, { write: (f: string) => frames.push(f) } as never);
+    expect(frames.join('')).toContain('"type":"error"');
+    expect(frames.at(-1)).toContain('"status":"failed"');
+    expect(agent.approveToolCall).not.toHaveBeenCalled();
+    expect(agent.declineToolCall).not.toHaveBeenCalled();
+  });
+
+  it('when the approval is already resolved (not pending), emits error + done:failed and never calls the agent', async () => {
+    const conversations = { ensure: jest.fn(), touch: jest.fn(), getOwned: jest.fn() };
+    const runs = { create: jest.fn(), finish: jest.fn() };
+    const approvals = { findById: jest.fn().mockResolvedValue({ status: 'executed' }), decide: jest.fn(), create: jest.fn() };
+    const agent = { approveToolCall: jest.fn(), declineToolCall: jest.fn() };
+    const mastra = { getAgent: () => agent };
+    const frames: string[] = [];
+    const svc = new ChatStreamService(conversations as never, runs as never, approvals as never, mastra as never);
+    await svc.stream({ id: 'user-1', role: 'user' }, { resume: { approvalId: 'appr-1', approved: true } } as never, { write: (f: string) => frames.push(f) } as never);
+    expect(frames.join('')).toContain('"type":"error"');
+    expect(frames.at(-1)).toContain('"status":"failed"');
+    expect(agent.approveToolCall).not.toHaveBeenCalled();
+    expect(agent.declineToolCall).not.toHaveBeenCalled();
+  });
+
+  it('declines, streams the continuation, marks the approval rejected, and finishes the run as cancelled (with text/usage)', async () => {
+    const conversations = { ensure: jest.fn(), touch: jest.fn(), getOwned: jest.fn().mockResolvedValue({ id: 'conv-1', resourceId: 'user-1' }) };
+    const runs = { create: jest.fn(), finish: jest.fn() };
+    const approvals = {
+      findById: jest.fn().mockResolvedValue({ id: 'appr-1', status: 'pending', conversationId: 'conv-1', runId: 'run-1', mastraRunId: 'mr-9', toolCallId: 'tc-1' }),
+      decide: jest.fn().mockResolvedValue(undefined),
+      create: jest.fn(),
+    };
+    const agent = {
+      approveToolCall: jest.fn(),
+      declineToolCall: jest.fn().mockResolvedValue({
+        fullStream: (async function* () { yield { type: 'text-delta', runId: 'mr-9', payload: { text: 'okay, skipping' } }; })(),
+        text: Promise.resolve('okay, skipping'), usage: Promise.resolve({ inputTokens: 2, outputTokens: 4 }), finishReason: Promise.resolve('stop'),
+      }),
+    };
+    const mastra = { getAgent: () => agent };
+    const frames: string[] = [];
+    const svc = new ChatStreamService(conversations as never, runs as never, approvals as never, mastra as never);
+    await svc.stream({ id: 'user-1', role: 'user' }, { conversationId: 'conv-1', resume: { approvalId: 'appr-1', approved: false } } as never, { write: (f: string) => frames.push(f) } as never);
+    expect(agent.declineToolCall).toHaveBeenCalledWith({ runId: 'mr-9', toolCallId: 'tc-1' });
+    expect(approvals.decide).toHaveBeenCalledWith('appr-1', expect.objectContaining({ status: 'rejected' }));
+    expect(runs.finish).toHaveBeenCalledWith('run-1', expect.objectContaining({
+      status: 'cancelled',
+      output: { text: 'okay, skipping' },
+      tokensInput: 2,
+      tokensOutput: 4,
+    }));
+    expect(frames.at(-1)).toContain('"status":"cancelled"');
+  });
+
+  it('when a second approval surfaces during the continuation, records a new pending approval and pauses again without finishing the run', async () => {
+    const conversations = { ensure: jest.fn(), touch: jest.fn(), getOwned: jest.fn().mockResolvedValue({ id: 'conv-1', resourceId: 'user-1' }) };
+    const runs = { create: jest.fn(), finish: jest.fn() };
+    const approvals = {
+      findById: jest.fn().mockResolvedValue({ id: 'appr-1', status: 'pending', conversationId: 'conv-1', runId: 'run-1', mastraRunId: 'mr-9', toolCallId: 'tc-1' }),
+      decide: jest.fn().mockResolvedValue(undefined),
+      create: jest.fn().mockResolvedValue({ id: 'appr-2' }),
+    };
+    const agent = {
+      approveToolCall: jest.fn().mockResolvedValue({
+        fullStream: (async function* () {
+          yield { type: 'tool-call-approval', runId: 'mr-2', payload: { toolCallId: 'tc-2', toolName: 'send-email', args: {} } };
+        })(),
+        text: Promise.resolve(''), usage: Promise.resolve({ inputTokens: 0, outputTokens: 0 }), finishReason: Promise.resolve('suspended'),
+      }),
+      declineToolCall: jest.fn(),
+    };
+    const mastra = { getAgent: () => agent };
+    const frames: string[] = [];
+    const svc = new ChatStreamService(conversations as never, runs as never, approvals as never, mastra as never);
+    await svc.stream({ id: 'user-1', role: 'user' }, { conversationId: 'conv-1', resume: { approvalId: 'appr-1', approved: true } } as never, { write: (f: string) => frames.push(f) } as never);
+    expect(approvals.create).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: 'run-1', toolCallId: 'tc-2', mastraRunId: 'mr-2', actionType: 'send_email', status: 'pending' }),
+    );
+    expect(approvals.decide).toHaveBeenCalledWith('appr-1', expect.objectContaining({ status: 'executed' }));
+    expect(frames.join('')).toContain('"type":"approval-required"');
+    expect(frames.at(-1)).toContain('"status":"awaiting_approval"');
+    expect(runs.finish).not.toHaveBeenCalled();
+  });
 });
