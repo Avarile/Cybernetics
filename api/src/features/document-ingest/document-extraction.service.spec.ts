@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import { DocumentExtractionService } from './document-extraction.service';
 import {
   DOCX_MIME,
@@ -25,6 +26,12 @@ describe('DocumentExtractionService', () => {
     expect(md.text).toContain('body');
     const txt = await svc.extract(PLAIN_TEXT_MIME, Buffer.from('hello world'));
     expect(txt.text).toBe('hello world');
+  });
+
+  it('extracts text from a Readable stream via streamToBuffer', async () => {
+    const stream = Readable.from(Buffer.from('hello from a stream'));
+    const result = await svc.extract(PLAIN_TEXT_MIME, stream);
+    expect(result.text).toBe('hello from a stream');
   });
 
   it('extracts docx via mammoth and pdf via pdf-parse', async () => {
