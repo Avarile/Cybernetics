@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { MastraService } from '@mastra/nestjs';
+import type { MastraConfig } from '../../../config/configurations/mastra.config';
 import { AGENT_ID } from '../mastra.constants';
 import type { PrincipalRef } from '../mastra.types';
 import { AgentRunRepository } from '../repositories/agent-run.repository';
@@ -24,16 +26,26 @@ interface Suspend {
 
 @Injectable()
 export class ChatStreamService {
+  /**
+   * The configured model slug. Ledgered on every `runs.finish` for parity with
+   * the buffered `AgentRunnerService.runChat` — see `mastra-adapters.ts::readUsage`.
+   */
+  private readonly configuredModel: string;
+
   constructor(
     private readonly conversations: ConversationService,
     private readonly runs: AgentRunRepository,
     private readonly approvals: ApprovalRepository,
     private readonly mastra: MastraService,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.configuredModel = config.getOrThrow<MastraConfig>('mastra').model;
+  }
 
   async stream(principal: PrincipalRef, input: StreamInput, sink: StreamSink): Promise<void> {
     const emit = (e: SseEvent) => sink.write(sseFrame(e));
     let run: Awaited<ReturnType<AgentRunRepository['create']>> | undefined;
+    let startedAt = 0;
 
     try {
       if (input.resume) {
@@ -50,6 +62,7 @@ export class ChatStreamService {
         input: { message: input.message },
         startedAt: new Date(),
       } as never);
+      startedAt = Date.now();
       emit({ type: 'start', conversationId: conv.id, runId: run.id });
 
       const agent = this.mastra.getAgent(AGENT_ID);
@@ -59,13 +72,15 @@ export class ChatStreamService {
       } as never);
 
       const { suspend, mastraRunId } = await this.pump(output as never, emit);
-      await this.finishTurn(run.id, conv, output as never, suspend, mastraRunId, emit);
+      await this.finishTurn(run.id, conv, output as never, suspend, mastraRunId, startedAt, emit);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (run) {
         await this.runs.finish(run.id, {
           status: 'failed',
           error: { message },
+          model: this.configuredModel,
+          latencyMs: Date.now() - startedAt,
           finishedAt: new Date(),
         } as never);
       }
@@ -100,6 +115,7 @@ export class ChatStreamService {
     output: { text: Promise<string>; usage: Promise<{ inputTokens?: number; outputTokens?: number }>; finishReason: Promise<string | undefined> },
     suspend: Suspend | null,
     mastraRunId: string | null,
+    startedAt: number,
     emit: (e: SseEvent) => void,
   ): Promise<void> {
     const reason = await output.finishReason;
@@ -115,7 +131,12 @@ export class ChatStreamService {
         payload: s.args,
         status: 'pending',
       } as never);
-      await this.runs.finish(runId, { status: 'awaiting_approval', finishedAt: new Date() } as never);
+      await this.runs.finish(runId, {
+        status: 'awaiting_approval',
+        model: this.configuredModel,
+        latencyMs: Date.now() - startedAt,
+        finishedAt: new Date(),
+      } as never);
       emit({ type: 'approval-required', approvalId: appr.id, toolCallId: s.toolCallId, toolName: s.toolName, actionType: actionTypeForTool(s.toolName), title: `Approve ${s.toolName}`, payload: s.args });
       emit({ type: 'done', status: 'awaiting_approval' });
       return;
@@ -124,8 +145,10 @@ export class ChatStreamService {
     await this.runs.finish(runId, {
       status: 'succeeded',
       output: { text },
+      model: this.configuredModel,
       tokensInput: usage.inputTokens,
       tokensOutput: usage.outputTokens,
+      latencyMs: Date.now() - startedAt,
       finishedAt: new Date(),
     } as never);
     await this.conversations.touch(conv.id);
@@ -150,10 +173,16 @@ export class ChatStreamService {
       emit({ type: 'done', status: 'failed' });
       return;
     }
-    if (principal.role !== 'admin' && appr.conversationId) {
+    if (principal.role !== 'admin') {
+      if (!appr.conversationId) {
+        emit({ type: 'error', message: 'Not authorized to resume this approval' });
+        emit({ type: 'done', status: 'failed' });
+        return;
+      }
       await this.conversations.getOwned(principal, appr.conversationId); // throws 403/404
     }
     emit({ type: 'start', conversationId: appr.conversationId as string, runId: appr.runId });
+    const startedAt = Date.now();
     try {
       const agent = this.mastra.getAgent(AGENT_ID);
       const payload = { runId: appr.mastraRunId as string, toolCallId: appr.toolCallId ?? undefined };
@@ -184,8 +213,10 @@ export class ChatStreamService {
       await this.runs.finish(appr.runId, {
         status: resume.approved ? 'succeeded' : 'cancelled',
         output: { text },
+        model: this.configuredModel,
         tokensInput: usage.inputTokens,
         tokensOutput: usage.outputTokens,
+        latencyMs: Date.now() - startedAt,
         finishedAt: new Date(),
       } as never);
       emit({ type: 'done', status: resume.approved ? 'succeeded' : 'cancelled' });
