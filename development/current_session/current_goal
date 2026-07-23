@@ -17,3 +17,7 @@ feature description: Add to the existing data-management page. Frontend-first, w
 
 ## Actions to take
 Design this iteration and output the design to development/current_session/current_design.md, then an implementation plan to development/current_session/current_implementation_plan.md.
+
+
+Resume this session with:
+claude --resume 42d7018f-4b64-4d17-97ea-87f41e11ee1b

@@ -468,3 +468,120 @@
 [2026-07-21T12:59:16.182Z] [INFO] Worker testgaps completed in 2ms
 [2026-07-21T13:01:16.197Z] [INFO] Starting worker: map (1/2 concurrent)
 [2026-07-21T13:01:16.198Z] [INFO] Worker map completed in 2ms
+[2026-07-21T21:49:49.460Z] [INFO] AI workers disabled (default) - all workers run local-only. Enable with `daemon start --headless`, daemon.aiWorkers.enabled=true, or RUFLO_DAEMON_AI_WORKERS=1 (#2661)
+[2026-07-21T21:49:49.461Z] [INFO] Scheduled map (interval: 900s, first run in 0s)
+[2026-07-21T21:49:49.461Z] [INFO] Scheduled audit (interval: 600s, first run in 120s)
+[2026-07-21T21:49:49.461Z] [INFO] Scheduled optimize (interval: 900s, first run in 240s)
+[2026-07-21T21:49:49.461Z] [INFO] Scheduled consolidate (interval: 1800s, first run in 360s)
+[2026-07-21T21:49:49.461Z] [INFO] Scheduled testgaps (interval: 1200s, first run in 480s)
+[2026-07-21T21:49:49.461Z] [INFO] Scheduled backup (interval: 86400s, first run in 42686.669s)
+[2026-07-21T21:49:49.461Z] [INFO] Scheduled harness (interval: 21600s, first run in 720s)
+[2026-07-21T21:49:49.461Z] [INFO] Lifecycle monitor active (workspace-removal, ttl=43200s)
+[2026-07-21T21:49:49.463Z] [INFO] Daemon started (PID: 56227, CPUs: 16, workers: 7, maxCpuLoad: 12.8, minFreeMemoryPercent: 10%)
+[2026-07-21T21:49:49.464Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-21T21:49:49.465Z] [INFO] Worker map completed in 1ms
+[2026-07-21T21:51:49.467Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-21T21:51:49.468Z] [INFO] Worker audit completed in 1ms
+[2026-07-21T21:53:49.467Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-21T21:53:49.469Z] [INFO] Worker optimize completed in 3ms
+[2026-07-21T21:55:49.466Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-21T21:55:49.467Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-21T21:55:49.467Z] [INFO] Worker consolidate completed in 1ms
+[2026-07-21T21:57:49.466Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-21T21:57:49.467Z] [INFO] Worker testgaps completed in 2ms
+[2026-07-21T22:01:49.466Z] [INFO] Starting worker: harness (1/2 concurrent)
+[2026-07-21T22:01:49.498Z] [INFO] Worker harness completed in 33ms
+[2026-07-21T22:01:49.499Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-21T22:01:49.499Z] [INFO] Worker audit completed in 1ms
+[2026-07-21T22:04:49.469Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-21T22:04:49.470Z] [INFO] Worker map completed in 1ms
+[2026-07-21T22:08:49.475Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-21T22:08:49.476Z] [INFO] Worker optimize completed in 2ms
+[2026-07-21T22:11:49.506Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-21T22:11:49.507Z] [INFO] Worker audit completed in 2ms
+[2026-07-21T22:17:49.473Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-21T22:17:49.474Z] [INFO] Worker testgaps completed in 2ms
+[2026-07-21T22:19:49.475Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-21T22:19:49.476Z] [INFO] Worker map completed in 2ms
+[2026-07-21T22:21:49.511Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-21T22:21:49.511Z] [INFO] Worker audit completed in 1ms
+[2026-07-21T22:23:49.481Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-21T22:23:49.482Z] [INFO] Worker optimize completed in 2ms
+[2026-07-21T22:25:49.472Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-21T22:25:49.472Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-21T22:25:49.473Z] [INFO] Worker consolidate completed in 2ms
+[2026-07-21T22:32:22.404Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-21T22:32:22.405Z] [INFO] Worker audit completed in 2ms
+[2026-07-21T22:35:22.372Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-21T22:35:22.372Z] [INFO] Worker map completed in 1ms
+[2026-07-23T03:13:08.243Z] [INFO] AI workers disabled (default) - all workers run local-only. Enable with `daemon start --headless`, daemon.aiWorkers.enabled=true, or RUFLO_DAEMON_AI_WORKERS=1 (#2661)
+[2026-07-23T03:13:08.244Z] [INFO] Scheduled map (interval: 900s, first run in 0s)
+[2026-07-23T03:13:08.244Z] [INFO] Scheduled audit (interval: 600s, first run in 120s)
+[2026-07-23T03:13:08.244Z] [INFO] Scheduled optimize (interval: 900s, first run in 240s)
+[2026-07-23T03:13:08.244Z] [INFO] Scheduled consolidate (interval: 1800s, first run in 360s)
+[2026-07-23T03:13:08.244Z] [INFO] Scheduled testgaps (interval: 1200s, first run in 480s)
+[2026-07-23T03:13:08.244Z] [INFO] Scheduled backup (interval: 86400s, first run in 600s)
+[2026-07-23T03:13:08.244Z] [INFO] Scheduled harness (interval: 21600s, first run in 720s)
+[2026-07-23T03:13:08.244Z] [INFO] Lifecycle monitor active (workspace-removal, ttl=43200s)
+[2026-07-23T03:13:08.245Z] [INFO] Daemon started (PID: 793867, CPUs: 16, workers: 7, maxCpuLoad: 12.8, minFreeMemoryPercent: 10%)
+[2026-07-23T03:13:08.246Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-23T03:13:08.247Z] [INFO] Worker map completed in 1ms
+[2026-07-23T03:15:08.249Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-23T03:15:08.250Z] [INFO] Worker audit completed in 1ms
+[2026-07-23T03:17:08.249Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-23T03:17:08.250Z] [INFO] Worker optimize completed in 1ms
+[2026-07-23T03:19:08.249Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-23T03:19:08.250Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-23T03:19:08.250Z] [INFO] Worker consolidate completed in 1ms
+[2026-07-23T03:21:08.249Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-23T03:21:08.249Z] [INFO] Worker testgaps completed in 1ms
+[2026-07-23T03:23:08.249Z] [INFO] Starting worker: backup (1/2 concurrent)
+[2026-07-23T03:23:08.249Z] [INFO] Worker backup completed in 1ms
+[2026-07-23T03:25:08.248Z] [INFO] Starting worker: harness (1/2 concurrent)
+[2026-07-23T03:25:08.254Z] [INFO] Worker harness completed in 6ms
+[2026-07-23T03:25:08.255Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-23T03:25:08.255Z] [INFO] Worker audit completed in 0ms
+[2026-07-23T03:28:08.252Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-23T03:28:08.252Z] [INFO] Worker map completed in 1ms
+[2026-07-23T03:32:08.254Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-23T03:32:08.255Z] [INFO] Worker optimize completed in 1ms
+[2026-07-23T03:35:08.257Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-23T03:35:08.257Z] [INFO] Worker audit completed in 1ms
+[2026-07-23T03:41:08.253Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-23T03:41:08.253Z] [INFO] Worker testgaps completed in 0ms
+[2026-07-23T03:43:08.256Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-23T03:43:08.256Z] [INFO] Worker map completed in 0ms
+[2026-07-23T03:45:08.262Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-23T03:45:08.262Z] [INFO] Worker audit completed in 1ms
+[2026-07-23T03:47:08.257Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-23T03:47:08.258Z] [INFO] Worker optimize completed in 0ms
+[2026-07-23T03:49:08.254Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-23T03:49:08.254Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-23T03:49:08.255Z] [INFO] Worker consolidate completed in 1ms
+[2026-07-23T03:55:08.265Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-23T03:55:08.265Z] [INFO] Worker audit completed in 0ms
+[2026-07-23T03:58:08.260Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-23T03:58:08.260Z] [INFO] Worker map completed in 1ms
+[2026-07-23T04:01:08.257Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-23T04:01:08.257Z] [INFO] Worker testgaps completed in 1ms
+[2026-07-23T04:02:08.261Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-23T04:02:08.261Z] [INFO] Worker optimize completed in 0ms
+[2026-07-23T04:05:08.270Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-23T04:05:08.270Z] [INFO] Worker audit completed in 1ms
+[2026-07-23T04:13:08.263Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-23T04:13:08.263Z] [INFO] Worker map completed in 0ms
+[2026-07-23T04:15:08.272Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-23T04:15:08.272Z] [INFO] Worker audit completed in 0ms
+[2026-07-23T04:17:08.264Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-23T04:17:08.264Z] [INFO] Worker optimize completed in 1ms
+[2026-07-23T04:19:08.257Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-23T04:19:08.257Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-23T04:19:08.257Z] [INFO] Worker consolidate completed in 1ms
+[2026-07-23T04:21:08.258Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-23T04:21:08.258Z] [INFO] Worker testgaps completed in 1ms
+[2026-07-23T04:25:08.274Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-23T04:25:08.275Z] [INFO] Worker audit completed in 1ms
+[2026-07-23T04:28:08.265Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-23T04:28:08.265Z] [INFO] Worker map completed in 0ms
+[2026-07-23T04:32:08.266Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-23T04:32:08.266Z] [INFO] Worker optimize completed in 1ms
