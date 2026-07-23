@@ -109,3 +109,27 @@ describe('ChatStreamService.stream (new turn)', () => {
     expect(runs.finish).toHaveBeenCalledWith('run-1', expect.objectContaining({ status: 'failed' }));
   });
 });
+
+describe('ChatStreamService.stream (resume)', () => {
+  it('approves, streams the continuation, and marks the approval executed', async () => {
+    const conversations = { ensure: jest.fn(), touch: jest.fn(), getOwned: jest.fn().mockResolvedValue({ id: 'conv-1', resourceId: 'user-1' }) };
+    const runs = { create: jest.fn(), finish: jest.fn() };
+    const approvals = {
+      findById: jest.fn().mockResolvedValue({ id: 'appr-1', status: 'pending', conversationId: 'conv-1', runId: 'run-1', mastraRunId: 'mr-9', toolCallId: 'tc-1' }),
+      decide: jest.fn().mockResolvedValue(undefined),
+    };
+    const agent = { approveToolCall: jest.fn().mockResolvedValue({
+      fullStream: (async function* () { yield { type: 'text-delta', runId: 'mr-9', payload: { text: 'sent!' } }; })(),
+      text: Promise.resolve('sent!'), usage: Promise.resolve({ inputTokens: 1, outputTokens: 1 }), finishReason: Promise.resolve('stop'),
+    }) };
+    const mastra = { getAgent: () => agent };
+    const frames: string[] = [];
+    const svc = new ChatStreamService(conversations as never, runs as never, approvals as never, mastra as never);
+    await svc.stream({ id: 'user-1', role: 'user' }, { conversationId: 'conv-1', resume: { approvalId: 'appr-1', approved: true } } as never, { write: (f: string) => frames.push(f) } as never);
+    expect(agent.approveToolCall).toHaveBeenCalledWith({ runId: 'mr-9', toolCallId: 'tc-1' });
+    expect(frames.join('')).toContain('"delta":"sent!"');
+    expect(approvals.decide).toHaveBeenCalledWith('appr-1', expect.objectContaining({ status: 'executed' }));
+    expect(runs.finish).toHaveBeenCalledWith('run-1', expect.objectContaining({ status: 'succeeded' }));
+    expect(frames.at(-1)).toContain('"status":"succeeded"');
+  });
+});

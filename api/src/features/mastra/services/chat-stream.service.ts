@@ -132,11 +132,60 @@ export class ChatStreamService {
     emit({ type: 'done', status: 'succeeded' });
   }
 
-  // resume(...) is added in Task 9.
-  private async resume(_p: PrincipalRef, _r: { approvalId: string; approved: boolean }, sink: StreamSink): Promise<void> {
-    // replaced in Task 9 — must degrade gracefully (not throw) since SSE headers are already flushed.
+  /**
+   * Resume a suspended stream-path run after a human approves/declines the
+   * pending tool call. Self-contained: emits its own `start` and terminal
+   * `done`, and never throws out to `stream()`'s catch (failures here are
+   * recorded against the approval and reported via `error`+`done:failed`).
+   */
+  private async resume(
+    principal: PrincipalRef,
+    resume: { approvalId: string; approved: boolean },
+    sink: StreamSink,
+  ): Promise<void> {
     const emit = (e: SseEvent) => sink.write(sseFrame(e));
-    emit({ type: 'error', message: 'Resume is not implemented yet' });
-    emit({ type: 'done', status: 'failed' });
+    const appr = await this.approvals.findById(resume.approvalId);
+    if (!appr || appr.status !== 'pending') {
+      emit({ type: 'error', message: 'Approval not found or already resolved' });
+      emit({ type: 'done', status: 'failed' });
+      return;
+    }
+    if (principal.role !== 'admin' && appr.conversationId) {
+      await this.conversations.getOwned(principal, appr.conversationId); // throws 403/404
+    }
+    emit({ type: 'start', conversationId: appr.conversationId as string, runId: appr.runId });
+    try {
+      const agent = this.mastra.getAgent(AGENT_ID);
+      const payload = { runId: appr.mastraRunId as string, toolCallId: appr.toolCallId ?? undefined };
+      const output = resume.approved
+        ? await agent.approveToolCall(payload as never)
+        : await agent.declineToolCall(payload as never);
+      const { suspend, mastraRunId } = await this.pump(output as never, emit);
+
+      if (suspend) {
+        // A second approval surfaced during the continuation — record it and pause again.
+        const next = await this.approvals.create({
+          runId: appr.runId, conversationId: appr.conversationId, mastraRunId,
+          toolCallId: suspend.toolCallId, actionType: actionTypeForTool(suspend.toolName),
+          title: `Approve ${suspend.toolName}`, payload: suspend.args, status: 'pending',
+        } as never);
+        await this.approvals.decide(resume.approvalId, { status: resume.approved ? 'executed' : 'rejected', decidedByUserId: principal.id, decidedAt: new Date() } as never);
+        emit({ type: 'approval-required', approvalId: next.id, toolCallId: suspend.toolCallId, toolName: suspend.toolName, actionType: actionTypeForTool(suspend.toolName), title: `Approve ${suspend.toolName}`, payload: suspend.args });
+        emit({ type: 'done', status: 'awaiting_approval' });
+        return;
+      }
+
+      await this.approvals.decide(resume.approvalId, {
+        status: resume.approved ? 'executed' : 'rejected',
+        decidedByUserId: principal.id,
+        decidedAt: new Date(),
+      } as never);
+      await this.runs.finish(appr.runId, { status: resume.approved ? 'succeeded' : 'cancelled', finishedAt: new Date() } as never);
+      emit({ type: 'done', status: resume.approved ? 'succeeded' : 'cancelled' });
+    } catch (err) {
+      await this.approvals.decide(resume.approvalId, { status: 'failed', decidedByUserId: principal.id, decidedAt: new Date(), result: { error: err instanceof Error ? err.message : String(err) } } as never);
+      emit({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+      emit({ type: 'done', status: 'failed' });
+    }
   }
 }
