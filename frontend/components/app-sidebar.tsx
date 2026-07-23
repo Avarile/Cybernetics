@@ -35,6 +35,13 @@ const data = {
       ),
     },
     {
+      title: "File Management",
+      url: "/dashboard/file-management",
+      icon: (
+        <HugeiconsIcon icon={Folder01Icon} strokeWidth={2} />
+      ),
+    },
+    {
       title: "Lifecycle",
       url: "#",
       icon: (
