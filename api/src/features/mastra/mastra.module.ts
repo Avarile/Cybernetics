@@ -20,6 +20,7 @@ import { ActionLogRepository } from './repositories/action-log.repository';
 import { ConversationMessagesService } from './services/conversation-messages.service';
 import { ConversationService } from './services/conversation.service';
 import { AgentRunnerService } from './services/agent-runner.service';
+import { ChatStreamService } from './services/chat-stream.service';
 import { ApprovalService } from './services/approval.service';
 import { ScheduleService } from './services/schedule.service';
 import { AgentRunProcessor } from './processors/agent-run.processor';
@@ -83,6 +84,7 @@ import { AgentScheduleScheduler } from './schedulers/agent-schedule.scheduler';
     ConversationService,
     ConversationMessagesService,
     AgentRunnerService,
+    ChatStreamService,
     ApprovalService,
     ScheduleService,
     AgentRunProcessor,
