@@ -17,6 +17,7 @@ import { ApprovalController } from './controllers/approval.controller';
 import { ScheduleController } from './controllers/schedule.controller';
 import { MastraRepositoriesModule } from './mastra-repositories.module';
 import { ActionLogRepository } from './repositories/action-log.repository';
+import { ConversationMessagesService } from './services/conversation-messages.service';
 import { ConversationService } from './services/conversation.service';
 import { AgentRunnerService } from './services/agent-runner.service';
 import { ApprovalService } from './services/approval.service';
@@ -80,6 +81,7 @@ import { AgentScheduleScheduler } from './schedulers/agent-schedule.scheduler';
   controllers: [ChatController, ApprovalController, ScheduleController],
   providers: [
     ConversationService,
+    ConversationMessagesService,
     AgentRunnerService,
     ApprovalService,
     ScheduleService,
