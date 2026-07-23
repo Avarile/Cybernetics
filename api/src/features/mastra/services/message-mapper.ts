@@ -1,8 +1,22 @@
 export type ChatMessagePart =
   | { type: 'text'; text: string }
   | { type: 'reasoning'; text: string }
-  | { type: 'tool'; toolCallId: string; toolName: string; state: string; input?: unknown; output?: unknown; errorText?: string }
-  | { type: 'source'; sourceId?: string; title?: string; url?: string; mediaType?: string };
+  | {
+      type: 'tool';
+      toolCallId: string;
+      toolName: string;
+      state: string;
+      input?: unknown;
+      output?: unknown;
+      errorText?: string;
+    }
+  | {
+      type: 'source';
+      sourceId?: string;
+      title?: string;
+      url?: string;
+      mediaType?: string;
+    };
 
 export interface ChatMessageDto {
   id: string;
@@ -23,15 +37,18 @@ interface DbMessageLike {
 export function toChatMessages(dbMessages: DbMessageLike[]): ChatMessageDto[] {
   const out: ChatMessageDto[] = [];
   for (const m of dbMessages) {
-    if (m.role !== 'user' && m.role !== 'assistant' && m.role !== 'system') continue;
+    if (m.role !== 'user' && m.role !== 'assistant' && m.role !== 'system')
+      continue;
     const parts: ChatMessagePart[] = [];
     for (const part of m.content?.parts ?? []) {
       switch (part.type) {
         case 'text':
-          if (typeof part.text === 'string' && part.text.length) parts.push({ type: 'text', text: part.text });
+          if (typeof part.text === 'string' && part.text.length)
+            parts.push({ type: 'text', text: part.text });
           break;
         case 'reasoning': {
-          const text = (part.text as string) ?? (part.reasoning as string) ?? '';
+          const text =
+            (part.text as string) ?? (part.reasoning as string) ?? '';
           if (text) parts.push({ type: 'reasoning', text });
           break;
         }
@@ -65,7 +82,12 @@ export function toChatMessages(dbMessages: DbMessageLike[]): ChatMessageDto[] {
           break; // step-start, file, etc. — ignored in v1
       }
     }
-    out.push({ id: m.id, role: m.role, createdAt: m.createdAt.toISOString(), parts });
+    out.push({
+      id: m.id,
+      role: m.role,
+      createdAt: m.createdAt.toISOString(),
+      parts,
+    });
   }
   return out;
 }

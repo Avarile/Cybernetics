@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import type { Principal } from '../../../common/principal';
@@ -34,7 +42,10 @@ export class ChatController {
 
   @ApiOperation({ summary: 'Get messages for a conversation' })
   @Get('conversations/:id/messages')
-  messages(@CurrentUser() user: Principal, @Param('id', ParseUUIDPipe) id: string) {
+  messages(
+    @CurrentUser() user: Principal,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
     return this.conversationMessages.list(user, id);
   }
 }

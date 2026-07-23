@@ -11,7 +11,10 @@ export class ConversationMessagesService {
     private readonly mastra: MastraService,
   ) {}
 
-  async list(principal: PrincipalRef, conversationId: string): Promise<ChatMessageDto[]> {
+  async list(
+    principal: PrincipalRef,
+    conversationId: string,
+  ): Promise<ChatMessageDto[]> {
     const conv = await this.conversations.getOwned(principal, conversationId);
     const store = this.mastra.getMastra().getStorage();
     const memory = await store?.getStore('memory');
