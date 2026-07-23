@@ -18,6 +18,7 @@ import { ObservabilityModule } from './infrastructure/observability/sentry.modul
 import { QueueModule } from './infrastructure/queue/queue.module';
 import { SearchEngineModule } from './infrastructure/search-engine/search-engine.module';
 import { AuthModule } from './features/auth/auth.module';
+import { DocumentIngestModule } from './features/document-ingest/document-ingest.module';
 import { FileProcessorModule } from './features/file-processor/file-processor.module';
 import { MailboxModule } from './features/mailbox/mailbox.module';
 import { MastraModule } from './features/mastra/mastra.module';
@@ -62,6 +63,7 @@ import { UsersModule } from './features/users/users.module';
     SearchServiceModule,
     SystemModule,
     MailboxModule,
+    DocumentIngestModule,
 
     // Mastra AI — must remain last.
     MastraModule,
