@@ -80,4 +80,32 @@ describe('ChatStreamService.stream (new turn)', () => {
     expect(runs.finish).toHaveBeenCalledWith('run-1', expect.objectContaining({ status: 'awaiting_approval' }));
     expect(s.frames.at(-1)).toContain('"status":"awaiting_approval"');
   });
+
+  it('when conversations.ensure rejects, emits error + done:failed and never calls runs.finish (no run created)', async () => {
+    const { conversations, runs, approvals } = deps();
+    conversations.ensure.mockRejectedValue(new Error('not found'));
+    const agent = { stream: jest.fn() };
+    const mastra = { getAgent: () => agent };
+    const s = sink();
+    const svc = new ChatStreamService(conversations as never, runs as never, approvals as never, mastra as never);
+    await svc.stream({ id: 'user-1', role: 'user' }, { conversationId: 'bad-conv', message: 'hello' } as never, s as never);
+    expect(s.frames.join('')).toContain('"type":"error"');
+    expect(s.frames.join('')).toContain('"message":"not found"');
+    expect(s.frames.at(-1)).toContain('"status":"failed"');
+    expect(runs.finish).not.toHaveBeenCalled();
+    expect(agent.stream).not.toHaveBeenCalled();
+  });
+
+  it('when agent.stream rejects, emits error + done:failed and finishes the already-created run as failed', async () => {
+    const { conversations, runs, approvals } = deps();
+    const agent = { stream: jest.fn().mockRejectedValue(new Error('agent unavailable')) };
+    const mastra = { getAgent: () => agent };
+    const s = sink();
+    const svc = new ChatStreamService(conversations as never, runs as never, approvals as never, mastra as never);
+    await svc.stream({ id: 'user-1', role: 'user' }, { message: 'hello' } as never, s as never);
+    expect(s.frames.join('')).toContain('"type":"error"');
+    expect(s.frames.join('')).toContain('"message":"agent unavailable"');
+    expect(s.frames.at(-1)).toContain('"status":"failed"');
+    expect(runs.finish).toHaveBeenCalledWith('run-1', expect.objectContaining({ status: 'failed' }));
+  });
 });

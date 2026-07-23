@@ -32,24 +32,26 @@ export class ChatStreamService {
   ) {}
 
   async stream(principal: PrincipalRef, input: StreamInput, sink: StreamSink): Promise<void> {
-    if (input.resume) {
-      await this.resume(principal, input.resume, sink);
-      return;
-    }
-    const conv = await this.conversations.ensure(principal, input.conversationId, 'chat');
-    const run = await this.runs.create({
-      conversationId: conv.id,
-      trigger: 'user_message',
-      triggeredByUserId: principal.id,
-      status: 'running',
-      agentId: AGENT_ID,
-      input: { message: input.message },
-      startedAt: new Date(),
-    } as never);
     const emit = (e: SseEvent) => sink.write(sseFrame(e));
-    emit({ type: 'start', conversationId: conv.id, runId: run.id });
+    let run: Awaited<ReturnType<AgentRunRepository['create']>> | undefined;
 
     try {
+      if (input.resume) {
+        await this.resume(principal, input.resume, sink);
+        return;
+      }
+      const conv = await this.conversations.ensure(principal, input.conversationId, 'chat');
+      run = await this.runs.create({
+        conversationId: conv.id,
+        trigger: 'user_message',
+        triggeredByUserId: principal.id,
+        status: 'running',
+        agentId: AGENT_ID,
+        input: { message: input.message },
+        startedAt: new Date(),
+      } as never);
+      emit({ type: 'start', conversationId: conv.id, runId: run.id });
+
       const agent = this.mastra.getAgent(AGENT_ID);
       const output = await agent.stream(input.message as string, {
         memory: { resource: conv.resourceId, thread: { id: conv.id } },
@@ -59,12 +61,15 @@ export class ChatStreamService {
       const { suspend, mastraRunId } = await this.pump(output as never, emit);
       await this.finishTurn(run.id, conv, output as never, suspend, mastraRunId, emit);
     } catch (err) {
-      await this.runs.finish(run.id, {
-        status: 'failed',
-        error: { message: err instanceof Error ? err.message : String(err) },
-        finishedAt: new Date(),
-      } as never);
-      emit({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+      const message = err instanceof Error ? err.message : String(err);
+      if (run) {
+        await this.runs.finish(run.id, {
+          status: 'failed',
+          error: { message },
+          finishedAt: new Date(),
+        } as never);
+      }
+      emit({ type: 'error', message });
       emit({ type: 'done', status: 'failed' });
     }
   }
@@ -128,7 +133,10 @@ export class ChatStreamService {
   }
 
   // resume(...) is added in Task 9.
-  private async resume(_p: PrincipalRef, _r: { approvalId: string; approved: boolean }, _s: StreamSink): Promise<void> {
-    throw new Error('not implemented'); // replaced in Task 9
+  private async resume(_p: PrincipalRef, _r: { approvalId: string; approved: boolean }, sink: StreamSink): Promise<void> {
+    // replaced in Task 9 — must degrade gracefully (not throw) since SSE headers are already flushed.
+    const emit = (e: SseEvent) => sink.write(sseFrame(e));
+    emit({ type: 'error', message: 'Resume is not implemented yet' });
+    emit({ type: 'done', status: 'failed' });
   }
 }
