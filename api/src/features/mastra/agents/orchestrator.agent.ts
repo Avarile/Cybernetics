@@ -7,6 +7,7 @@ import { buildMemory } from '../memory/memory.factory';
 import { buildModel } from '../memory/model.factory';
 import { makeCalculateMetricTool } from '../tools/calculate-metric.tool';
 import { makeDbWriteTool } from '../tools/db-write.tool';
+import { makeSearchDocumentsTool } from '../tools/search-documents.tool';
 import { makeSearchQueryTool } from '../tools/search-query.tool';
 import { makeSendEmailTool } from '../tools/send-email.tool';
 import { ORCHESTRATOR_INSTRUCTIONS } from './prompts';
@@ -27,6 +28,7 @@ export function buildOrchestratorAgent(params: BuildAgentParams): Agent {
     model: (params.modelOverride ?? buildModel(params.cfg)) as never,
     tools: {
       'search-query': makeSearchQueryTool(params.services),
+      'search-documents': makeSearchDocumentsTool(params.services),
       'calculate-metric': makeCalculateMetricTool(params.services),
       'send-email': makeSendEmailTool(params.services),
       'db-write': makeDbWriteTool(params.services),
