@@ -54,4 +54,12 @@ describe('searchQueryExecute', () => {
       expect.objectContaining({ filters: { status: 'live' }, limit: 5 }),
     );
   });
+
+  it('rejects the private "documents" collection and never calls search', async () => {
+    const d = deps();
+    await expect(
+      searchQueryExecute({ collection: 'documents', query: '', topK: 10 }, d),
+    ).rejects.toThrow();
+    expect((d as any).searchRecords.search).not.toHaveBeenCalled();
+  });
 });

@@ -1,6 +1,7 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
 import type { CuratedSearchResult, ToolServices } from '../mastra.types';
+import { DOCUMENTS_COLLECTION } from '../../document-ingest/document-ingest.constants';
 import { readRuntime } from './tool-context';
 
 export const searchQueryInput = z.object({
@@ -27,6 +28,11 @@ export async function searchQueryExecute(
   input: SearchQueryInput,
   deps: Pick<ToolServices, 'searchRecords'>,
 ): Promise<CuratedSearchResult> {
+  if (input.collection === DOCUMENTS_COLLECTION) {
+    throw new Error(
+      'The "documents" collection is private; use the search-documents tool to search uploaded documents.',
+    );
+  }
   const limit = Math.min(input.topK ?? 10, MAX_TOP_K);
   const res = await deps.searchRecords.search(input.collection, {
     q: input.query ?? '',
@@ -50,7 +56,8 @@ export function makeSearchQueryTool(services: ToolServices) {
       'Search a collection and return the top matches with facet counts. Read-only. ' +
       'The `query` is full-text over searchable text fields only — to list or analyze an ENTIRE ' +
       'collection, pass an EMPTY query (""); only pass query text for a keyword lookup, and use ' +
-      '`filters` for exact field matches. Use to gather data before analysis; never request more than 25 results.',
+      '`filters` for exact field matches. Use to gather data before analysis; never request more than 25 results. ' +
+      "The 'documents' collection is not searchable here — use the search-documents tool for uploaded documents.",
     inputSchema: searchQueryInput,
     outputSchema: z.object({
       collection: z.string(),
