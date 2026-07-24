@@ -1,10 +1,19 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 
+// jsdom lacks scrollIntoView; Radix Select's viewport effect calls it when opening.
+if (!Element.prototype.scrollIntoView) Element.prototype.scrollIntoView = () => {}
+
 const { mockUseIsAdmin } = vi.hoisted(() => ({ mockUseIsAdmin: vi.fn(() => true) }))
 vi.mock('@/lib/hooks/use-permission', () => ({ useIsAdmin: mockUseIsAdmin }))
 vi.mock('@/lib/hooks/use-collections', () => ({
-  useCollections: () => ({ collections: [{ name: 'products', displayName: 'Products', fields: [] }], isLoading: false }),
+  useCollections: () => ({
+    collections: [
+      { name: 'products', displayName: 'Products', fields: [] },
+      { name: 'documents', displayName: 'Documents', fields: [] },
+    ],
+    isLoading: false,
+  }),
 }))
 
 import { RecordToolbar } from '@/components/data-management/record-toolbar'
@@ -44,5 +53,20 @@ describe('RecordToolbar', () => {
     const uploadButton = screen.getByRole('button', { name: /upload documents/i })
     fireEvent.click(uploadButton)
     expect(useDataManagementStore.getState().uploadOpen).toBe(true)
+  })
+
+  it('hides the documents collection from the collection select for a non-admin', () => {
+    mockUseIsAdmin.mockReturnValue(false)
+    render(<RecordToolbar fields={fields} />)
+    fireEvent.click(screen.getByRole('combobox'))
+    expect(screen.getByRole('option', { name: 'Products' })).toBeInTheDocument()
+    expect(screen.queryByRole('option', { name: 'Documents' })).not.toBeInTheDocument()
+  })
+
+  it('offers the documents collection in the collection select for an admin', () => {
+    mockUseIsAdmin.mockReturnValue(true)
+    render(<RecordToolbar fields={fields} />)
+    fireEvent.click(screen.getByRole('combobox'))
+    expect(screen.getByRole('option', { name: 'Documents' })).toBeInTheDocument()
   })
 })

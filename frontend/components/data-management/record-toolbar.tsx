@@ -41,7 +41,7 @@ export function RecordToolbar({
         </SelectTrigger>
         <SelectContent>
           <SelectGroup>
-            {collections.map((c) => (
+            {collections.filter((c) => isAdmin || c.name !== 'documents').map((c) => (
               <SelectItem key={c.name} value={c.name}>{c.displayName}</SelectItem>
             ))}
           </SelectGroup>
