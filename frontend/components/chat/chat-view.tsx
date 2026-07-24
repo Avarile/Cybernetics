@@ -31,7 +31,7 @@ export function ChatView() {
       <div className="flex min-h-0 flex-1 flex-col">
         <ChatThread messages={messages} status={status} pendingApproval={pendingApproval} onRespondApproval={respondApproval} />
         <div className="border-t p-3">
-          <ChatComposer status={status} onSend={sendMessage} onStop={stop} />
+          <ChatComposer status={status} onSend={sendMessage} onStop={stop} conversationId={activeConversationId} />
         </div>
       </div>
     </div>
