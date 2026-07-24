@@ -6,10 +6,11 @@ import { Upload01Icon } from '@hugeicons/core-free-icons'
 import { cn } from '@/lib/utils'
 
 export function FileDropzone({
-  onFiles, disabled = false,
+  onFiles, disabled = false, accept,
 }: {
   onFiles: (files: File[]) => void
   disabled?: boolean
+  accept?: string
 }) {
   const inputRef = React.useRef<HTMLInputElement>(null)
   const [dragging, setDragging] = React.useState(false)
@@ -50,6 +51,7 @@ export function FileDropzone({
         data-testid="file-input"
         type="file"
         multiple
+        accept={accept}
         className="hidden"
         disabled={disabled}
         onChange={(e) => { emit(e.target.files); e.target.value = '' }}

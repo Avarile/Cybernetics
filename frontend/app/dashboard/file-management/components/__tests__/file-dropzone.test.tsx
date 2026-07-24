@@ -20,4 +20,9 @@ describe('FileDropzone', () => {
     fireEvent.change(input, { target: { files: [file] } })
     expect(onFiles).toHaveBeenCalledWith([file])
   })
+
+  it('forwards the accept attribute to the file input', () => {
+    render(<FileDropzone onFiles={() => {}} accept=".pdf,.docx" />)
+    expect(screen.getByTestId('file-input')).toHaveAttribute('accept', '.pdf,.docx')
+  })
 })
