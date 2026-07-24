@@ -1,8 +1,15 @@
 import useSWR from 'swr'
 import { recordService } from '@/lib/services/record.service'
-import { useCollection, useRecordQuery } from '@/lib/state-management/data-management.store'
+import { useCollection, useRecordQuery, useDataManagementStore } from '@/lib/state-management/data-management.store'
 import { useCollectionDefinition } from '@/lib/hooks/use-collection-definition'
 import type { SearchResults } from '@/lib/interfaces/search.interface'
+
+const POLL_MS = 4000
+
+/** Poll while inside the post-upload watch window (async ingest → Meili index lag). */
+export function recordsRefreshInterval(watchUntil: number, now: number): number {
+  return now < watchUntil ? POLL_MS : 0
+}
 
 /**
  * Records for the active collection + query. Facets (filterable enum fields) and
@@ -23,7 +30,11 @@ export function useRecords() {
   const { data, isLoading, isValidating, error, mutate } = useSWR<SearchResults>(
     key,
     () => recordService.query(collection as string, query, { facets, highlight }),
-    { keepPreviousData: true },
+    {
+      keepPreviousData: true,
+      refreshInterval: () =>
+        recordsRefreshInterval(useDataManagementStore.getState().watchUntil, Date.now()),
+    },
   )
   return { results: data, isLoading, isValidating, error, mutate }
 }

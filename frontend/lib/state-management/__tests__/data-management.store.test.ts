@@ -7,7 +7,7 @@ beforeEach(() => {
   useDataManagementStore.setState({
     collection: 'products', q: '', page: 1, limit: 20, filters: {}, sort: [],
     selection: {}, columnVisibility: {}, panel: 'closed', detailId: null, deleteTarget: null,
-    collectionPanel: { kind: 'closed' },
+    collectionPanel: { kind: 'closed' }, uploadOpen: false, watchUntil: 0,
   })
 })
 
@@ -83,5 +83,12 @@ describe('data-management store', () => {
     get().openCollections(); expect(get().collectionPanel).toEqual({ kind: 'list' })
     get().openEditCollection('products'); expect(get().collectionPanel).toEqual({ kind: 'edit', name: 'products' })
     get().closeCollectionPanel(); expect(get().collectionPanel).toEqual({ kind: 'closed' })
+  })
+
+  it('opens/closes the upload dialog and starts a watch window', () => {
+    const s = useDataManagementStore.getState()
+    s.openUpload(); expect(useDataManagementStore.getState().uploadOpen).toBe(true)
+    s.closeUpload(); expect(useDataManagementStore.getState().uploadOpen).toBe(false)
+    s.startWatch(); expect(useDataManagementStore.getState().watchUntil).toBeGreaterThan(Date.now())
   })
 })

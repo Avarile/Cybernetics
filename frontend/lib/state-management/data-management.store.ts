@@ -7,6 +7,7 @@ import type { Updater } from '@tanstack/react-table'
 import type { FilterValue, SearchQuery, SortSpec } from '@/lib/interfaces/search.interface'
 
 const DEFAULT_LIMIT = 20
+const WATCH_MS = 20_000
 
 type RowSelection = Record<string, boolean>
 type ColumnVisibility = Record<string, boolean>
@@ -53,6 +54,12 @@ interface DataManagementState {
   openCreateCollection: () => void
   openEditCollection: (name: string) => void
   closeCollectionPanel: () => void
+
+  uploadOpen: boolean
+  openUpload: () => void
+  closeUpload: () => void
+  watchUntil: number
+  startWatch: () => void
 }
 
 const QUERY_DEFAULTS = {
@@ -137,6 +144,12 @@ const creator: StateCreator<
   openCreateCollection: () => set({ collectionPanel: { kind: 'create' } }, false, 'dm/openCreateCollection'),
   openEditCollection: (name) => set({ collectionPanel: { kind: 'edit', name } }, false, 'dm/openEditCollection'),
   closeCollectionPanel: () => set({ collectionPanel: { kind: 'closed' } }, false, 'dm/closeCollectionPanel'),
+
+  uploadOpen: false,
+  openUpload: () => set({ uploadOpen: true }, false, 'dm/openUpload'),
+  closeUpload: () => set({ uploadOpen: false }, false, 'dm/closeUpload'),
+  watchUntil: 0,
+  startWatch: () => set({ watchUntil: Date.now() + WATCH_MS }, false, 'dm/startWatch'),
 })
 
 export const useDataManagementStore = create<DataManagementState>()(
