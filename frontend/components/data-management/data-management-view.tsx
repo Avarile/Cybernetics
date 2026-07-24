@@ -7,6 +7,7 @@ import { RecordInputPanel } from '@/components/data-management/record-input-pane
 import { RecordDetailDrawer } from '@/components/data-management/record-detail-drawer'
 import { RecordDeleteDialog } from '@/components/data-management/record-delete-dialog'
 import { CollectionManagerDialog } from '@/components/data-management/collection-manager-dialog'
+import { DocumentUploadDialog } from '@/components/data-management/document-upload-dialog'
 import { useCollections } from '@/lib/hooks/use-collections'
 import { useCollectionDefinition } from '@/lib/hooks/use-collection-definition'
 import { useRecords } from '@/lib/hooks/use-records'
@@ -66,6 +67,7 @@ export function DataManagementView() {
       )}
 
       <CollectionManagerDialog />
+      <DocumentUploadDialog />
     </div>
   )
 }

@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 import { HugeiconsIcon } from '@hugeicons/react'
-import { Add01Icon, FilterIcon, Delete02Icon, SearchIcon } from '@hugeicons/core-free-icons'
+import { Add01Icon, FilterIcon, Delete02Icon, SearchIcon, Upload01Icon } from '@hugeicons/core-free-icons'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
@@ -28,6 +28,7 @@ export function RecordToolbar({
   const { collections } = useCollections()
   const s = useDataManagementStore()
   const openCollections = useDataManagementStore((state) => state.openCollections)
+  const openUpload = useDataManagementStore((state) => state.openUpload)
   const { reindex } = useRecordMutations()
   const activeFilters = Object.keys(s.filters).length
   const selectedIds = Object.keys(s.selection)
@@ -63,6 +64,10 @@ export function RecordToolbar({
       </Popover>
 
       <div className="ml-auto flex items-center gap-2">
+        <Button variant="outline" size="sm" onClick={openUpload}>
+          <HugeiconsIcon icon={Upload01Icon} strokeWidth={2} />
+          Upload documents
+        </Button>
         {isAdmin && selectedIds.length > 0 && (
           <Button variant="outline" size="sm" onClick={() => s.requestDelete(selectedIds)}>
             <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} />
