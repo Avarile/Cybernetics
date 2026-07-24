@@ -106,4 +106,35 @@ describe('useAgentChat', () => {
       ?.parts.find((p) => p.type === 'text')
     expect((assistantText as { type: 'text'; text: string })?.text).toContain('boom')
   })
+
+  it('settles status to ready when the stream closes with no terminal done event', async () => {
+    streamAgentChat.mockImplementationOnce(emits([
+      { type: 'start', conversationId: 'c1', runId: 'r1' },
+      { type: 'text-delta', delta: 'Hi' },
+      // No 'done' event: simulates an idle-timeout/proxy drop that closes the
+      // stream without a terminal event.
+    ]))
+    const { result } = renderHook(() => useAgentChat({ conversationId: null, initialMessages: [], onConversationId: vi.fn() }))
+    await act(async () => { await result.current.sendMessage('hi') })
+    await waitFor(() => expect(result.current.status).toBe('ready'))
+    expect(result.current.status).toBe('ready')
+  })
+
+  it('blocks sendMessage while an approval is pending, even though status is ready', async () => {
+    streamAgentChat.mockImplementationOnce(emits([
+      { type: 'start', conversationId: 'c1', runId: 'r1' },
+      { type: 'tool-input', toolCallId: 't1', toolName: 'send-email', args: { to: 'x@y.z' } },
+      { type: 'approval-required', approvalId: 'a1', toolCallId: 't1', toolName: 'send-email', actionType: 'send_email', title: 'Approve send-email', payload: {} },
+      { type: 'done', status: 'awaiting_approval' },
+    ]))
+    const { result } = renderHook(() => useAgentChat({ conversationId: 'c1', initialMessages: [], onConversationId: vi.fn() }))
+    await act(async () => { await result.current.sendMessage('email x') })
+    await waitFor(() => expect(result.current.pendingApproval?.approvalId).toBe('a1'))
+    expect(result.current.status).toBe('ready')
+
+    const callsBefore = streamAgentChat.mock.calls.length
+    await act(async () => { await result.current.sendMessage('new message') })
+    expect(streamAgentChat.mock.calls.length).toBe(callsBefore)
+    expect(result.current.pendingApproval?.approvalId).toBe('a1')
+  })
 })

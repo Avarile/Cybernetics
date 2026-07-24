@@ -111,6 +111,12 @@ export function useAgentChat({ conversationId, initialMessages, onConversationId
     setStatus('submitted')
     try {
       await streamAgentChat(body, { onEvent: handleEvent, signal: controller.signal })
+      // Defensive settle: a normal stream ends with a terminal 'done' event that
+      // already set status to 'ready' (a no-op here). But if the stream closes
+      // without one (idle-timeout/proxy drop), status would otherwise stay stuck
+      // at 'streaming' and permanently block sendMessage. Guard on run-identity
+      // so we don't clobber a newer run's status, same as the catch below.
+      if (abortRef.current === controller) setStatus((s) => (s === 'error' ? s : 'ready'))
     } catch (err) {
       if (abortRef.current !== controller) return // superseded by a newer run — ignore
       if ((err as Error).name !== 'AbortError') {
@@ -124,7 +130,10 @@ export function useAgentChat({ conversationId, initialMessages, onConversationId
 
   const sendMessage = useCallback(async (text: string) => {
     const trimmed = text.trim()
-    if (!trimmed || status === 'submitted' || status === 'streaming') return
+    // A pending approval means the backend run is suspended awaiting a resume;
+    // starting a fresh run here would orphan it (left pending forever), so we
+    // block sendMessage even though status has already settled back to 'ready'.
+    if (!trimmed || status === 'submitted' || status === 'streaming' || pendingApproval) return
     seededRef.current = true
     setMessages((m) => [
       ...m,
@@ -132,7 +141,7 @@ export function useAgentChat({ conversationId, initialMessages, onConversationId
       { id: nextId(), role: 'assistant', parts: [] },
     ])
     await run({ conversationId: convRef.current ?? undefined, message: trimmed })
-  }, [run, status])
+  }, [run, status, pendingApproval])
 
   const respondApproval = useCallback(async (approved: boolean) => {
     const appr = pendingApproval
