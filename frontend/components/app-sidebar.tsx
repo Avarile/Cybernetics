@@ -16,10 +16,17 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
 import { HugeiconsIcon } from "@hugeicons/react"
-import { DashboardSquare01Icon, Menu01Icon, ChartHistogramIcon, Folder01Icon, UserGroupIcon, Camera01Icon, File01Icon, Settings05Icon, HelpCircleIcon, SearchIcon, Database01Icon, Analytics01Icon, CommandIcon } from "@hugeicons/core-free-icons"
+import { DashboardSquare01Icon, Menu01Icon, ChartHistogramIcon, Folder01Icon, UserGroupIcon, Camera01Icon, File01Icon, Settings05Icon, HelpCircleIcon, SearchIcon, Database01Icon, Analytics01Icon, CommandIcon, AiChat01Icon } from "@hugeicons/core-free-icons"
 
 const data = {
   navMain: [
+    {
+      title: "Assistant",
+      url: "/dashboard/chat",
+      icon: (
+        <HugeiconsIcon icon={AiChat01Icon} strokeWidth={2} />
+      ),
+    },
     {
       title: "Dashboard",
       url: "/dashboard/dashboard",

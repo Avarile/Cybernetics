@@ -16,4 +16,13 @@ describe('NavMain', () => {
     const link = screen.getByRole('link', { name: /Data Management/i })
     expect(link).toHaveAttribute('href', '/dashboard/data-management')
   })
+
+  it('renders the Assistant entry linking to /dashboard/chat', () => {
+    render(
+      <TooltipProvider><SidebarProvider>
+        <NavMain items={[{ title: 'Assistant', url: '/dashboard/chat' }]} />
+      </SidebarProvider></TooltipProvider>,
+    )
+    expect(screen.getByRole('link', { name: /assistant/i })).toHaveAttribute('href', '/dashboard/chat')
+  })
 })
