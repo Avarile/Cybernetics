@@ -1,12 +1,17 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { ChatComposer } from '@/components/chat/chat-composer'
 
 const addFiles = vi.fn().mockResolvedValue(undefined)
-vi.mock('@/lib/hooks/use-chat-attachments', () => ({
-  useChatAttachments: () => ({ items: [], addFiles, reset: vi.fn(), rejectedCount: 0 }),
+const { mockUseChatAttachments } = vi.hoisted(() => ({
+  mockUseChatAttachments: vi.fn(() => ({ items: [], addFiles: vi.fn(), reset: vi.fn(), rejectedCount: 0 })),
 }))
+vi.mock('@/lib/hooks/use-chat-attachments', () => ({ useChatAttachments: mockUseChatAttachments }))
+
+beforeEach(() => {
+  mockUseChatAttachments.mockReturnValue({ items: [], addFiles, reset: vi.fn(), rejectedCount: 0 })
+})
 
 describe('ChatComposer', () => {
   it('sends the typed text on submit (Enter) and clears the textbox', async () => {
@@ -42,5 +47,11 @@ describe('ChatComposer', () => {
     const { fireEvent } = await import('@testing-library/react')
     fireEvent.change(input, { target: { files: [file] } })
     expect(addFiles).toHaveBeenCalledWith([file])
+  })
+
+  it('shows a rejected-file hint when the attachments hook reports skipped files', () => {
+    mockUseChatAttachments.mockReturnValue({ items: [], addFiles, reset: vi.fn(), rejectedCount: 2 })
+    render(<ChatComposer status="ready" onSend={vi.fn()} />)
+    expect(screen.getByText(/2 unsupported file\(s\) skipped/i)).toBeInTheDocument()
   })
 })

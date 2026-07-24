@@ -18,7 +18,7 @@ interface Props {
 
 export function ChatComposer({ status, onSend, onStop, conversationId = null }: Props) {
   const inputRef = React.useRef<HTMLInputElement>(null)
-  const { items, addFiles, reset } = useChatAttachments(conversationId)
+  const { items, addFiles, reset, rejectedCount } = useChatAttachments(conversationId)
 
   return (
     <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
@@ -26,6 +26,9 @@ export function ChatComposer({ status, onSend, onStop, conversationId = null }: 
         <div className="rounded-md border p-2">
           <FileUploadList items={items} />
         </div>
+      )}
+      {rejectedCount > 0 && (
+        <p className="px-1 text-xs text-muted-foreground">{rejectedCount} unsupported file(s) skipped — only PDF, DOCX, MD, TXT.</p>
       )}
       {/* Rendered before PromptInput so it is the first `input[type=file]` in the DOM —
           PromptInput mounts its own (unused) hidden file input internally. */}
