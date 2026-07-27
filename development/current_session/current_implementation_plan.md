@@ -1,1889 +1,1447 @@
-# Data Control Panel v2 Implementation Plan
+# AI Assistant Backend Foundations — Implementation Plan (Part 1 of 2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Extend the shipped data control panel with a Postgres-backed single-record read (enabling detail/edit/deep-link for any record and honest async-index status), collection/schema management, and query enrichment (facets, highlight, multi-sort, URL-sync).
+**Goal:** Build the four backend gaps the Claude-style AI Assistant UI depends on — a streaming chat endpoint, a conversation-messages endpoint, a document-text-extraction→record pipeline, and an owner-scoped document-search tool — all preserving the existing `agent_run` ledger + HITL approval flow.
 
-**Architecture:** One small backend endpoint (`GET /search/collections/:name/records/:id`, served from Postgres) becomes the correctness backbone: the detail drawer fetches by id (works off-page, always fresh, live `indexState`), and creation opens that PG-backed view instead of guessing with a fixed delay. Everything else is frontend, preserving v1's three-layer state boundary (Zustand / react-hook-form+zod / SWR). Schema management calls collection CRUD endpoints that already exist.
+**Architecture:** All work is in the NestJS API (`api/`). We reuse the existing `orchestrator` Mastra agent, the `agent_conversation`/`agent_run`/`agent_approval` ledger, `FileService` (MinIO), and `SearchRecordService` (Meili). Streaming is done by consuming Mastra's `agent.stream().fullStream` (an async iterable of `AgentChunkType`) and emitting a small **custom SSE protocol** we define here (the installed `@mastra/core@1.50.1` has no public `toUIMessageStreamResponse`, and `ai` is not a backend dependency). Document ingestion runs as a new BullMQ pipeline that extracts text in-process and persists an owner-scoped record into a new `documents` collection — never through the admin-gated `RecordController`.
 
-**Tech Stack:** Backend — NestJS, Drizzle, BullMQ, Jest. Frontend — Next.js 16 (App Router), React, TypeScript, Zustand v5 (+devtools), SWR v2, react-hook-form v7 + `@hookform/resolvers/zod` + Zod v4, `@tanstack/react-table` v8, axios (shared `apiClient`), sonner, shadcn/ui (`components/ui/*`), Hugeicons, Vitest + Testing Library.
+**Tech Stack:** NestJS 11 + TypeScript, Jest (`*.spec.ts` co-located), Drizzle ORM (Postgres), BullMQ (Redis), `@mastra/core@1.50.1` / `@mastra/pg@1.15.1` / `@mastra/memory@1.23.0` / `@mastra/nestjs@0.2.6`, Meilisearch (via `SearchEngine`), `nestjs-zod` (`createZodDto`), new deps `mammoth` + `pdf-parse`.
 
 ## Global Constraints
 
-- **Design source of truth:** `development/current_session/current_design.md`. Do not diverge from its resolved decisions.
-- **No new npm dependencies** on either side. Everything needed is installed.
-- **Backend rules (`api/CLAUDE.md`):** read a file before editing; keep files under 500 lines; validate input at boundaries; NO `Co-Authored-By` trailer on commits. Run `npm run build && npm test` in `api/` before considering a backend task done.
-- **Backend read auth:** reads are global — the new single-record GET is open to any authenticated principal (like `POST query`). Writes stay admin-only.
-- **PG read shape:** the single-record read returns `document` as a **nested object** with system fields as siblings: `{ id, externalId, document, indexState, indexError, createdAt, updatedAt }`. This differs from search hits, which **flatten** document fields to the top level. Never conflate `RecordDetail` (nested) with `RecordHit` (flat).
-- **Frontend path alias:** `@/` → `frontend/` root. All imports use it.
-- **Zustand pattern:** mirror the existing `data-management.store.ts` — `create()(devtools(creator, { name, enabled: process.env.NODE_ENV === 'development' }))`, named action strings as the 3rd arg to `set`, exported selector hooks.
-- **Forms:** react-hook-form + `zodResolver`, shadcn `Field/FieldLabel/FieldError` (mirror `record-form.tsx`). Zod uses positional message strings.
-- **RBAC:** writes (record create/edit/delete/reindex, ALL collection management) are admin-only via `useIsAdmin()` from `lib/hooks/use-permission.ts`. The single-record read is open.
-- **Record identity:** `persist` upserts on `externalId`; create auto-assigns an `externalId` (`crypto.randomUUID()` unless supplied); edit requires an `externalId`; `id` (PG uuid) is used for `getRowId`, delete, and the single-record read (which also accepts an `externalId` as the key).
-- **Frontend tests:** `cd frontend && npx vitest run <path>`; colocated `__tests__/`; jsdom + Testing Library pre-configured.
-- **Backend tests:** `cd api && npx jest <path>`; specs colocate as `*.spec.ts`.
-- **Commit** after each task. Frontend: `feat(data-mgmt): …`. Backend: `feat(search): …`. Conventional messages, no attribution trailer.
+- Keep every file under 500 lines. Read a file before editing it.
+- No global route prefix and no versioning — controllers mount at literal `@Controller(...)` paths (`api/src/main.ts`). All `/agent/*` and `/files/*` routes sit behind the global `JwtAuthGuard`; use `@CurrentUser() user: Principal` for identity.
+- Errors are thrown via the injected `ExceptionService`: `throw this.errors.create(ErrorCode.X, { message?, cause? })`. Never throw a bare `HttpException`.
+- DTOs use `nestjs-zod`: `export class XDto extends createZodDto(zSchema) {}`.
+- Drizzle repositories extend `BaseRepository` and expose `create`/`findById`; feature-specific reads are added on the repo.
+- New npm deps must be CommonJS-compatible (repo pins Meilisearch to CJS; Jest chokes on ESM). `mammoth` and `pdf-parse` are CJS — import `pdf-parse` as `pdf-parse/lib/pdf-parse.js` to avoid its index-file debug harness.
+- Collection field specs may NOT use reserved names `id, externalId, collection, createdAt, updatedAt` (auto-managed); at least one field must be `searchable`; only `string`/`string[]` may be `searchable`.
+- `MastraModule` must remain the last import in `AppModule`; add `DocumentIngestModule` before it.
+
+## SSE contract (produced by Task 8/9; consumed by the Part-2 frontend plan)
+
+`POST /agent/chat/stream` returns `Content-Type: text/event-stream`. Each event is one line `data: <json>\n\n`, where `<json>` is one of:
+
+```
+{ "type": "start",             "conversationId": string, "runId": string }
+{ "type": "text-delta",        "delta": string }
+{ "type": "reasoning-delta",   "delta": string }
+{ "type": "tool-input",        "toolCallId": string, "toolName": string, "args": object }
+{ "type": "tool-output",       "toolCallId": string, "toolName": string, "result": unknown, "isError": boolean }
+{ "type": "approval-required", "approvalId": string, "toolCallId": string, "toolName": string, "actionType": string, "title": string, "payload": object }
+{ "type": "error",             "message": string }
+{ "type": "done",              "status": "succeeded" | "awaiting_approval" | "cancelled" | "failed" }
+```
+
+Request body: `{ conversationId?: string(uuid), message?: string, resume?: { approvalId: string, approved: boolean } }` (exactly one of `message` or `resume` is required).
 
 ---
-
-## Phases
-
-- **Phase 1 — Single-record read + detail/creation redesign** (Tasks 1–4). Ships working detail/edit for any record and honest create status. Independently valuable.
-- **Phase 2 — Schema/collection management** (Tasks 5–9). Admin create/edit/delete collections.
-- **Phase 3 — Query enrichment** (Tasks 10–14). Facets, highlight, multi-sort, URL-sync + deep-link.
-- **Phase 4 — Optional: date-range filter** (Task 15). Only if the filter-builder extension is wanted.
 
 ## File Structure
 
-```
-api/src/features/search-service/
-  search-record.service.ts        (Task 1: +RecordView, +toRecordView, +get())
-  search.controller.ts            (Task 1: +GET records/:id)
-  search-record.service.spec.ts   (Task 1: +get() tests)
+**New feature module — `api/src/features/document-ingest/`** (owns the doc→record pipeline + the `documents` collection):
+- `document-ingest.constants.ts` — queue/job names, `DOCUMENTS_COLLECTION`, ingestable-MIME set + `isIngestableDocMime`, `documentsCollectionFields()`.
+- `document-extraction.service.ts` — `DocumentExtractionService.extract(mime, source)` → `{ title?, text }`.
+- `documents-collection.bootstrap.ts` — `OnApplicationBootstrap`, creates the `documents` collection if absent.
+- `document-ingest.processor.ts` — `@Processor('document-ingest')` consumer: file → extract → persist record.
+- `document-ingest.module.ts` — wires the above; imports `FileProcessorModule` + `SearchServiceModule`.
 
-frontend/
-  lib/interfaces/search.interface.ts    (Task 2: +RecordDetail; Task 5: +Create/UpdateCollectionInput)
-  lib/services/record.service.ts        (Task 2: +get)   (Task 10: query facets/highlight)
-  lib/services/collection.service.ts    (Task 5: +create/update/remove)
-  lib/schema/serialize-query.ts         (Task 10: facets/highlight)
-  lib/schema/validate-field-spec.ts     (Task 6, new)
-  lib/schema/field-spec-to-zod.ts       (Task 6, new)
-  lib/hooks/use-record.ts               (Task 2, new)
-  lib/hooks/use-records.ts              (Task 10: pass fields → facets/highlight)
-  lib/hooks/use-record-mutations.ts     (Task 4: create→PG detail + bounded revalidate)
-  lib/hooks/use-collection-mutations.ts (Task 5, new)
-  lib/hooks/use-query-url-sync.ts       (Task 14, new)
-  lib/state-management/data-management.store.ts  (Task 9: collectionPanel) (Task 13: additive sort)
-  components/data-management/
-    record-status-badge.tsx       (Task 3, new)
-    record-form.tsx               (Task 3: initialDocument/externalId props)
-    record-detail-drawer.tsx      (Task 3: PG-backed via useRecord)
-    data-management-view.tsx      (Task 3: drop results prop; Task 9: manager; Task 11: facets; Task 14: url-sync)
-    field-spec-editor.tsx         (Task 7, new)
-    collection-editor-sheet.tsx   (Task 8, new)
-    collection-manager-dialog.tsx (Task 9, new)
-    record-toolbar.tsx            (Task 9: Manage… + Reindex; Task 11: facetDistribution prop)
-    record-filters.tsx            (Task 11: facet counts)
-    field-to-filter.tsx           (Task 11: counts; Task 15: range)
-    field-cell.tsx                (Task 12: highlight)
-    field-to-column.tsx           (Task 12: pass _formatted)  [in lib/schema/]
-    record-data-table.tsx         (Task 13: multi-sort headers)
+**Modified — `api/src/features/file-processor/`:**
+- `file-processing.processor.ts` — after integrity passes, enqueue an `ingest-document` job for ingestable MIME types.
+- `file-processor.module.ts` — register the `document-ingest` queue so the processor can inject it.
+
+**New/modified — `api/src/features/mastra/`:**
+- `tools/search-documents.tool.ts` (new) — owner-scoped document search tool.
+- `agents/orchestrator.agent.ts` (modify) — register the new tool.
+- `agents/prompts.ts` (modify) — mention the new tool.
+- `services/message-mapper.ts` (new) — pure `toChatMessages(dbMessages)` mapper.
+- `services/conversation-messages.service.ts` (new) — reads Mastra store, maps, ownership-checks.
+- `services/chunk-to-sse.ts` (new) — pure `chunkToSse(chunk)` translator + `sseFrame(event)`.
+- `services/chat-stream.service.ts` (new) — orchestrates streaming (new turn + resume) with ledger + approvals.
+- `dto/chat-stream.dto.ts` (new) — request DTO.
+- `controllers/chat.controller.ts` (modify) — add `GET /agent/conversations/:id/messages` and `POST /agent/chat/stream`.
+- `mastra.module.ts` (modify) — provide `ConversationMessagesService` + `ChatStreamService`.
+
+**Modified — `api/src/app.module.ts`:** import `DocumentIngestModule` (before `MastraModule`).
+
+---
+
+## Task 1: `documents` collection constants + bootstrap
+
+**Files:**
+- Create: `api/src/features/document-ingest/document-ingest.constants.ts`
+- Create: `api/src/features/document-ingest/documents-collection.bootstrap.ts`
+- Test: `api/src/features/document-ingest/documents-collection.bootstrap.spec.ts`
+
+**Interfaces:**
+- Consumes: `CollectionService.create(input)` and `CollectionService.get(name)` (from `search-service`; `SearchServiceModule` exports `CollectionService`). `FieldSpec` from `api/src/infrastructure/database/schema/search.schema.ts`.
+- Produces: `DOCUMENTS_COLLECTION = 'documents'`, `INGEST_DOCUMENT_QUEUE = 'document-ingest'`, `INGEST_DOCUMENT_JOB = 'ingest-document'`, `isIngestableDocMime(mime): boolean`, `documentsCollectionFields(): FieldSpec[]`, class `DocumentsCollectionBootstrap`.
+
+- [ ] **Step 1: Write the constants file**
+
+```ts
+// api/src/features/document-ingest/document-ingest.constants.ts
+import type { FieldSpec } from '../../infrastructure/database/schema/search.schema';
+
+export const DOCUMENTS_COLLECTION = 'documents';
+export const INGEST_DOCUMENT_QUEUE = 'document-ingest';
+export const INGEST_DOCUMENT_JOB = 'ingest-document';
+
+export const PDF_MIME = 'application/pdf';
+export const DOCX_MIME =
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+export const MARKDOWN_MIME = 'text/markdown';
+export const PLAIN_TEXT_MIME = 'text/plain';
+
+const INGESTABLE = new Set<string>([PDF_MIME, DOCX_MIME, MARKDOWN_MIME, PLAIN_TEXT_MIME]);
+
+/** True when an uploaded file's MIME should be extracted into a text record. */
+export function isIngestableDocMime(mime: string): boolean {
+  return INGESTABLE.has(mime);
+}
+
+/**
+ * Field spec for the `documents` collection. `createdAt`/`updatedAt`/`externalId`
+ * are auto-managed by the search-service, so they are intentionally omitted.
+ * Scoping is by `ownerUserId`; `conversationId` is stored for provenance/future use.
+ */
+export function documentsCollectionFields(): FieldSpec[] {
+  return [
+    { name: 'title', type: 'string', searchable: true },
+    { name: 'text', type: 'string', searchable: true },
+    { name: 'fileId', type: 'string', filterable: true },
+    { name: 'mimeType', type: 'string', filterable: true },
+    { name: 'ownerUserId', type: 'string', filterable: true },
+    { name: 'conversationId', type: 'string', filterable: true },
+  ];
+}
+```
+
+- [ ] **Step 2: Write the failing bootstrap test**
+
+```ts
+// api/src/features/document-ingest/documents-collection.bootstrap.spec.ts
+import { DocumentsCollectionBootstrap } from './documents-collection.bootstrap';
+import { DOCUMENTS_COLLECTION } from './document-ingest.constants';
+
+describe('DocumentsCollectionBootstrap', () => {
+  const makeCollections = (existing: boolean) => ({
+    get: jest.fn().mockImplementation(async (name: string) => {
+      if (existing) return { name };
+      throw new Error('not found');
+    }),
+    create: jest.fn().mockResolvedValue({ name: DOCUMENTS_COLLECTION }),
+  });
+
+  it('creates the documents collection when it does not exist', async () => {
+    const collections = makeCollections(false);
+    const boot = new DocumentsCollectionBootstrap(collections as never);
+    await boot.onApplicationBootstrap();
+    expect(collections.create).toHaveBeenCalledTimes(1);
+    expect(collections.create.mock.calls[0][0].name).toBe(DOCUMENTS_COLLECTION);
+  });
+
+  it('does not create the collection when it already exists', async () => {
+    const collections = makeCollections(true);
+    const boot = new DocumentsCollectionBootstrap(collections as never);
+    await boot.onApplicationBootstrap();
+    expect(collections.create).not.toHaveBeenCalled();
+  });
+});
+```
+
+- [ ] **Step 3: Run the test to verify it fails**
+
+Run: `cd api && npx jest src/features/document-ingest/documents-collection.bootstrap.spec.ts`
+Expected: FAIL — `Cannot find module './documents-collection.bootstrap'`.
+
+- [ ] **Step 4: Write the bootstrap**
+
+```ts
+// api/src/features/document-ingest/documents-collection.bootstrap.ts
+import { Injectable, Logger, type OnApplicationBootstrap } from '@nestjs/common';
+import { CollectionService } from '../search-service/collection.service';
+import { DOCUMENTS_COLLECTION, documentsCollectionFields } from './document-ingest.constants';
+
+/** Idempotently ensures the `documents` collection exists at app start. */
+@Injectable()
+export class DocumentsCollectionBootstrap implements OnApplicationBootstrap {
+  private readonly logger = new Logger(DocumentsCollectionBootstrap.name);
+
+  constructor(private readonly collections: CollectionService) {}
+
+  async onApplicationBootstrap(): Promise<void> {
+    try {
+      await this.collections.get(DOCUMENTS_COLLECTION);
+      return; // already exists
+    } catch {
+      // fall through to create
+    }
+    try {
+      await this.collections.create({
+        name: DOCUMENTS_COLLECTION,
+        displayName: 'Documents',
+        description: 'Extracted text from uploaded documents, searchable by the agent.',
+        fields: documentsCollectionFields(),
+      });
+      this.logger.log(`Created "${DOCUMENTS_COLLECTION}" collection`);
+    } catch (error) {
+      this.logger.warn(
+        `Could not ensure "${DOCUMENTS_COLLECTION}" collection: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+}
+```
+
+- [ ] **Step 5: Run the test to verify it passes**
+
+Run: `cd api && npx jest src/features/document-ingest/documents-collection.bootstrap.spec.ts`
+Expected: PASS (2 tests).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add api/src/features/document-ingest/
+git commit -m "feat(document-ingest): documents collection constants + boot-time bootstrap"
 ```
 
 ---
 
-# Phase 1 — Single-record read + detail/creation redesign
-
-## Task 1: Backend — single-record read endpoint
+## Task 2: Document text extraction service
 
 **Files:**
-- Modify: `api/src/features/search-service/search-record.service.ts`
-- Modify: `api/src/features/search-service/search.controller.ts`
-- Test: `api/src/features/search-service/search-record.service.spec.ts`
+- Create: `api/src/features/document-ingest/document-extraction.service.ts`
+- Test: `api/src/features/document-ingest/document-extraction.service.spec.ts`
+- Modify: `api/package.json` (add `mammoth`, `pdf-parse`, `@types/pdf-parse`)
 
 **Interfaces:**
-- Produces (REST): `GET /search/collections/:name/records/:id` → `200 { id, externalId, document, indexState, indexError, createdAt, updatedAt }`, `404 SEARCH_RECORD_NOT_FOUND`.
-- Produces (service): `SearchRecordService.get(collection: string, key: string): Promise<RecordView>` and exported `interface RecordView`.
+- Consumes: `mammoth.extractRawText({ buffer })`, `pdf-parse/lib/pdf-parse.js` default export `(buffer) => Promise<{ text: string }>`; MIME constants from Task 1; `ExceptionService`.
+- Produces: `DocumentExtractionService.extract(mimeType: string, source: Readable | Buffer): Promise<{ title?: string; text: string }>`; helper `streamToBuffer(src): Promise<Buffer>`.
 
-- [ ] **Step 1: Write the failing tests** — append to `search-record.service.spec.ts`:
+- [ ] **Step 1: Add dependencies**
+
+Run: `cd api && pnpm add mammoth pdf-parse && pnpm add -D @types/pdf-parse`
+Expected: dependencies added; `pnpm install` succeeds.
+
+- [ ] **Step 2: Write the failing test**
 
 ```ts
-describe('SearchRecordService.get', () => {
-  it('404s on an unknown collection', async () => {
-    const { service } = make();
-    await expect(service.get('nope', 'rec-1')).rejects.toMatchObject({
-      code: ErrorCode.SEARCH_COLLECTION_NOT_FOUND,
-    });
+// api/src/features/document-ingest/document-extraction.service.spec.ts
+import { DocumentExtractionService } from './document-extraction.service';
+import { DOCX_MIME, MARKDOWN_MIME, PDF_MIME, PLAIN_TEXT_MIME } from './document-ingest.constants';
+
+jest.mock('mammoth', () => ({
+  extractRawText: jest.fn().mockResolvedValue({ value: 'DOCX TEXT' }),
+}));
+jest.mock('pdf-parse/lib/pdf-parse.js', () =>
+  jest.fn().mockResolvedValue({ text: 'PDF TEXT' }),
+);
+
+describe('DocumentExtractionService', () => {
+  const errors = { create: (_c: unknown, o?: { message?: string }) => new Error(o?.message ?? 'err') };
+  const svc = new DocumentExtractionService(errors as never);
+
+  it('extracts plain text and markdown verbatim from a buffer', async () => {
+    const md = await svc.extract(MARKDOWN_MIME, Buffer.from('# Title\nbody'));
+    expect(md.text).toContain('body');
+    const txt = await svc.extract(PLAIN_TEXT_MIME, Buffer.from('hello world'));
+    expect(txt.text).toBe('hello world');
   });
 
-  it('resolves a UUID key via findLiveById', async () => {
-    const uuid = '11111111-1111-1111-1111-111111111111';
-    const { service, records } = make({
-      findLiveById: jest.fn(async () => ({
-        id: uuid, collection: 'articles', externalId: 'ext-1',
-        document: { title: 'Hi' }, indexState: 'INDEXED', indexError: null,
-        createdAt: new Date('2020-01-01'), updatedAt: new Date('2020-01-02'),
-      })),
-    });
-    const view = await service.get('articles', uuid);
-    expect(records.findLiveById).toHaveBeenCalledWith(uuid);
-    expect(view).toMatchObject({ id: uuid, externalId: 'ext-1', document: { title: 'Hi' }, indexState: 'INDEXED' });
+  it('extracts docx via mammoth and pdf via pdf-parse', async () => {
+    expect((await svc.extract(DOCX_MIME, Buffer.from('x'))).text).toBe('DOCX TEXT');
+    expect((await svc.extract(PDF_MIME, Buffer.from('x'))).text).toBe('PDF TEXT');
   });
 
-  it('resolves a non-UUID key via findLiveByExternalId', async () => {
-    const { service, records } = make({
-      findLiveByExternalId: jest.fn(async () => ({
-        id: 'rec-9', collection: 'articles', externalId: 'ext-9',
-        document: {}, indexState: 'PENDING', indexError: null,
-        createdAt: new Date(), updatedAt: new Date(),
-      })),
-    });
-    const view = await service.get('articles', 'ext-9');
-    expect(records.findLiveByExternalId).toHaveBeenCalledWith('articles', 'ext-9');
-    expect(view.indexState).toBe('PENDING');
+  it('throws on an unsupported MIME type', async () => {
+    await expect(svc.extract('image/png', Buffer.from('x'))).rejects.toBeInstanceOf(Error);
   });
+});
+```
 
-  it('404s when the row belongs to another collection', async () => {
-    const { service } = make({
-      findLiveByExternalId: jest.fn(async () => ({ id: 'r', collection: 'other', externalId: 'e', document: {} })),
-    });
-    await expect(service.get('articles', 'e')).rejects.toMatchObject({
-      code: ErrorCode.SEARCH_RECORD_NOT_FOUND,
+- [ ] **Step 3: Run the test to verify it fails**
+
+Run: `cd api && npx jest src/features/document-ingest/document-extraction.service.spec.ts`
+Expected: FAIL — `Cannot find module './document-extraction.service'`.
+
+- [ ] **Step 4: Write the extraction service**
+
+```ts
+// api/src/features/document-ingest/document-extraction.service.ts
+import { Injectable } from '@nestjs/common';
+import type { Readable } from 'node:stream';
+import * as mammoth from 'mammoth';
+import pdfParse from 'pdf-parse/lib/pdf-parse.js';
+import { ExceptionService } from '../../common/exceptions/exception.service';
+import { ErrorCode } from '../../common/exceptions/error-code.enum';
+import {
+  DOCX_MIME,
+  MARKDOWN_MIME,
+  PDF_MIME,
+  PLAIN_TEXT_MIME,
+  isIngestableDocMime,
+} from './document-ingest.constants';
+
+export interface ExtractedDocument {
+  title?: string;
+  text: string;
+}
+
+@Injectable()
+export class DocumentExtractionService {
+  constructor(private readonly errors: ExceptionService) {}
+
+  async extract(mimeType: string, source: Readable | Buffer): Promise<ExtractedDocument> {
+    if (!isIngestableDocMime(mimeType)) {
+      throw this.errors.create(ErrorCode.FILE_INVALID_STATE, {
+        message: `Unsupported document MIME "${mimeType}"`,
+      });
+    }
+    const buffer = Buffer.isBuffer(source) ? source : await streamToBuffer(source);
+    switch (mimeType) {
+      case PDF_MIME: {
+        const parsed = await pdfParse(buffer);
+        return { text: parsed.text.trim() };
+      }
+      case DOCX_MIME: {
+        const { value } = await mammoth.extractRawText({ buffer });
+        return { text: value.trim() };
+      }
+      case MARKDOWN_MIME:
+      case PLAIN_TEXT_MIME:
+      default:
+        return { text: buffer.toString('utf8').trim() };
+    }
+  }
+}
+
+export async function streamToBuffer(src: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of src) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks);
+}
+```
+
+Note: confirm `ExceptionService`/`ErrorCode` import paths against a sibling feature (e.g. `grep -rn "exception" api/src/features/file-processor/file.service.ts`) and use the nearest existing `ErrorCode` (e.g. `FILE_INVALID_STATE`) — do not invent a new one.
+
+- [ ] **Step 5: Run the test to verify it passes**
+
+Run: `cd api && npx jest src/features/document-ingest/document-extraction.service.spec.ts`
+Expected: PASS (3 tests).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add api/src/features/document-ingest/document-extraction.service.ts api/src/features/document-ingest/document-extraction.service.spec.ts api/package.json api/pnpm-lock.yaml
+git commit -m "feat(document-ingest): text extraction for pdf/docx/markdown/plain-text"
+```
+
+---
+
+## Task 3: Ingest processor + module
+
+**Files:**
+- Create: `api/src/features/document-ingest/document-ingest.processor.ts`
+- Create: `api/src/features/document-ingest/document-ingest.module.ts`
+- Test: `api/src/features/document-ingest/document-ingest.processor.spec.ts`
+- Modify: `api/src/app.module.ts`
+
+**Interfaces:**
+- Consumes: `FileService.getMetadata(fileId, owner)` + `FileService.getContentStream(fileId, owner): Promise<Readable>` (exported by `FileProcessorModule`); `DocumentExtractionService.extract`; `SearchRecordService.persist(collection, RecordInput[])` (exported by `SearchServiceModule`); `SYSTEM_PRINCIPAL` from `api/src/common/principal`.
+- Produces: `DocumentIngestProcessor` (`@Processor('document-ingest')`, job `'ingest-document'`, data `{ fileId: string }`); `DocumentIngestModule`.
+
+- [ ] **Step 1: Write the failing processor test**
+
+```ts
+// api/src/features/document-ingest/document-ingest.processor.spec.ts
+import { DocumentIngestProcessor } from './document-ingest.processor';
+import { DOCUMENTS_COLLECTION, INGEST_DOCUMENT_JOB } from './document-ingest.constants';
+
+describe('DocumentIngestProcessor', () => {
+  const fileRow = {
+    id: 'file-1',
+    ownerId: 'user-1',
+    mimeType: 'text/markdown',
+    originalFilename: 'notes.md',
+    metadata: { conversationId: 'conv-9' },
+  };
+  const files = {
+    getMetadata: jest.fn().mockResolvedValue(fileRow),
+    getContentStream: jest.fn().mockResolvedValue(Buffer.from('# Notes\nbody')),
+  };
+  const extraction = { extract: jest.fn().mockResolvedValue({ text: 'body', title: 'Notes' }) };
+  const records = { persist: jest.fn().mockResolvedValue([{ id: 'rec-1', externalId: 'file-1' }]) };
+  const proc = new DocumentIngestProcessor(files as never, extraction as never, records as never);
+
+  it('reads the file, extracts text, and persists a scoped record', async () => {
+    await proc.process({ name: INGEST_DOCUMENT_JOB, data: { fileId: 'file-1' } } as never);
+    expect(files.getContentStream).toHaveBeenCalledWith('file-1', expect.anything());
+    expect(extraction.extract).toHaveBeenCalledWith('text/markdown', expect.anything());
+    const [collection, inputs] = records.persist.mock.calls[0];
+    expect(collection).toBe(DOCUMENTS_COLLECTION);
+    expect(inputs[0].externalId).toBe('file-1');
+    expect(inputs[0].document).toMatchObject({
+      fileId: 'file-1',
+      ownerUserId: 'user-1',
+      conversationId: 'conv-9',
+      mimeType: 'text/markdown',
+      text: 'body',
     });
   });
 });
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cd api && npx jest src/features/search-service/search-record.service.spec.ts -t "SearchRecordService.get"`
-Expected: FAIL — `service.get is not a function`.
+Run: `cd api && npx jest src/features/document-ingest/document-ingest.processor.spec.ts`
+Expected: FAIL — `Cannot find module './document-ingest.processor'`.
 
-- [ ] **Step 3: Add `RecordView`, `toRecordView`, and `get()` to `search-record.service.ts`**
-
-Add the interface near `PersistResult`:
+- [ ] **Step 3: Write the processor**
 
 ```ts
-export interface RecordView {
-  id: string;
-  externalId: string | null;
-  document: Record<string, unknown>;
-  indexState: IndexState;
-  indexError: string | null;
-  createdAt: Date;
-  updatedAt: Date;
+// api/src/features/document-ingest/document-ingest.processor.ts
+import { Processor, WorkerHost } from '@nestjs/bullmq';
+import { Logger } from '@nestjs/common';
+import type { Job } from 'bullmq';
+import { SYSTEM_PRINCIPAL } from '../../common/principal';
+import { FileService } from '../file-processor/file.service';
+import { SearchRecordService } from '../search-service/search-record.service';
+import { DocumentExtractionService } from './document-extraction.service';
+import {
+  DOCUMENTS_COLLECTION,
+  INGEST_DOCUMENT_JOB,
+  INGEST_DOCUMENT_QUEUE,
+} from './document-ingest.constants';
+
+@Processor(INGEST_DOCUMENT_QUEUE)
+export class DocumentIngestProcessor extends WorkerHost {
+  private readonly logger = new Logger(DocumentIngestProcessor.name);
+
+  constructor(
+    private readonly files: FileService,
+    private readonly extraction: DocumentExtractionService,
+    private readonly records: SearchRecordService,
+  ) {
+    super();
+  }
+
+  async process(job: Job): Promise<void> {
+    if (job.name !== INGEST_DOCUMENT_JOB) return;
+    const { fileId } = job.data as { fileId: string };
+    // Read/extract as the file owner so ownership checks pass; fall back to system.
+    const meta = await this.files.getMetadata(fileId, SYSTEM_PRINCIPAL);
+    const owner = { id: meta.ownerId ?? null, role: 'agent' as const };
+    const stream = await this.files.getContentStream(fileId, owner);
+    const { text, title } = await this.extraction.extract(meta.mimeType, stream);
+    const conversationId =
+      typeof meta.metadata?.conversationId === 'string' ? meta.metadata.conversationId : undefined;
+
+    await this.records.persist(DOCUMENTS_COLLECTION, [
+      {
+        externalId: fileId, // idempotent upsert per file
+        document: {
+          title: title ?? meta.originalFilename,
+          text,
+          fileId,
+          mimeType: meta.mimeType,
+          ownerUserId: meta.ownerId ?? '',
+          ...(conversationId ? { conversationId } : {}),
+        },
+      },
+    ]);
+    this.logger.log(`Ingested file ${fileId} into "${DOCUMENTS_COLLECTION}"`);
+  }
 }
 ```
 
-Add the method inside the class (e.g. after `remove`):
+Note: verify `FileService.getMetadata`'s return (`FileMetadata` via `toFileMetadata`) exposes `ownerId`, `mimeType`, `originalFilename`, `metadata`; adjust reads if a field name differs. Confirm `SYSTEM_PRINCIPAL` is exported from `api/src/common/principal`.
+
+- [ ] **Step 4: Run the test to verify it passes**
+
+Run: `cd api && npx jest src/features/document-ingest/document-ingest.processor.spec.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Write the module and register it in AppModule**
 
 ```ts
-  /** Read one record from Postgres (source of truth). Resolves by id or externalId. */
-  async get(collection: string, key: string): Promise<RecordView> {
-    await this.requireCollection(collection);
-    let row = UUID_RE.test(key) ? await this.records.findLiveById(key) : null;
-    if (!row) row = await this.records.findLiveByExternalId(collection, key);
-    if (!row || row.collection !== collection) {
-      throw this.errors.create(ErrorCode.SEARCH_RECORD_NOT_FOUND);
-    }
-    return toRecordView(row);
-  }
+// api/src/features/document-ingest/document-ingest.module.ts
+import { BullModule } from '@nestjs/bullmq';
+import { Module } from '@nestjs/common';
+import { FileProcessorModule } from '../file-processor/file-processor.module';
+import { SearchServiceModule } from '../search-service/search-service.module';
+import { DocumentExtractionService } from './document-extraction.service';
+import { DocumentIngestProcessor } from './document-ingest.processor';
+import { DocumentsCollectionBootstrap } from './documents-collection.bootstrap';
+import { INGEST_DOCUMENT_QUEUE } from './document-ingest.constants';
+
+@Module({
+  imports: [
+    FileProcessorModule,
+    SearchServiceModule,
+    BullModule.registerQueue({ name: INGEST_DOCUMENT_QUEUE }),
+  ],
+  providers: [DocumentExtractionService, DocumentIngestProcessor, DocumentsCollectionBootstrap],
+})
+export class DocumentIngestModule {}
 ```
 
-Add the mapper at the bottom of the file (next to `toFilterClause`):
+Then add `DocumentIngestModule` to `AppModule`'s `imports` array (read `api/src/app.module.ts` first) — placed **before** `MastraModule` (which must stay last).
+
+- [ ] **Step 6: Run the build**
+
+Run: `cd api && pnpm build`
+Expected: build succeeds.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add api/src/features/document-ingest/ api/src/app.module.ts
+git commit -m "feat(document-ingest): ingest processor + module wiring"
+```
+
+---
+
+## Task 4: Auto-enqueue ingestion after file processing
+
+**Files:**
+- Modify: `api/src/features/file-processor/file-processing.processor.ts`
+- Modify: `api/src/features/file-processor/file-processor.module.ts`
+- Test: `api/src/features/file-processor/file-processing.processor.spec.ts` (extend existing)
+
+**Interfaces:**
+- Consumes: `isIngestableDocMime`, `INGEST_DOCUMENT_QUEUE`, `INGEST_DOCUMENT_JOB` (Task 1); `@InjectQueue(INGEST_DOCUMENT_QUEUE)`.
+- Produces: after `processFile` leaves a file `AVAILABLE` and integrity passes, an `ingest-document` job `{ fileId }` is enqueued for ingestable MIME types.
+
+- [ ] **Step 1: Write the failing test**
 
 ```ts
-/** Map a DB row to the API record view. */
-function toRecordView(row: {
-  id: string;
-  externalId: string | null;
-  document: Record<string, unknown>;
-  indexState: IndexState;
-  indexError: string | null;
-  createdAt: Date;
-  updatedAt: Date;
-}): RecordView {
+// add to api/src/features/file-processor/file-processing.processor.spec.ts
+it('enqueues an ingest-document job for an ingestable document that passes integrity', async () => {
+  const repo = {
+    findById: jest.fn().mockResolvedValue({
+      id: 'f1', status: 'AVAILABLE', objectKey: 'k', mimeType: 'text/markdown', checksumSha256: null, metadata: {},
+    }),
+    markStatus: jest.fn().mockResolvedValue({}),
+  };
+  const storage = { getObjectStream: jest.fn().mockResolvedValue(Buffer.from('hello')) };
+  const ingestQueue = { add: jest.fn().mockResolvedValue(undefined) };
+  const config = { getOrThrow: () => ({ pendingTtlSeconds: 3600 }) };
+  const proc = new FileProcessingProcessor(repo as never, storage as never, config as never, ingestQueue as never);
+  await proc.process({ name: 'process-file', data: { fileId: 'f1' } } as never);
+  expect(ingestQueue.add).toHaveBeenCalledWith('ingest-document', { fileId: 'f1' }, expect.any(Object));
+});
+```
+
+(Match the existing spec's fakes — if `getObjectStream` there yields an async iterable, mirror that shape here.)
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cd api && npx jest src/features/file-processor/file-processing.processor.spec.ts -t "enqueues an ingest-document"`
+Expected: FAIL — constructor arity / `ingestQueue.add` not called.
+
+- [ ] **Step 3: Add the queue dependency and enqueue call**
+
+Read `file-processing.processor.ts`, then add the injected queue and enqueue at the end of `processFile` (after the file is confirmed `AVAILABLE`):
+
+```ts
+// imports
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+import {
+  INGEST_DOCUMENT_JOB,
+  INGEST_DOCUMENT_QUEUE,
+  isIngestableDocMime,
+} from '../../document-ingest/document-ingest.constants';
+
+// constructor — add:
+//   @InjectQueue(INGEST_DOCUMENT_QUEUE) private readonly ingestQueue: Queue,
+
+// end of processFile(), after the checksum-backfill block:
+    if (!row.checksumSha256) {
+      await this.repo.markStatus(fileId, 'AVAILABLE', { checksumSha256: digest });
+    }
+    if (isIngestableDocMime(row.mimeType)) {
+      await this.ingestQueue.add(
+        INGEST_DOCUMENT_JOB,
+        { fileId },
+        { removeOnComplete: true, removeOnFail: 100, attempts: 3, backoff: { type: 'exponential', delay: 1000 } },
+      );
+    }
+```
+
+In `file-processor.module.ts`, add `BullModule.registerQueue({ name: INGEST_DOCUMENT_QUEUE })` to `imports` (import the constant from `../document-ingest/document-ingest.constants`; this is a leaf constants import — no module cycle).
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cd api && npx jest src/features/file-processor/file-processing.processor.spec.ts`
+Expected: PASS (existing + new test).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add api/src/features/file-processor/
+git commit -m "feat(file-processor): enqueue document ingestion for ingestable uploads"
+```
+
+---
+
+## Task 5: `search-documents` agent tool (owner-scoped)
+
+**Files:**
+- Create: `api/src/features/mastra/tools/search-documents.tool.ts`
+- Modify: `api/src/features/mastra/agents/orchestrator.agent.ts`
+- Modify: `api/src/features/mastra/agents/prompts.ts`
+- Test: `api/src/features/mastra/tools/search-documents.tool.spec.ts`
+
+**Interfaces:**
+- Consumes: `ToolServices` (has `searchRecords: Pick<SearchRecordService,'search'>`); `readRuntime(context)` from `tools/tool-context.ts` (returns `{ principal:{id}, conversationId, runId }`); `createTool` from `@mastra/core/tools`; `DOCUMENTS_COLLECTION` (Task 1); `CuratedSearchResult`/`ToolServices`/`ToolRuntime` from `../mastra.types`.
+- Produces: `searchDocumentsExecute(input, deps, rt)` (pure) and `makeSearchDocumentsTool(services)` (Mastra wrapper), tool id `'search-documents'`.
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// api/src/features/mastra/tools/search-documents.tool.spec.ts
+import { searchDocumentsExecute } from './search-documents.tool';
+import { DOCUMENTS_COLLECTION } from '../../document-ingest/document-ingest.constants';
+
+describe('searchDocumentsExecute', () => {
+  it('scopes the search to the caller and the documents collection', async () => {
+    const search = jest.fn().mockResolvedValue({ totalHits: 1, hits: [{ title: 'a' }], facetDistribution: undefined });
+    const res = await searchDocumentsExecute(
+      { query: 'invoice', topK: 5 },
+      { searchRecords: { search } },
+      { principal: { id: 'user-1' }, conversationId: 'c1', runId: 'r1' },
+    );
+    const [collection, req] = search.mock.calls[0];
+    expect(collection).toBe(DOCUMENTS_COLLECTION);
+    expect(req.filters).toEqual({ ownerUserId: 'user-1' });
+    expect(req.q).toBe('invoice');
+    expect(res.totalHits).toBe(1);
+  });
+
+  it('returns an empty result when there is no principal id', async () => {
+    const search = jest.fn();
+    const res = await searchDocumentsExecute(
+      { query: '', topK: 5 },
+      { searchRecords: { search } },
+      { principal: { id: null }, conversationId: null, runId: null },
+    );
+    expect(search).not.toHaveBeenCalled();
+    expect(res.totalHits).toBe(0);
+    expect(res.hits).toEqual([]);
+  });
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cd api && npx jest src/features/mastra/tools/search-documents.tool.spec.ts`
+Expected: FAIL — `Cannot find module './search-documents.tool'`.
+
+- [ ] **Step 3: Write the tool**
+
+```ts
+// api/src/features/mastra/tools/search-documents.tool.ts
+import { createTool } from '@mastra/core/tools';
+import { z } from 'zod';
+import { DOCUMENTS_COLLECTION } from '../../document-ingest/document-ingest.constants';
+import type { CuratedSearchResult, ToolRuntime, ToolServices } from '../mastra.types';
+import { readRuntime } from './tool-context';
+
+export const searchDocumentsInput = z.object({
+  query: z
+    .string()
+    .default('')
+    .describe('Full-text query over uploaded documents. Pass "" to list the user\'s documents.'),
+  topK: z.number().int().positive().max(25).default(10),
+});
+export type SearchDocumentsInput = z.infer<typeof searchDocumentsInput>;
+
+const MAX_TOP_K = 25;
+const EMPTY: CuratedSearchResult = { collection: DOCUMENTS_COLLECTION, totalHits: 0, hits: [] };
+
+/** Pure logic — unit tested. Scopes to the caller's own documents. */
+export async function searchDocumentsExecute(
+  input: SearchDocumentsInput,
+  deps: Pick<ToolServices, 'searchRecords'>,
+  rt: ToolRuntime,
+): Promise<CuratedSearchResult> {
+  if (!rt.principal.id) return EMPTY;
+  const limit = Math.min(input.topK ?? 10, MAX_TOP_K);
+  const res = await deps.searchRecords.search(DOCUMENTS_COLLECTION, {
+    q: input.query ?? '',
+    page: 1,
+    limit,
+    filters: { ownerUserId: rt.principal.id },
+  });
   return {
-    id: row.id,
-    externalId: row.externalId,
-    document: row.document,
-    indexState: row.indexState,
-    indexError: row.indexError,
-    createdAt: row.createdAt,
-    updatedAt: row.updatedAt,
+    collection: DOCUMENTS_COLLECTION,
+    totalHits: res.totalHits,
+    hits: res.hits.slice(0, limit),
+    facets: res.facetDistribution,
   };
 }
+
+/** Mastra wrapper — not unit tested (imports @mastra). */
+export function makeSearchDocumentsTool(services: ToolServices) {
+  return createTool({
+    id: 'search-documents',
+    description:
+      'Search the current user\'s uploaded documents (PDF/DOCX/Markdown) by full text and return the ' +
+      'top matches. Read-only, automatically scoped to the current user. Pass an EMPTY query to list ' +
+      'their documents. Use this to ground answers in files the user has attached or uploaded.',
+    inputSchema: searchDocumentsInput,
+    outputSchema: z.object({
+      collection: z.string(),
+      totalHits: z.number(),
+      hits: z.array(z.record(z.string(), z.unknown())),
+      facets: z.record(z.string(), z.record(z.string(), z.number())).optional(),
+    }),
+    execute: async (input: SearchDocumentsInput, context: unknown) =>
+      searchDocumentsExecute(input, services, readRuntime(context)),
+  });
+}
 ```
 
-- [ ] **Step 4: Add the route to `search.controller.ts`**
+- [ ] **Step 4: Register the tool + update instructions**
 
-Add `Get` to the `@nestjs/common` import, then add the method to `SearchQueryController` (open — no `@Roles`):
-
+In `orchestrator.agent.ts`, import `makeSearchDocumentsTool` and add to the `tools` map:
 ```ts
-  @Get('records/:id')
-  getRecord(@Param('name') name: string, @Param('id') id: string) {
-    return this.records.get(name, id);
-  }
+'search-documents': makeSearchDocumentsTool(params.services),
+```
+In `prompts.ts`, extend the first rule to name the new read tool:
+```
+- ALWAYS gather facts with the read tools (search-query, search-documents, calculate-metric) before analysis. Use search-documents to consult the user's uploaded files (PDF/DOCX/Markdown). Never invent data.
 ```
 
-- [ ] **Step 5: Run tests + build to verify pass**
+- [ ] **Step 5: Run the test + build to verify they pass**
 
-Run: `cd api && npx jest src/features/search-service/search-record.service.spec.ts && npm run build`
-Expected: PASS (all get() tests) and a clean build.
+Run: `cd api && npx jest src/features/mastra/tools/search-documents.tool.spec.ts && pnpm build`
+Expected: PASS + build succeeds.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add api/src/features/search-service/search-record.service.ts api/src/features/search-service/search.controller.ts api/src/features/search-service/search-record.service.spec.ts
-git commit -m "feat(search): single-record read from Postgres (GET records/:id)"
+git add api/src/features/mastra/tools/search-documents.tool.ts api/src/features/mastra/tools/search-documents.tool.spec.ts api/src/features/mastra/agents/
+git commit -m "feat(mastra): owner-scoped search-documents tool + agent wiring"
 ```
 
 ---
 
-## Task 2: Frontend — RecordDetail type, service.get, useRecord hook
+## Task 6: Conversation messages endpoint (history rehydration)
 
 **Files:**
-- Modify: `frontend/lib/interfaces/search.interface.ts`
-- Modify: `frontend/lib/services/record.service.ts`
-- Create: `frontend/lib/hooks/use-record.ts`
-- Test: `frontend/lib/services/__tests__/record.service.test.ts` (extend)
-- Test: `frontend/lib/hooks/__tests__/use-record.test.tsx`
+- Create: `api/src/features/mastra/services/message-mapper.ts`
+- Create: `api/src/features/mastra/services/conversation-messages.service.ts`
+- Modify: `api/src/features/mastra/controllers/chat.controller.ts`
+- Modify: `api/src/features/mastra/mastra.module.ts` (provide `ConversationMessagesService`)
+- Test: `api/src/features/mastra/services/message-mapper.spec.ts`
 
 **Interfaces:**
-- Consumes: `apiClient`, `IndexState`, `RecordDocument`.
-- Produces: `RecordDetail`; `recordService.get(collection, id): Promise<RecordDetail>`; `useRecord(collection, id): { record?, isLoading, error, mutate }` (polls while `indexState==='PENDING'`).
+- Consumes: `ConversationService.getOwned(principal, id)` → row with `id` + `resourceId`; `MastraService.getMastra().getStorage()?.getStore('memory')` → `{ listMessages({ threadId, resourceId }): Promise<{ messages: MastraDBMessage[] }> }`.
+- Produces: `ChatMessageDto` type + pure `toChatMessages(dbMessages): ChatMessageDto[]`; `ConversationMessagesService.list(principal, conversationId): Promise<ChatMessageDto[]>`; route `GET /agent/conversations/:id/messages`.
 
-- [ ] **Step 1: Add `RecordDetail` to `search.interface.ts`** (after `PersistResult`):
+- [ ] **Step 1: Write the failing mapper test**
 
 ```ts
-/** GET /search/collections/:name/records/:id — Postgres read (document nested). */
-export interface RecordDetail {
-  id: string
-  externalId: string | null
-  document: RecordDocument
-  indexState: IndexState
-  indexError?: string | null
-  createdAt: string
-  updatedAt: string
+// api/src/features/mastra/services/message-mapper.spec.ts
+import { toChatMessages } from './message-mapper';
+
+describe('toChatMessages', () => {
+  it('maps text, reasoning and tool-invocation parts, dropping step-start', () => {
+    const db = [
+      { id: 'm1', role: 'user', createdAt: new Date('2026-01-01'), content: { format: 2, parts: [{ type: 'text', text: 'hi' }] } },
+      { id: 'm2', role: 'assistant', createdAt: new Date('2026-01-02'), content: { format: 2, parts: [
+        { type: 'step-start' },
+        { type: 'reasoning', text: 'thinking' },
+        { type: 'tool-invocation', toolInvocation: { state: 'result', toolName: 'search-documents', toolCallId: 't1', args: { query: 'x' }, result: { totalHits: 0 } } },
+        { type: 'text', text: 'done' },
+      ] } },
+    ];
+    const out = toChatMessages(db as never);
+    expect(out[0]).toMatchObject({ id: 'm1', role: 'user', parts: [{ type: 'text', text: 'hi' }] });
+    expect(out[1].parts.map((p) => p.type)).toEqual(['reasoning', 'tool', 'text']);
+    const tool = out[1].parts.find((p) => p.type === 'tool') as Record<string, unknown>;
+    expect(tool).toMatchObject({ toolName: 'search-documents', toolCallId: 't1', state: 'result' });
+    expect(typeof out[1].createdAt).toBe('string');
+  });
+
+  it('ignores signal-role messages', () => {
+    const db = [{ id: 's', role: 'signal', createdAt: new Date(), content: { format: 2, parts: [] } }];
+    expect(toChatMessages(db as never)).toEqual([]);
+  });
+});
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cd api && npx jest src/features/mastra/services/message-mapper.spec.ts`
+Expected: FAIL — `Cannot find module './message-mapper'`.
+
+- [ ] **Step 3: Write the mapper**
+
+```ts
+// api/src/features/mastra/services/message-mapper.ts
+export type ChatMessagePart =
+  | { type: 'text'; text: string }
+  | { type: 'reasoning'; text: string }
+  | { type: 'tool'; toolCallId: string; toolName: string; state: string; input?: unknown; output?: unknown; errorText?: string }
+  | { type: 'source'; sourceId?: string; title?: string; url?: string; mediaType?: string };
+
+export interface ChatMessageDto {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  createdAt: string;
+  parts: ChatMessagePart[];
+}
+
+/** Minimal structural view of a Mastra stored message (see @mastra/core message-list types). */
+interface DbMessageLike {
+  id: string;
+  role: string;
+  createdAt: Date;
+  content?: { parts?: Array<Record<string, unknown> & { type: string }> };
+}
+
+/** Pure mapper: Mastra stored messages → the frontend chat DTO. */
+export function toChatMessages(dbMessages: DbMessageLike[]): ChatMessageDto[] {
+  const out: ChatMessageDto[] = [];
+  for (const m of dbMessages) {
+    if (m.role !== 'user' && m.role !== 'assistant' && m.role !== 'system') continue;
+    const parts: ChatMessagePart[] = [];
+    for (const part of m.content?.parts ?? []) {
+      switch (part.type) {
+        case 'text':
+          if (typeof part.text === 'string' && part.text.length) parts.push({ type: 'text', text: part.text });
+          break;
+        case 'reasoning': {
+          const text = (part.text as string) ?? (part.reasoning as string) ?? '';
+          if (text) parts.push({ type: 'reasoning', text });
+          break;
+        }
+        case 'tool-invocation': {
+          const ti = part.toolInvocation as Record<string, unknown>;
+          if (ti) {
+            parts.push({
+              type: 'tool',
+              toolCallId: String(ti.toolCallId ?? ''),
+              toolName: String(ti.toolName ?? ''),
+              state: String(ti.state ?? ''),
+              input: ti.args,
+              output: ti.result,
+              errorText: ti.errorText as string | undefined,
+            });
+          }
+          break;
+        }
+        case 'source':
+        case 'source-url':
+        case 'source-document':
+          parts.push({
+            type: 'source',
+            sourceId: part.sourceId as string | undefined,
+            title: part.title as string | undefined,
+            url: part.url as string | undefined,
+            mediaType: part.mediaType as string | undefined,
+          });
+          break;
+        default:
+          break; // step-start, file, etc. — ignored in v1
+      }
+    }
+    out.push({ id: m.id, role: m.role, createdAt: m.createdAt.toISOString(), parts });
+  }
+  return out;
 }
 ```
 
-- [ ] **Step 2: Add `get` to `record.service.ts`** (inside `recordService`); add `RecordDetail` to the type import at the top:
+- [ ] **Step 4: Run the mapper test to verify it passes**
+
+Run: `cd api && npx jest src/features/mastra/services/message-mapper.spec.ts`
+Expected: PASS (2 tests).
+
+- [ ] **Step 5: Write the service**
 
 ```ts
-  get(collection: string, id: string): Promise<RecordDetail> {
-    return apiClient
-      .get<RecordDetail>(`${base(collection)}/records/${encodeURIComponent(id)}`)
-      .then((r) => r.data)
-  },
-```
+// api/src/features/mastra/services/conversation-messages.service.ts
+import { Injectable } from '@nestjs/common';
+import { MastraService } from '@mastra/nestjs';
+import type { PrincipalRef } from '../mastra.types';
+import { ConversationService } from './conversation.service';
+import { toChatMessages, type ChatMessageDto } from './message-mapper';
 
-- [ ] **Step 3: Extend the service test** — append to `record.service.test.ts`:
+@Injectable()
+export class ConversationMessagesService {
+  constructor(
+    private readonly conversations: ConversationService,
+    private readonly mastra: MastraService,
+  ) {}
 
-```ts
-it('get fetches a single record by id', async () => {
-  vi.mocked(apiClient.get).mockResolvedValue({ data: { id: 'abc', document: {} } })
-  await recordService.get('products', 'abc')
-  expect(apiClient.get).toHaveBeenCalledWith('/search/collections/products/records/abc')
-})
-```
-
-- [ ] **Step 4: Write the failing hook test** — `frontend/lib/hooks/__tests__/use-record.test.tsx`:
-
-```tsx
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
-import { SWRConfig } from 'swr'
-import React from 'react'
-import { useRecord } from '@/lib/hooks/use-record'
-
-vi.mock('@/lib/services/record.service', () => ({ recordService: { get: vi.fn() } }))
-import { recordService } from '@/lib/services/record.service'
-
-function Probe({ id }: { id: string | null }) {
-  const { record, isLoading } = useRecord('products', id)
-  if (isLoading) return <span>loading</span>
-  return <span>{record ? record.indexState : 'none'}</span>
-}
-const wrap = (ui: React.ReactNode) => (
-  <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>{ui}</SWRConfig>
-)
-
-beforeEach(() => vi.clearAllMocks())
-
-describe('useRecord', () => {
-  it('does not fetch when id is null', () => {
-    render(wrap(<Probe id={null} />))
-    expect(recordService.get).not.toHaveBeenCalled()
-    expect(screen.getByText('none')).toBeInTheDocument()
-  })
-  it('fetches and returns the record', async () => {
-    vi.mocked(recordService.get).mockResolvedValue({ id: 'abc', externalId: null, document: {}, indexState: 'INDEXED', createdAt: '', updatedAt: '' })
-    render(wrap(<Probe id="abc" />))
-    await waitFor(() => expect(screen.getByText('INDEXED')).toBeInTheDocument())
-    expect(recordService.get).toHaveBeenCalledWith('products', 'abc')
-  })
-})
-```
-
-- [ ] **Step 5: Run to verify it fails**
-
-Run: `cd frontend && npx vitest run lib/hooks/__tests__/use-record.test.tsx`
-Expected: FAIL — cannot resolve `@/lib/hooks/use-record`.
-
-- [ ] **Step 6: Implement `use-record.ts`**
-
-```ts
-import useSWR from 'swr'
-import { recordService } from '@/lib/services/record.service'
-import type { RecordDetail } from '@/lib/interfaces/search.interface'
-
-/**
- * One record read from Postgres (source of truth). POST-independent, so it uses
- * an explicit fetcher. Polls only while the record is still indexing, then stops.
- */
-export function useRecord(collection: string | null, id: string | null) {
-  const key = collection && id ? (['record', collection, id] as const) : null
-  const { data, isLoading, error, mutate } = useSWR<RecordDetail>(
-    key,
-    () => recordService.get(collection as string, id as string),
-    { refreshInterval: (d?: RecordDetail) => (d?.indexState === 'PENDING' ? 1500 : 0) },
-  )
-  return { record: data, isLoading, error, mutate }
+  async list(principal: PrincipalRef, conversationId: string): Promise<ChatMessageDto[]> {
+    const conv = await this.conversations.getOwned(principal, conversationId);
+    const store = this.mastra.getMastra().getStorage();
+    const memory = await store?.getStore('memory');
+    if (!memory) return [];
+    const { messages } = await memory.listMessages({
+      threadId: conv.id,
+      resourceId: conv.resourceId,
+    });
+    return toChatMessages(messages);
+  }
 }
 ```
 
-- [ ] **Step 7: Run tests to verify they pass**
+Note: `getStorage()`/`getStore('memory')`/`listMessages` are the confirmed access path (`@mastra/core` `MastraCompositeStore` + `@mastra/pg` `MemoryPG`). If TS complains about `getStore`'s domain typing, cast the memory store to `{ listMessages(a: { threadId: string; resourceId?: string }): Promise<{ messages: unknown[] }> }`.
 
-Run: `cd frontend && npx vitest run lib/hooks/__tests__/use-record.test.tsx lib/services/__tests__/record.service.test.ts`
-Expected: PASS.
+- [ ] **Step 6: Add the route + provider**
+
+In `chat.controller.ts`, inject `ConversationMessagesService` and add (import `Param`, `ParseUUIDPipe` from `@nestjs/common`):
+```ts
+@ApiOperation({ summary: 'Get messages for a conversation' })
+@Get('conversations/:id/messages')
+messages(@CurrentUser() user: Principal, @Param('id', ParseUUIDPipe) id: string) {
+  return this.messages.list(user, id);
+}
+```
+Add `private readonly messages: ConversationMessagesService` to the constructor; add `ConversationMessagesService` to `mastra.module.ts` `providers`.
+
+- [ ] **Step 7: Build to verify wiring**
+
+Run: `cd api && pnpm build`
+Expected: build succeeds.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add frontend/lib/interfaces/search.interface.ts frontend/lib/services/record.service.ts frontend/lib/hooks/use-record.ts frontend/lib/hooks/__tests__/use-record.test.tsx frontend/lib/services/__tests__/record.service.test.ts
-git commit -m "feat(data-mgmt): RecordDetail type, record read service + useRecord hook"
+git add api/src/features/mastra/services/message-mapper.ts api/src/features/mastra/services/message-mapper.spec.ts api/src/features/mastra/services/conversation-messages.service.ts api/src/features/mastra/controllers/chat.controller.ts api/src/features/mastra/mastra.module.ts
+git commit -m "feat(mastra): GET /agent/conversations/:id/messages history endpoint"
 ```
 
 ---
 
-## Task 3: Status badge + PG-backed detail drawer + form refactor
+## Task 7: Chunk → SSE translator (pure)
 
 **Files:**
-- Create: `frontend/components/data-management/record-status-badge.tsx`
-- Modify: `frontend/components/data-management/record-form.tsx`
-- Modify: `frontend/components/data-management/record-detail-drawer.tsx`
-- Modify: `frontend/components/data-management/data-management-view.tsx`
-- Test: `frontend/components/data-management/__tests__/record-status-badge.test.tsx`
-- Test: update `frontend/components/data-management/__tests__/record-form.test.tsx`
+- Create: `api/src/features/mastra/services/chunk-to-sse.ts`
+- Test: `api/src/features/mastra/services/chunk-to-sse.spec.ts`
 
 **Interfaces:**
-- Consumes: `useRecord` (Task 2), `RecordDetail`, `useIsAdmin`.
-- Produces: `RecordStatusBadge({ state, error? })`; `RecordForm` now takes `initialDocument?: RecordDocument` + `externalId?: string` instead of `record?: RecordHit`.
-
-- [ ] **Step 1: Write the failing badge test** — `record-status-badge.test.tsx`:
-
-```tsx
-import { describe, it, expect } from 'vitest'
-import { render, screen } from '@testing-library/react'
-import { RecordStatusBadge } from '@/components/data-management/record-status-badge'
-
-describe('RecordStatusBadge', () => {
-  it('shows Indexing for PENDING', () => { render(<RecordStatusBadge state="PENDING" />); expect(screen.getByText('Indexing')).toBeInTheDocument() })
-  it('shows Indexed for INDEXED', () => { render(<RecordStatusBadge state="INDEXED" />); expect(screen.getByText('Indexed')).toBeInTheDocument() })
-  it('shows Failed for FAILED', () => { render(<RecordStatusBadge state="FAILED" />); expect(screen.getByText('Failed')).toBeInTheDocument() })
-})
-```
-
-- [ ] **Step 2: Run to verify it fails**
-
-Run: `cd frontend && npx vitest run components/data-management/__tests__/record-status-badge.test.tsx`
-Expected: FAIL — cannot resolve the module.
-
-- [ ] **Step 3: Implement `record-status-badge.tsx`**
-
-```tsx
-import { Badge } from '@/components/ui/badge'
-import type { IndexState } from '@/lib/interfaces/search.interface'
-
-const MAP: Record<IndexState, { label: string; variant: 'secondary' | 'outline' | 'destructive' }> = {
-  PENDING: { label: 'Indexing', variant: 'secondary' },
-  INDEXED: { label: 'Indexed', variant: 'outline' },
-  FAILED: { label: 'Failed', variant: 'destructive' },
-}
-
-export function RecordStatusBadge({ state, error }: { state: IndexState; error?: string | null }) {
-  const { label, variant } = MAP[state]
-  return <Badge variant={variant} title={error ?? undefined}>{label}</Badge>
-}
-```
-
-- [ ] **Step 4: Refactor `record-form.tsx` to nested-document props**
-
-Replace the `record?: RecordHit` prop with `initialDocument` + `externalId`. Remove `SYSTEM_KEYS` and `documentOf`; replace `defaultValuesFor` and the signature:
-
-```tsx
-function defaultValuesFor(fields: FieldSpec[], doc: RecordDocument = {}): RecordDocument {
-  const out: RecordDocument = {}
-  for (const f of fields) out[f.name] = f.name in doc ? doc[f.name] : emptyValueFor(f)
-  return out
-}
-```
-
-```tsx
-export function RecordForm({
-  fields, collection, mode, initialDocument, externalId: externalIdProp, onDone,
-}: {
-  fields: FieldSpec[]
-  collection: string
-  mode: 'create' | 'edit'
-  initialDocument?: RecordDocument
-  externalId?: string
-  onDone: () => void
-}) {
-  const { create } = useRecordMutations()
-  const [externalId] = React.useState<string>(() => externalIdProp ?? genId())
-  const schema = React.useMemo(
-    () => buildRecordSchema(fields) as unknown as ZodType<Record<string, unknown>, Record<string, unknown>>,
-    [fields],
-  )
-  const form = useForm<Record<string, unknown>>({
-    resolver: zodResolver(schema),
-    defaultValues: defaultValuesFor(fields, initialDocument),
-  })
-  // …attachmentsField, onSubmit, and the returned JSX are unchanged…
-}
-```
-
-Update the top import to drop `RecordHit` if now unused (keep `RecordDocument`, `FieldSpec`). Keep `emptyValueFor` and `genId` as-is.
-
-- [ ] **Step 5: Rewrite `record-detail-drawer.tsx` to fetch by id**
-
-```tsx
-'use client'
-
-import {
-  Drawer, DrawerContent, DrawerDescription, DrawerHeader, DrawerTitle,
-} from '@/components/ui/drawer'
-import { Skeleton } from '@/components/ui/skeleton'
-import { Empty, EmptyHeader, EmptyTitle, EmptyDescription } from '@/components/ui/empty'
-import { RecordForm } from '@/components/data-management/record-form'
-import { FieldCell } from '@/components/data-management/field-cell'
-import { RecordStatusBadge } from '@/components/data-management/record-status-badge'
-import { useIsAdmin } from '@/lib/hooks/use-permission'
-import { useRecord } from '@/lib/hooks/use-record'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
-
-export function RecordDetailDrawer({ fields, collection }: { fields: FieldSpec[]; collection: string }) {
-  const isAdmin = useIsAdmin()
-  const detailId = useDataManagementStore((s) => s.detailId)
-  const closeDetail = useDataManagementStore((s) => s.closeDetail)
-  const { record, isLoading, error } = useRecord(collection, detailId)
-  const editable = isAdmin && !!record?.externalId
-
-  return (
-    <Drawer open={detailId !== null} onOpenChange={(o) => { if (!o) closeDetail() }} direction="right">
-      <DrawerContent>
-        <DrawerHeader>
-          <DrawerTitle className="flex items-center gap-2">
-            {editable ? 'Edit record' : 'Record details'}
-            {record && <RecordStatusBadge state={record.indexState} error={record.indexError} />}
-          </DrawerTitle>
-          <DrawerDescription>
-            {record?.externalId
-              ? `External ID: ${record.externalId}`
-              : record ? 'This record has no external ID and is read-only.' : ''}
-          </DrawerDescription>
-        </DrawerHeader>
-        <div className="overflow-y-auto px-4 pb-6">
-          {isLoading ? (
-            <div className="flex flex-col gap-3">{Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-8 w-full" />)}</div>
-          ) : error || !record ? (
-            <Empty>
-              <EmptyHeader>
-                <EmptyTitle>Record not found</EmptyTitle>
-                <EmptyDescription>It may have been deleted.</EmptyDescription>
-              </EmptyHeader>
-            </Empty>
-          ) : editable ? (
-            <RecordForm
-              fields={fields}
-              collection={collection}
-              mode="edit"
-              initialDocument={record.document}
-              externalId={record.externalId ?? undefined}
-              onDone={closeDetail}
-            />
-          ) : (
-            <dl className="flex flex-col gap-3">
-              {fields.map((f) => (
-                <div key={f.name} className="flex flex-col gap-1">
-                  <dt className="text-sm font-medium text-muted-foreground">{f.name}</dt>
-                  <dd><FieldCell field={f} value={record.document[f.name]} /></dd>
-                </div>
-              ))}
-            </dl>
-          )}
-        </div>
-      </DrawerContent>
-    </Drawer>
-  )
-}
-```
-
-- [ ] **Step 6: Update `data-management-view.tsx`** — stop passing `results` to the drawer:
-
-```tsx
-<RecordDetailDrawer fields={fields} collection={collection} />
-```
-
-- [ ] **Step 7: Update the record-form test** — in `record-form.test.tsx`, replace any `record={…}` usage with `initialDocument`/`externalId`. Add:
-
-```tsx
-it('seeds edit values from initialDocument', () => {
-  render(
-    <RecordForm
-      fields={[{ name: 'title', type: 'string', required: true }]}
-      collection="c" mode="edit" initialDocument={{ title: 'Seeded' }} externalId="ext-1" onDone={() => {}}
-    />,
-  )
-  expect((screen.getByLabelText(/title/) as HTMLInputElement).value).toBe('Seeded')
-})
-```
-
-- [ ] **Step 8: Run the affected tests**
-
-Run: `cd frontend && npx vitest run components/data-management/__tests__/record-status-badge.test.tsx components/data-management/__tests__/record-form.test.tsx`
-Expected: PASS.
-
-- [ ] **Step 9: Commit**
-
-```bash
-git add frontend/components/data-management/record-status-badge.tsx frontend/components/data-management/record-form.tsx frontend/components/data-management/record-detail-drawer.tsx frontend/components/data-management/data-management-view.tsx frontend/components/data-management/__tests__/record-status-badge.test.tsx frontend/components/data-management/__tests__/record-form.test.tsx
-git commit -m "feat(data-mgmt): PG-backed detail drawer with live index status"
-```
-
----
-
-## Task 4: Creation flow redesign (View → PG detail + bounded revalidate)
-
-**Files:**
-- Modify: `frontend/lib/hooks/use-record-mutations.ts`
-- Test: `frontend/lib/hooks/__tests__/use-record-mutations.test.tsx`
-
-**Interfaces:**
-- Consumes: `recordService.persist`, `useRecords().mutate`, store `openDetail`.
-- Produces: `create` opens the new record's PG detail via a toast **View** action and revalidates the list on a bounded schedule (no fixed-delay-as-correctness). `update`, `remove`, `reindex` unchanged in contract.
-
-- [ ] **Step 1: Rewrite `use-record-mutations.ts`**
-
-```ts
-'use client'
-import { useCallback } from 'react'
-import { toast } from 'sonner'
-import { recordService } from '@/lib/services/record.service'
-import { useCollection, useDataManagementStore } from '@/lib/state-management/data-management.store'
-import { useRecords } from '@/lib/hooks/use-records'
-import type { PersistRecordInput, SearchResults } from '@/lib/interfaces/search.interface'
-
-const REVALIDATE_DELAYS_MS = [900, 2500] // bounded catch-up while Meili indexes
-
-export function useRecordMutations() {
-  const collection = useCollection()
-  const openDetail = useDataManagementStore((s) => s.openDetail)
-  const { mutate } = useRecords()
-
-  const revalidateSoon = useCallback(() => {
-    for (const d of REVALIDATE_DELAYS_MS) setTimeout(() => void mutate(), d)
-  }, [mutate])
-
-  const create = useCallback(
-    async (input: PersistRecordInput) => {
-      if (!collection) throw new Error('No collection selected')
-      const [res] = await recordService.persist(collection, [input])
-      if (res) {
-        toast.success('Record queued for indexing', {
-          description: 'View it now to watch indexing complete.',
-          action: { label: 'View', onClick: () => openDetail(res.id) },
-        })
-      }
-      revalidateSoon()
-      return res
-    },
-    [collection, openDetail, revalidateSoon],
-  )
-
-  const remove = useCallback(
-    async (ids: string[]) => {
-      if (!collection) throw new Error('No collection selected')
-      await Promise.all(ids.map((id) => recordService.remove(collection, id)))
-      toast.success(`${ids.length} record(s) deleted`)
-      await mutate(
-        (prev?: SearchResults) =>
-          prev
-            ? { ...prev, hits: prev.hits.filter((h) => !ids.includes(h.id)), totalHits: Math.max(0, prev.totalHits - ids.length) }
-            : prev,
-        { revalidate: false },
-      )
-      revalidateSoon()
-    },
-    [collection, mutate, revalidateSoon],
-  )
-
-  const reindex = useCallback(async () => {
-    if (!collection) return
-    await recordService.reload(collection)
-    toast.info('Reindex started')
-    revalidateSoon()
-  }, [collection, revalidateSoon])
-
-  return { create, update: create, remove, reindex }
-}
-```
-
-(`useDataManagementStore` is already exported from the store module alongside `useCollection`.)
-
-- [ ] **Step 2: Write the test** — `use-record-mutations.test.tsx`:
-
-```tsx
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderHook, act } from '@testing-library/react'
-
-vi.mock('@/lib/services/record.service', () => ({ recordService: { persist: vi.fn(), remove: vi.fn(), reload: vi.fn() } }))
-const mutate = vi.fn()
-vi.mock('@/lib/hooks/use-records', () => ({ useRecords: () => ({ mutate }) }))
-const openDetail = vi.fn()
-vi.mock('@/lib/state-management/data-management.store', () => ({
-  useCollection: () => 'products',
-  useDataManagementStore: (sel: (s: unknown) => unknown) => sel({ openDetail }),
-}))
-vi.mock('sonner', () => ({ toast: { success: vi.fn(), info: vi.fn() } }))
-
-import { recordService } from '@/lib/services/record.service'
-import { toast } from 'sonner'
-import { useRecordMutations } from '@/lib/hooks/use-record-mutations'
-
-beforeEach(() => vi.clearAllMocks())
-
-describe('useRecordMutations.create', () => {
-  it('persists then wires a View action to the new record id', async () => {
-    vi.mocked(recordService.persist).mockResolvedValue([{ id: 'new-1', externalId: 'e', indexState: 'PENDING' }])
-    const { result } = renderHook(() => useRecordMutations())
-    await act(async () => { await result.current.create({ externalId: 'e', document: { a: 1 } }) })
-    expect(recordService.persist).toHaveBeenCalledWith('products', [{ externalId: 'e', document: { a: 1 } }])
-    const opts = vi.mocked(toast.success).mock.calls[0][1] as { action: { onClick: () => void } }
-    opts.action.onClick()
-    expect(openDetail).toHaveBeenCalledWith('new-1')
-  })
-})
-```
-
-- [ ] **Step 3: Run to verify it passes**
-
-Run: `cd frontend && npx vitest run lib/hooks/__tests__/use-record-mutations.test.tsx`
-Expected: PASS.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add frontend/lib/hooks/use-record-mutations.ts frontend/lib/hooks/__tests__/use-record-mutations.test.tsx
-git commit -m "feat(data-mgmt): creation opens PG-backed detail; bounded revalidation"
-```
-
----
-
-# Phase 2 — Schema / collection management
-
-## Task 5: Collection mutations service + hook
-
-**Files:**
-- Modify: `frontend/lib/interfaces/search.interface.ts`
-- Modify: `frontend/lib/services/collection.service.ts`
-- Create: `frontend/lib/hooks/use-collection-mutations.ts`
-- Test: `frontend/lib/services/__tests__/collection.service.test.ts` (new)
-- Test: `frontend/lib/hooks/__tests__/use-collection-mutations.test.tsx`
-
-**Interfaces:**
-- Produces (types): `CreateCollectionInput`, `UpdateCollectionInput`.
-- Produces (service): `collectionService.create/update/remove`.
-- Produces (hook): `useCollectionMutations(): { create, update, remove }` — service + revalidate `'/search/collections'` (+ the `':name'` key on update) + toast.
-
-- [ ] **Step 1: Add input types to `search.interface.ts`**
-
-```ts
-export interface CreateCollectionInput {
-  name: string
-  displayName: string
-  description?: string
-  fields: FieldSpec[]
-}
-export interface UpdateCollectionInput {
-  displayName?: string
-  description?: string | null
-  fields?: FieldSpec[]
-}
-```
-
-- [ ] **Step 2: Add mutations to `collection.service.ts`** (extend the import + object):
-
-```ts
-import type { CollectionView, CreateCollectionInput, UpdateCollectionInput } from '@/lib/interfaces/search.interface'
-
-// inside collectionService:
-  create(input: CreateCollectionInput): Promise<CollectionView> {
-    return apiClient.post<CollectionView>('/search/collections', input).then((r) => r.data)
-  },
-  update(name: string, patch: UpdateCollectionInput): Promise<CollectionView> {
-    return apiClient
-      .patch<CollectionView>(`/search/collections/${encodeURIComponent(name)}`, patch)
-      .then((r) => r.data)
-  },
-  remove(name: string): Promise<void> {
-    return apiClient.delete(`/search/collections/${encodeURIComponent(name)}`).then(() => undefined)
-  },
-```
-
-- [ ] **Step 3: Write the service test** — `collection.service.test.ts`:
-
-```ts
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-vi.mock('@/lib/http/api-client', () => ({ apiClient: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() } }))
-import { apiClient } from '@/lib/http/api-client'
-import { collectionService } from '@/lib/services/collection.service'
-
-beforeEach(() => vi.clearAllMocks())
-
-describe('collectionService mutations', () => {
-  it('create posts to /search/collections', async () => {
-    vi.mocked(apiClient.post).mockResolvedValue({ data: {} })
-    await collectionService.create({ name: 'c', displayName: 'C', fields: [{ name: 'a', type: 'string', searchable: true }] })
-    expect(apiClient.post).toHaveBeenCalledWith('/search/collections', expect.objectContaining({ name: 'c' }))
-  })
-  it('update patches by name', async () => {
-    vi.mocked(apiClient.patch).mockResolvedValue({ data: {} })
-    await collectionService.update('c', { displayName: 'C2' })
-    expect(apiClient.patch).toHaveBeenCalledWith('/search/collections/c', { displayName: 'C2' })
-  })
-  it('remove deletes by name', async () => {
-    vi.mocked(apiClient.delete).mockResolvedValue({ data: undefined })
-    await collectionService.remove('c')
-    expect(apiClient.delete).toHaveBeenCalledWith('/search/collections/c')
-  })
-})
-```
-
-- [ ] **Step 4: Implement `use-collection-mutations.ts`**
-
-```ts
-'use client'
-import { useCallback } from 'react'
-import { useSWRConfig } from 'swr'
-import { toast } from 'sonner'
-import { collectionService } from '@/lib/services/collection.service'
-import type { CreateCollectionInput, UpdateCollectionInput } from '@/lib/interfaces/search.interface'
-
-export function useCollectionMutations() {
-  const { mutate } = useSWRConfig()
-  const refreshList = useCallback(() => mutate('/search/collections'), [mutate])
-
-  const create = useCallback(async (input: CreateCollectionInput) => {
-    const view = await collectionService.create(input)
-    await refreshList()
-    toast.success(`Collection “${view.displayName}” created`)
-    return view
-  }, [refreshList])
-
-  const update = useCallback(async (name: string, patch: UpdateCollectionInput) => {
-    const view = await collectionService.update(name, patch)
-    await Promise.all([refreshList(), mutate(`/search/collections/${encodeURIComponent(name)}`)])
-    toast.success('Collection updated')
-    return view
-  }, [refreshList, mutate])
-
-  const remove = useCallback(async (name: string) => {
-    await collectionService.remove(name)
-    await refreshList()
-    toast.success('Collection deleted')
-  }, [refreshList])
-
-  return { create, update, remove }
-}
-```
-
-- [ ] **Step 5: Write the hook test** — `use-collection-mutations.test.tsx`:
-
-```tsx
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { renderHook, act } from '@testing-library/react'
-const mutate = vi.fn()
-vi.mock('swr', () => ({ useSWRConfig: () => ({ mutate }) }))
-vi.mock('sonner', () => ({ toast: { success: vi.fn() } }))
-vi.mock('@/lib/services/collection.service', () => ({ collectionService: { create: vi.fn(), update: vi.fn(), remove: vi.fn() } }))
-import { collectionService } from '@/lib/services/collection.service'
-import { useCollectionMutations } from '@/lib/hooks/use-collection-mutations'
-
-beforeEach(() => vi.clearAllMocks())
-
-describe('useCollectionMutations', () => {
-  it('create calls service and revalidates the list', async () => {
-    vi.mocked(collectionService.create).mockResolvedValue({ displayName: 'C' } as never)
-    const { result } = renderHook(() => useCollectionMutations())
-    await act(async () => { await result.current.create({ name: 'c', displayName: 'C', fields: [] }) })
-    expect(collectionService.create).toHaveBeenCalled()
-    expect(mutate).toHaveBeenCalledWith('/search/collections')
-  })
-})
-```
-
-- [ ] **Step 6: Run tests**
-
-Run: `cd frontend && npx vitest run lib/services/__tests__/collection.service.test.ts lib/hooks/__tests__/use-collection-mutations.test.tsx`
-Expected: PASS.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add frontend/lib/interfaces/search.interface.ts frontend/lib/services/collection.service.ts frontend/lib/hooks/use-collection-mutations.ts frontend/lib/services/__tests__/collection.service.test.ts frontend/lib/hooks/__tests__/use-collection-mutations.test.tsx
-git commit -m "feat(data-mgmt): collection mutation service + hook"
-```
-
----
-
-## Task 6: Client field-spec validation + editor zod schema
-
-**Files:**
-- Create: `frontend/lib/schema/validate-field-spec.ts`
-- Create: `frontend/lib/schema/field-spec-to-zod.ts`
-- Test: `frontend/lib/schema/__tests__/validate-field-spec.test.ts`
-
-**Interfaces:**
-- Produces: `validateFieldSpec(fields): string[]` (mirror of backend rules); `RESERVED_FIELD_NAMES`; `canBeSearchable(type)`, `canBeSortable(type)`; `collectionFormSchema` + `CollectionFormValues`.
+- Consumes: `AgentChunkType` chunks from `agent.stream().fullStream` — each `{ type, runId, from, payload }`; `ActionType` from `../mastra.types`.
+- Produces: `SseEvent` union (matches the SSE contract above); `chunkToSse(chunk): SseEvent | null`; `sseFrame(event): string`; `actionTypeForTool(toolName): ActionType`.
 
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-import { describe, it, expect } from 'vitest'
-import { validateFieldSpec, canBeSearchable, canBeSortable } from '@/lib/schema/validate-field-spec'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
+// api/src/features/mastra/services/chunk-to-sse.spec.ts
+import { chunkToSse, sseFrame, actionTypeForTool } from './chunk-to-sse';
 
-describe('validateFieldSpec (client mirror)', () => {
-  it('requires at least one searchable field', () => {
-    expect(validateFieldSpec([{ name: 'a', type: 'string' }])).toContain('At least one field must be searchable')
-  })
-  it('rejects reserved + duplicate + bad names', () => {
-    const fields: FieldSpec[] = [
-      { name: 'id', type: 'string', searchable: true },
-      { name: '1bad', type: 'string' },
-      { name: 'dup', type: 'string' }, { name: 'dup', type: 'string' },
-    ]
-    const errs = validateFieldSpec(fields)
-    expect(errs).toContain('"id" is a reserved field name')
-    expect(errs).toContain('Invalid field name "1bad"')
-    expect(errs).toContain('Duplicate field "dup"')
-  })
-  it('flags searchable on non-string and sortable on arrays', () => {
-    const errs = validateFieldSpec([{ name: 'n', type: 'number', searchable: true, sortable: true }, { name: 't', type: 'string', searchable: true }])
-    expect(errs).toContain('Field "n" cannot be searchable (type number)')
-    expect(canBeSearchable('number')).toBe(false)
-    expect(canBeSortable('string[]')).toBe(false)
-  })
-})
+describe('chunkToSse', () => {
+  it('maps text and reasoning deltas', () => {
+    expect(chunkToSse({ type: 'text-delta', payload: { id: '1', text: 'Hel' } } as never))
+      .toEqual({ type: 'text-delta', delta: 'Hel' });
+    expect(chunkToSse({ type: 'reasoning-delta', payload: { id: '1', text: 'hmm' } } as never))
+      .toEqual({ type: 'reasoning-delta', delta: 'hmm' });
+  });
+
+  it('maps tool-call and tool-result', () => {
+    expect(chunkToSse({ type: 'tool-call', payload: { toolCallId: 't1', toolName: 'search-documents', args: { q: 'x' } } } as never))
+      .toEqual({ type: 'tool-input', toolCallId: 't1', toolName: 'search-documents', args: { q: 'x' } });
+    expect(chunkToSse({ type: 'tool-result', payload: { toolCallId: 't1', toolName: 'search-documents', result: { totalHits: 0 }, isError: false } } as never))
+      .toEqual({ type: 'tool-output', toolCallId: 't1', toolName: 'search-documents', result: { totalHits: 0 }, isError: false });
+  });
+
+  it('ignores chunks with no client-facing mapping', () => {
+    expect(chunkToSse({ type: 'step-start', payload: {} } as never)).toBeNull();
+    expect(chunkToSse({ type: 'finish', payload: {} } as never)).toBeNull();
+  });
+
+  it('frames an event as an SSE data line and maps action types', () => {
+    expect(sseFrame({ type: 'done', status: 'succeeded' })).toBe('data: {"type":"done","status":"succeeded"}\n\n');
+    expect(actionTypeForTool('send-email')).toBe('send_email');
+    expect(actionTypeForTool('db-write')).toBe('db_write');
+    expect(actionTypeForTool('mystery')).toBe('other');
+  });
+});
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cd frontend && npx vitest run lib/schema/__tests__/validate-field-spec.test.ts`
-Expected: FAIL — module missing.
+Run: `cd api && npx jest src/features/mastra/services/chunk-to-sse.spec.ts`
+Expected: FAIL — `Cannot find module './chunk-to-sse'`.
 
-- [ ] **Step 3: Implement `validate-field-spec.ts`** (mirrors `api/.../document-validator.ts`)
+- [ ] **Step 3: Write the translator**
 
 ```ts
-import type { FieldSpec, FieldType } from '@/lib/interfaces/search.interface'
+// api/src/features/mastra/services/chunk-to-sse.ts
+import type { ActionType } from '../mastra.types';
 
-export const RESERVED_FIELD_NAMES = ['id', 'externalId', 'collection', 'createdAt', 'updatedAt']
-const FIELD_NAME_RE = /^[a-zA-Z][a-zA-Z0-9_]*$/
-const SCALARS: FieldType[] = ['string', 'number', 'boolean', 'date']
+export type SseEvent =
+  | { type: 'start'; conversationId: string; runId: string }
+  | { type: 'text-delta'; delta: string }
+  | { type: 'reasoning-delta'; delta: string }
+  | { type: 'tool-input'; toolCallId: string; toolName: string; args: unknown }
+  | { type: 'tool-output'; toolCallId: string; toolName: string; result: unknown; isError: boolean }
+  | { type: 'approval-required'; approvalId: string; toolCallId: string; toolName: string; actionType: ActionType; title: string; payload: Record<string, unknown> }
+  | { type: 'error'; message: string }
+  | { type: 'done'; status: 'succeeded' | 'awaiting_approval' | 'cancelled' | 'failed' };
 
-export const canBeSearchable = (t: FieldType) => t === 'string' || t === 'string[]'
-export const canBeSortable = (t: FieldType) => SCALARS.includes(t)
-
-export function validateFieldSpec(fields: FieldSpec[]): string[] {
-  const errors: string[] = []
-  if (fields.length === 0) return ['A collection must declare at least one field']
-  const seen = new Set<string>()
-  for (const f of fields) {
-    if (!FIELD_NAME_RE.test(f.name)) errors.push(`Invalid field name "${f.name}"`)
-    if (RESERVED_FIELD_NAMES.includes(f.name)) errors.push(`"${f.name}" is a reserved field name`)
-    if (seen.has(f.name)) errors.push(`Duplicate field "${f.name}"`)
-    seen.add(f.name)
-    if (f.searchable && !canBeSearchable(f.type)) errors.push(`Field "${f.name}" cannot be searchable (type ${f.type})`)
-    if (f.sortable && !canBeSortable(f.type)) errors.push(`Field "${f.name}" cannot be sortable (type ${f.type})`)
+/** Map one Mastra fullStream chunk to a client SSE event (or null to drop it). */
+export function chunkToSse(chunk: { type: string; payload?: Record<string, unknown> }): SseEvent | null {
+  const p = chunk.payload ?? {};
+  switch (chunk.type) {
+    case 'text-delta':
+      return { type: 'text-delta', delta: String(p.text ?? '') };
+    case 'reasoning-delta':
+      return { type: 'reasoning-delta', delta: String(p.text ?? '') };
+    case 'tool-call':
+      return { type: 'tool-input', toolCallId: String(p.toolCallId ?? ''), toolName: String(p.toolName ?? ''), args: p.args };
+    case 'tool-result':
+      return { type: 'tool-output', toolCallId: String(p.toolCallId ?? ''), toolName: String(p.toolName ?? ''), result: p.result, isError: Boolean(p.isError) };
+    case 'error':
+      return { type: 'error', message: p.error instanceof Error ? p.error.message : String(p.error ?? 'stream error') };
+    default:
+      return null; // start/step-*/finish/tool-call-approval handled by the service, not streamed verbatim
   }
-  if (!fields.some((f) => f.searchable)) errors.push('At least one field must be searchable')
-  return errors
+}
+
+export function sseFrame(event: SseEvent): string {
+  return `data: ${JSON.stringify(event)}\n\n`;
+}
+
+const ACTION_BY_TOOL: Record<string, ActionType> = { 'send-email': 'send_email', 'db-write': 'db_write' };
+export function actionTypeForTool(toolName: string): ActionType {
+  return ACTION_BY_TOOL[toolName] ?? 'other';
 }
 ```
 
-- [ ] **Step 4: Implement `field-spec-to-zod.ts`**
+Note: confirm `ActionType` in `mastra.types.ts` is `'send_email' | 'db_write' | 'external_api' | 'other'` (matches the frontend `mastra.interface.ts`). If it is not exported there, define the union locally in this file.
 
-```ts
-import { z } from 'zod'
+- [ ] **Step 4: Run the test to verify it passes**
 
-export const collectionFormSchema = z.object({
-  name: z.string().regex(/^[a-z][a-z0-9_]*$/, 'Use lower_snake_case').max(100),
-  displayName: z.string().min(1, 'Required').max(255),
-  description: z.string().max(500).optional(),
-})
-export type CollectionFormValues = z.infer<typeof collectionFormSchema>
-```
-
-- [ ] **Step 5: Run to verify it passes**
-
-Run: `cd frontend && npx vitest run lib/schema/__tests__/validate-field-spec.test.ts`
-Expected: PASS.
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add frontend/lib/schema/validate-field-spec.ts frontend/lib/schema/field-spec-to-zod.ts frontend/lib/schema/__tests__/validate-field-spec.test.ts
-git commit -m "feat(data-mgmt): client field-spec validation mirror + editor schema"
-```
-
----
-
-## Task 7: FieldSpec editor component
-
-**Files:**
-- Create: `frontend/components/data-management/field-spec-editor.tsx`
-- Test: `frontend/components/data-management/__tests__/field-spec-editor.test.tsx`
-
-**Interfaces:**
-- Consumes: `FieldSpec`, `FieldType`, `canBeSearchable`, `canBeSortable`.
-- Produces: `FieldSpecEditor({ value, onChange }: { value: FieldSpec[]; onChange: (next: FieldSpec[]) => void })`.
-
-- [ ] **Step 1: Write the failing test**
-
-```tsx
-import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
-import { FieldSpecEditor } from '@/components/data-management/field-spec-editor'
-
-describe('FieldSpecEditor', () => {
-  it('adds a new empty field row', () => {
-    const onChange = vi.fn()
-    render(<FieldSpecEditor value={[]} onChange={onChange} />)
-    fireEvent.click(screen.getByRole('button', { name: /add field/i }))
-    expect(onChange).toHaveBeenCalledWith([expect.objectContaining({ name: '', type: 'string' })])
-  })
-  it('disables searchable for a number field', () => {
-    render(<FieldSpecEditor value={[{ name: 'price', type: 'number' }]} onChange={() => {}} />)
-    expect(screen.getByLabelText(/searchable/i)).toBeDisabled()
-  })
-})
-```
-
-- [ ] **Step 2: Run to verify it fails**
-
-Run: `cd frontend && npx vitest run components/data-management/__tests__/field-spec-editor.test.tsx`
-Expected: FAIL — module missing.
-
-- [ ] **Step 3: Implement `field-spec-editor.tsx`**
-
-```tsx
-'use client'
-
-import { HugeiconsIcon } from '@hugeicons/react'
-import { Add01Icon, Delete02Icon } from '@hugeicons/core-free-icons'
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Checkbox } from '@/components/ui/checkbox'
-import { Label } from '@/components/ui/label'
-import {
-  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
-} from '@/components/ui/select'
-import { canBeSearchable, canBeSortable } from '@/lib/schema/validate-field-spec'
-import type { FieldSpec, FieldType } from '@/lib/interfaces/search.interface'
-
-const TYPES: FieldType[] = ['string', 'number', 'boolean', 'date', 'string[]', 'number[]']
-const FLAGS = ['required', 'searchable', 'filterable', 'sortable'] as const
-
-export function FieldSpecEditor({
-  value, onChange,
-}: {
-  value: FieldSpec[]
-  onChange: (next: FieldSpec[]) => void
-}) {
-  const patch = (i: number, next: Partial<FieldSpec>) =>
-    onChange(value.map((f, idx) => (idx === i ? sanitize({ ...f, ...next }) : f)))
-  const add = () => onChange([...value, { name: '', type: 'string' }])
-  const removeRow = (i: number) => onChange(value.filter((_, idx) => idx !== i))
-
-  return (
-    <div className="flex flex-col gap-3">
-      {value.map((f, i) => (
-        <div key={i} className="flex flex-col gap-2 rounded-md border p-3">
-          <div className="flex items-center gap-2">
-            <Input aria-label={`field-name-${i}`} placeholder="field_name" value={f.name} onChange={(e) => patch(i, { name: e.target.value })} />
-            <Select value={f.type} onValueChange={(t) => patch(i, { type: t as FieldType })}>
-              <SelectTrigger className="w-36" aria-label={`field-type-${i}`}><SelectValue /></SelectTrigger>
-              <SelectContent>{TYPES.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}</SelectContent>
-            </Select>
-            <Button type="button" variant="ghost" size="icon" onClick={() => removeRow(i)} aria-label={`remove-field-${i}`}>
-              <HugeiconsIcon icon={Delete02Icon} strokeWidth={2} />
-            </Button>
-          </div>
-          <div className="flex flex-wrap gap-4">
-            {FLAGS.map((flag) => {
-              const disabled =
-                (flag === 'searchable' && !canBeSearchable(f.type)) ||
-                (flag === 'sortable' && !canBeSortable(f.type))
-              return (
-                <div key={flag} className="flex items-center gap-2">
-                  <Checkbox id={`f-${i}-${flag}`} checked={!!f[flag]} disabled={disabled} onCheckedChange={(c) => patch(i, { [flag]: !!c })} />
-                  <Label htmlFor={`f-${i}-${flag}`} className="capitalize">{flag}</Label>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      ))}
-      <Button type="button" variant="outline" onClick={add} className="self-start">
-        <HugeiconsIcon icon={Add01Icon} strokeWidth={2} /> Add field
-      </Button>
-    </div>
-  )
-}
-
-/** Clear flags a type can no longer support after a type change. */
-function sanitize(f: FieldSpec): FieldSpec {
-  const out = { ...f }
-  if (out.searchable && !canBeSearchable(out.type)) out.searchable = false
-  if (out.sortable && !canBeSortable(out.type)) out.sortable = false
-  return out
-}
-```
-
-- [ ] **Step 4: Run to verify it passes**
-
-Run: `cd frontend && npx vitest run components/data-management/__tests__/field-spec-editor.test.tsx`
-Expected: PASS.
+Run: `cd api && npx jest src/features/mastra/services/chunk-to-sse.spec.ts`
+Expected: PASS (4 tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add frontend/components/data-management/field-spec-editor.tsx frontend/components/data-management/__tests__/field-spec-editor.test.tsx
-git commit -m "feat(data-mgmt): schema field-spec editor"
+git add api/src/features/mastra/services/chunk-to-sse.ts api/src/features/mastra/services/chunk-to-sse.spec.ts
+git commit -m "feat(mastra): pure Mastra-chunk → SSE-event translator"
 ```
 
 ---
 
-## Task 8: Collection editor sheet (create + edit)
+## Task 8: Streaming chat endpoint (new turn)
 
 **Files:**
-- Create: `frontend/components/data-management/collection-editor-sheet.tsx`
-- Test: `frontend/components/data-management/__tests__/collection-editor-sheet.test.tsx`
+- Create: `api/src/features/mastra/dto/chat-stream.dto.ts`
+- Create: `api/src/features/mastra/services/chat-stream.service.ts`
+- Modify: `api/src/features/mastra/controllers/chat.controller.ts`
+- Modify: `api/src/features/mastra/mastra.module.ts` (provide `ChatStreamService`)
+- Test: `api/src/features/mastra/services/chat-stream.service.spec.ts`
 
 **Interfaces:**
-- Consumes: `useCollectionMutations`, `collectionFormSchema`, `validateFieldSpec`, `FieldSpecEditor`, `useCollectionDefinition`, `ApiError`.
-- Produces: `CollectionEditorSheet({ open, mode, name?, onClose })`.
+- Consumes: `ConversationService.ensure/touch/getOwned`; `AgentRunRepository.create/finish`; `ApprovalRepository.create`; `MastraService.getAgent(AGENT_ID)`; `buildRequestContext` (`services/mastra-adapters`); `chunkToSse`/`sseFrame`/`actionTypeForTool` (Task 7). The agent stub exposes `stream(message, opts): Promise<{ fullStream: AsyncIterable<chunk>; text: Promise<string>; usage: Promise<...>; finishReason: Promise<string> }>`.
+- Produces: `ChatStreamDto`; `ChatStreamService.stream(principal, input, sink): Promise<void>` where `sink` is `{ write(frame: string): void }` (the Express `Response`).
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the DTO**
 
-```tsx
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-const create = vi.fn()
-vi.mock('@/lib/hooks/use-collection-mutations', () => ({ useCollectionMutations: () => ({ create, update: vi.fn() }) }))
-vi.mock('@/lib/hooks/use-collection-definition', () => ({ useCollectionDefinition: () => ({ definition: null, fields: [] }) }))
-import { CollectionEditorSheet } from '@/components/data-management/collection-editor-sheet'
+```ts
+// api/src/features/mastra/dto/chat-stream.dto.ts
+import { createZodDto } from 'nestjs-zod';
+import { z } from 'zod';
 
-beforeEach(() => vi.clearAllMocks())
-
-describe('CollectionEditorSheet (create)', () => {
-  it('blocks submit when no field is searchable', async () => {
-    render(<CollectionEditorSheet open mode="create" onClose={() => {}} />)
-    fireEvent.change(screen.getByLabelText(/^name$/i), { target: { value: 'products' } })
-    fireEvent.change(screen.getByLabelText(/display name/i), { target: { value: 'Products' } })
-    fireEvent.click(screen.getByRole('button', { name: /add field/i }))
-    fireEvent.change(screen.getByLabelText('field-name-0'), { target: { value: 'title' } })
-    fireEvent.click(screen.getByRole('button', { name: /create collection/i }))
-    await waitFor(() => expect(screen.getByText(/at least one field must be searchable/i)).toBeInTheDocument())
-    expect(create).not.toHaveBeenCalled()
+export const chatStreamSchema = z
+  .object({
+    conversationId: z.string().uuid().optional(),
+    message: z.string().min(1).max(8000).optional(),
+    resume: z.object({ approvalId: z.string().uuid(), approved: z.boolean() }).optional(),
   })
-})
+  .refine((v) => Boolean(v.message) !== Boolean(v.resume), {
+    message: 'Provide exactly one of `message` or `resume`',
+  });
+
+export class ChatStreamDto extends createZodDto(chatStreamSchema) {}
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [ ] **Step 2: Write the failing service test (new-turn happy path + suspend path)**
 
-Run: `cd frontend && npx vitest run components/data-management/__tests__/collection-editor-sheet.test.tsx`
-Expected: FAIL — module missing.
+```ts
+// api/src/features/mastra/services/chat-stream.service.spec.ts
+import { ChatStreamService } from './chat-stream.service';
 
-- [ ] **Step 3: Implement `collection-editor-sheet.tsx`**
+function fakeOutput(chunks: unknown[], finishReason = 'stop') {
+  return {
+    fullStream: (async function* () { for (const c of chunks) yield c; })(),
+    text: Promise.resolve('final text'),
+    usage: Promise.resolve({ inputTokens: 3, outputTokens: 5 }),
+    finishReason: Promise.resolve(finishReason),
+  };
+}
+const sink = () => { const frames: string[] = []; return { frames, write: (f: string) => frames.push(f) }; };
+const deps = () => ({
+  conversations: { ensure: jest.fn().mockResolvedValue({ id: 'conv-1', resourceId: 'user-1' }), touch: jest.fn(), getOwned: jest.fn() },
+  runs: { create: jest.fn().mockResolvedValue({ id: 'run-1' }), finish: jest.fn() },
+  approvals: { create: jest.fn().mockResolvedValue({ id: 'appr-1' }) },
+});
 
-```tsx
-'use client'
+describe('ChatStreamService.stream (new turn)', () => {
+  it('streams text deltas, finishes the run, and emits done:succeeded', async () => {
+    const { conversations, runs, approvals } = deps();
+    const agent = { stream: jest.fn().mockResolvedValue(fakeOutput([
+      { type: 'text-delta', runId: 'mr-1', payload: { text: 'Hi ' } },
+      { type: 'text-delta', runId: 'mr-1', payload: { text: 'there' } },
+    ])) };
+    const mastra = { getAgent: () => agent };
+    const s = sink();
+    const svc = new ChatStreamService(conversations as never, runs as never, approvals as never, mastra as never);
+    await svc.stream({ id: 'user-1', role: 'user' }, { message: 'hello' } as never, s as never);
+    expect(s.frames[0]).toContain('"type":"start"');
+    expect(s.frames.join('')).toContain('"delta":"Hi "');
+    expect(runs.finish).toHaveBeenCalledWith('run-1', expect.objectContaining({ status: 'succeeded' }));
+    expect(s.frames.at(-1)).toContain('"status":"succeeded"');
+    expect(conversations.touch).toHaveBeenCalledWith('conv-1');
+  });
 
-import * as React from 'react'
-import { useForm } from 'react-hook-form'
-import { zodResolver } from '@hookform/resolvers/zod'
-import { toast } from 'sonner'
-import {
-  Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
-} from '@/components/ui/sheet'
-import { Button } from '@/components/ui/button'
-import { Field, FieldLabel, FieldError } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
-import { Alert, AlertDescription } from '@/components/ui/alert'
-import { FieldSpecEditor } from '@/components/data-management/field-spec-editor'
-import { useCollectionMutations } from '@/lib/hooks/use-collection-mutations'
-import { useCollectionDefinition } from '@/lib/hooks/use-collection-definition'
-import { validateFieldSpec } from '@/lib/schema/validate-field-spec'
-import { collectionFormSchema, type CollectionFormValues } from '@/lib/schema/field-spec-to-zod'
-import { ApiError } from '@/lib/http/api-client'
-import type { FieldSpec } from '@/lib/interfaces/search.interface'
+  it('on suspend, creates an approval and emits approval-required + done:awaiting_approval', async () => {
+    const { conversations, runs, approvals } = deps();
+    const agent = { stream: jest.fn().mockResolvedValue(fakeOutput([
+      { type: 'tool-call-approval', runId: 'mr-9', payload: { toolCallId: 'tc-1', toolName: 'send-email', args: { to: 'x@y.z' } } },
+    ], 'suspended')) };
+    const mastra = { getAgent: () => agent };
+    const s = sink();
+    const svc = new ChatStreamService(conversations as never, runs as never, approvals as never, mastra as never);
+    await svc.stream({ id: 'user-1', role: 'user' }, { message: 'email x' } as never, s as never);
+    expect(approvals.create).toHaveBeenCalledWith(expect.objectContaining({ toolCallId: 'tc-1', mastraRunId: 'mr-9', actionType: 'send_email', status: 'pending' }));
+    expect(s.frames.join('')).toContain('"type":"approval-required"');
+    expect(runs.finish).toHaveBeenCalledWith('run-1', expect.objectContaining({ status: 'awaiting_approval' }));
+    expect(s.frames.at(-1)).toContain('"status":"awaiting_approval"');
+  });
+});
+```
 
-export function CollectionEditorSheet({
-  open, mode, name, onClose,
-}: {
-  open: boolean
-  mode: 'create' | 'edit'
-  name?: string
-  onClose: () => void
-}) {
-  const { create, update } = useCollectionMutations()
-  const { definition, fields: existing } = useCollectionDefinition(mode === 'edit' ? (name ?? null) : null)
-  const form = useForm<CollectionFormValues>({
-    resolver: zodResolver(collectionFormSchema),
-    defaultValues: { name: '', displayName: '', description: '' },
-  })
-  const [fields, setFields] = React.useState<FieldSpec[]>([])
-  const [specErrors, setSpecErrors] = React.useState<string[]>([])
+- [ ] **Step 3: Run the test to verify it fails**
 
-  React.useEffect(() => {
-    if (open && mode === 'edit' && definition) {
-      form.reset({ name: definition.name, displayName: definition.displayName, description: definition.description ?? '' })
-      setFields(existing)
+Run: `cd api && npx jest src/features/mastra/services/chat-stream.service.spec.ts`
+Expected: FAIL — `Cannot find module './chat-stream.service'`.
+
+- [ ] **Step 4: Write the service (new-turn path)**
+
+```ts
+// api/src/features/mastra/services/chat-stream.service.ts
+import { Injectable } from '@nestjs/common';
+import { MastraService } from '@mastra/nestjs';
+import { AGENT_ID } from '../mastra.constants';
+import type { PrincipalRef } from '../mastra.types';
+import { AgentRunRepository } from '../repositories/agent-run.repository';
+import { ApprovalRepository } from '../repositories/approval.repository';
+import { buildRequestContext } from './mastra-adapters';
+import { ConversationService } from './conversation.service';
+import { actionTypeForTool, chunkToSse, sseFrame, type SseEvent } from './chunk-to-sse';
+
+export interface StreamSink {
+  write(frame: string): void;
+}
+interface StreamInput {
+  conversationId?: string;
+  message?: string;
+  resume?: { approvalId: string; approved: boolean };
+}
+interface Suspend {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+}
+
+@Injectable()
+export class ChatStreamService {
+  constructor(
+    private readonly conversations: ConversationService,
+    private readonly runs: AgentRunRepository,
+    private readonly approvals: ApprovalRepository,
+    private readonly mastra: MastraService,
+  ) {}
+
+  async stream(principal: PrincipalRef, input: StreamInput, sink: StreamSink): Promise<void> {
+    if (input.resume) {
+      await this.resume(principal, input.resume, sink);
+      return;
     }
-    if (open && mode === 'create') { form.reset({ name: '', displayName: '', description: '' }); setFields([]) }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, mode, definition])
+    const conv = await this.conversations.ensure(principal, input.conversationId, 'chat');
+    const run = await this.runs.create({
+      conversationId: conv.id,
+      trigger: 'user_message',
+      triggeredByUserId: principal.id,
+      status: 'running',
+      agentId: AGENT_ID,
+      input: { message: input.message },
+      startedAt: new Date(),
+    } as never);
+    const emit = (e: SseEvent) => sink.write(sseFrame(e));
+    emit({ type: 'start', conversationId: conv.id, runId: run.id });
 
-  const onSubmit = async (values: CollectionFormValues) => {
-    const errs = validateFieldSpec(fields)
-    setSpecErrors(errs)
-    if (errs.length) return
     try {
-      if (mode === 'create') await create({ ...values, fields })
-      else await update(name as string, { displayName: values.displayName, description: values.description ?? null, fields })
-      onClose()
+      const agent = this.mastra.getAgent(AGENT_ID);
+      const output = await agent.stream(input.message as string, {
+        memory: { resource: conv.resourceId, thread: { id: conv.id } },
+        requestContext: buildRequestContext({ principal, runId: run.id, conversationId: conv.id }),
+      } as never);
+
+      const { suspend, mastraRunId } = await this.pump(output as never, emit);
+      await this.finishTurn(run.id, conv, output as never, suspend, mastraRunId, emit);
     } catch (err) {
-      toast.error(err instanceof ApiError ? err.message : 'Failed to save collection')
+      await this.runs.finish(run.id, {
+        status: 'failed',
+        error: { message: err instanceof Error ? err.message : String(err) },
+        finishedAt: new Date(),
+      } as never);
+      emit({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+      emit({ type: 'done', status: 'failed' });
     }
   }
 
-  return (
-    <Sheet open={open} onOpenChange={(o) => { if (!o) onClose() }}>
-      <SheetContent side="right" className="w-full gap-0 overflow-y-auto sm:max-w-2xl">
-        <SheetHeader>
-          <SheetTitle>{mode === 'create' ? 'New collection' : `Edit “${name}”`}</SheetTitle>
-          <SheetDescription>Define the collection identity and its field schema.</SheetDescription>
-        </SheetHeader>
-        <form onSubmit={form.handleSubmit(onSubmit)} noValidate className="flex flex-col gap-4 px-4 pb-6">
-          <Field data-invalid={form.formState.errors.name ? 'true' : undefined}>
-            <FieldLabel htmlFor="name">Name</FieldLabel>
-            <Input id="name" disabled={mode === 'edit'} {...form.register('name')} />
-            {form.formState.errors.name && <FieldError>{form.formState.errors.name.message}</FieldError>}
-          </Field>
-          <Field data-invalid={form.formState.errors.displayName ? 'true' : undefined}>
-            <FieldLabel htmlFor="displayName">Display name</FieldLabel>
-            <Input id="displayName" {...form.register('displayName')} />
-            {form.formState.errors.displayName && <FieldError>{form.formState.errors.displayName.message}</FieldError>}
-          </Field>
-          <Field>
-            <FieldLabel htmlFor="description">Description</FieldLabel>
-            <Input id="description" {...form.register('description')} />
-          </Field>
+  /** Consume the Mastra stream, forwarding client-facing chunks; capture suspend + runId. */
+  private async pump(
+    output: { fullStream: AsyncIterable<{ type: string; runId?: string; payload?: Record<string, unknown> }> },
+    emit: (e: SseEvent) => void,
+  ): Promise<{ suspend: Suspend | null; mastraRunId: string | null }> {
+    let suspend: Suspend | null = null;
+    let mastraRunId: string | null = null;
+    for await (const chunk of output.fullStream) {
+      mastraRunId ??= chunk.runId ?? null;
+      if (chunk.type === 'tool-call-approval' || chunk.type === 'tool-call-suspended') {
+        const p = chunk.payload ?? {};
+        suspend = { toolCallId: String(p.toolCallId ?? ''), toolName: String(p.toolName ?? ''), args: (p.args as Record<string, unknown>) ?? {} };
+        continue;
+      }
+      const event = chunkToSse(chunk);
+      if (event) emit(event);
+    }
+    return { suspend, mastraRunId };
+  }
 
-          {mode === 'edit' && (
-            <Alert>
-              <AlertDescription>
-                Changing fields triggers a background reindex and does not re-validate existing records.
-              </AlertDescription>
-            </Alert>
-          )}
+  private async finishTurn(
+    runId: string,
+    conv: { id: string },
+    output: { text: Promise<string>; usage: Promise<{ inputTokens?: number; outputTokens?: number }>; finishReason: Promise<string | undefined> },
+    suspend: Suspend | null,
+    mastraRunId: string | null,
+    emit: (e: SseEvent) => void,
+  ): Promise<void> {
+    const reason = await output.finishReason;
+    if (suspend || reason === 'suspended') {
+      const s = suspend as Suspend;
+      const appr = await this.approvals.create({
+        runId,
+        conversationId: conv.id,
+        mastraRunId,
+        toolCallId: s.toolCallId,
+        actionType: actionTypeForTool(s.toolName),
+        title: `Approve ${s.toolName}`,
+        payload: s.args,
+        status: 'pending',
+      } as never);
+      await this.runs.finish(runId, { status: 'awaiting_approval', finishedAt: new Date() } as never);
+      emit({ type: 'approval-required', approvalId: appr.id, toolCallId: s.toolCallId, toolName: s.toolName, actionType: actionTypeForTool(s.toolName), title: `Approve ${s.toolName}`, payload: s.args });
+      emit({ type: 'done', status: 'awaiting_approval' });
+      return;
+    }
+    const [text, usage] = await Promise.all([output.text, output.usage]);
+    await this.runs.finish(runId, {
+      status: 'succeeded',
+      output: { text },
+      tokensInput: usage.inputTokens,
+      tokensOutput: usage.outputTokens,
+      finishedAt: new Date(),
+    } as never);
+    await this.conversations.touch(conv.id);
+    emit({ type: 'done', status: 'succeeded' });
+  }
 
-          <div className="flex flex-col gap-2">
-            <span className="text-sm font-medium">Fields</span>
-            <FieldSpecEditor value={fields} onChange={(f) => { setFields(f); setSpecErrors([]) }} />
-            {specErrors.length > 0 && (
-              <ul className="text-sm text-destructive">{specErrors.map((e) => <li key={e}>{e}</li>)}</ul>
-            )}
-          </div>
-
-          <div className="flex justify-end gap-2">
-            <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
-            <Button type="submit" disabled={form.formState.isSubmitting}>
-              {mode === 'create' ? 'Create collection' : 'Save changes'}
-            </Button>
-          </div>
-        </form>
-      </SheetContent>
-    </Sheet>
-  )
+  // resume(...) is added in Task 9.
+  private async resume(_p: PrincipalRef, _r: { approvalId: string; approved: boolean }, _s: StreamSink): Promise<void> {
+    throw new Error('not implemented'); // replaced in Task 9
+  }
 }
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+Note: mirror the exact field names `AgentRunnerService.runChat` passes to `runs.create`/`runs.finish` and `approvals.create` (`mastraRunId`, `tokensInput`, `tokensOutput`, `output`, etc.) — copy them verbatim from `agent-runner.service.ts` if any differ.
 
-Run: `cd frontend && npx vitest run components/data-management/__tests__/collection-editor-sheet.test.tsx`
-Expected: PASS. (If `Alert`/`AlertDescription` export names differ, confirm with `grep -n export frontend/components/ui/alert.tsx`.)
+- [ ] **Step 5: Run the test to verify it passes**
 
-- [ ] **Step 5: Commit**
+Run: `cd api && npx jest src/features/mastra/services/chat-stream.service.spec.ts`
+Expected: PASS (2 tests).
 
-```bash
-git add frontend/components/data-management/collection-editor-sheet.tsx frontend/components/data-management/__tests__/collection-editor-sheet.test.tsx
-git commit -m "feat(data-mgmt): collection editor sheet (create + edit)"
-```
+- [ ] **Step 6: Wire the controller route (manual SSE via `@Res`)**
 
----
-
-## Task 9: Collection manager dialog + store panel + toolbar wiring
-
-**Files:**
-- Modify: `frontend/lib/state-management/data-management.store.ts`
-- Create: `frontend/components/data-management/collection-manager-dialog.tsx`
-- Modify: `frontend/components/data-management/record-toolbar.tsx`
-- Modify: `frontend/components/data-management/data-management-view.tsx`
-- Test: `frontend/lib/state-management/__tests__/data-management.store.test.ts` (extend)
-- Test: `frontend/components/data-management/__tests__/collection-manager-dialog.test.tsx`
-
-**Interfaces:**
-- Produces (store): `CollectionPanel` + `collectionPanel` + `openCollections()`, `openCreateCollection()`, `openEditCollection(name)`, `closeCollectionPanel()`.
-- Produces (UI): `CollectionManagerDialog()`; toolbar **Manage…** + **Reindex** (admin).
-
-- [ ] **Step 1: Extend the store** — add above the creator and into the interface/creator:
-
+In `chat.controller.ts`, add (import `Res` from `@nestjs/common`, `Response` type from `express`, inject `ChatStreamService`):
 ```ts
-export type CollectionPanel =
-  | { kind: 'closed' } | { kind: 'list' } | { kind: 'create' } | { kind: 'edit'; name: string }
-```
-
-```ts
-// interface:
-  collectionPanel: CollectionPanel
-  openCollections: () => void
-  openCreateCollection: () => void
-  openEditCollection: (name: string) => void
-  closeCollectionPanel: () => void
-// creator:
-  collectionPanel: { kind: 'closed' },
-  openCollections: () => set({ collectionPanel: { kind: 'list' } }, false, 'dm/openCollections'),
-  openCreateCollection: () => set({ collectionPanel: { kind: 'create' } }, false, 'dm/openCreateCollection'),
-  openEditCollection: (name) => set({ collectionPanel: { kind: 'edit', name } }, false, 'dm/openEditCollection'),
-  closeCollectionPanel: () => set({ collectionPanel: { kind: 'closed' } }, false, 'dm/closeCollectionPanel'),
-```
-
-- [ ] **Step 2: Extend the store test** (add `collectionPanel: { kind: 'closed' }` to the `beforeEach` reset):
-
-```ts
-it('collection panel transitions', () => {
-  get().openCollections(); expect(get().collectionPanel).toEqual({ kind: 'list' })
-  get().openEditCollection('products'); expect(get().collectionPanel).toEqual({ kind: 'edit', name: 'products' })
-  get().closeCollectionPanel(); expect(get().collectionPanel).toEqual({ kind: 'closed' })
-})
-```
-
-- [ ] **Step 3: Implement `collection-manager-dialog.tsx`**
-
-```tsx
-'use client'
-
-import {
-  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
-} from '@/components/ui/dialog'
-import {
-  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent,
-  AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
-} from '@/components/ui/alert-dialog'
-import { Button } from '@/components/ui/button'
-import { CollectionEditorSheet } from '@/components/data-management/collection-editor-sheet'
-import { useCollections } from '@/lib/hooks/use-collections'
-import { useCollectionMutations } from '@/lib/hooks/use-collection-mutations'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
-
-export function CollectionManagerDialog() {
-  const panel = useDataManagementStore((s) => s.collectionPanel)
-  const openCreate = useDataManagementStore((s) => s.openCreateCollection)
-  const openEdit = useDataManagementStore((s) => s.openEditCollection)
-  const close = useDataManagementStore((s) => s.closeCollectionPanel)
-  const { collections } = useCollections()
-  const { remove } = useCollectionMutations()
-  const editing = panel.kind === 'edit' ? panel.name : undefined
-
-  return (
-    <>
-      <Dialog open={panel.kind === 'list'} onOpenChange={(o) => { if (!o) close() }}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>Collections</DialogTitle>
-            <DialogDescription>Create, edit, or delete collections.</DialogDescription>
-          </DialogHeader>
-          <div className="flex flex-col gap-2">
-            {collections.map((c) => (
-              <div key={c.name} className="flex items-center justify-between rounded-md border px-3 py-2">
-                <div>
-                  <div className="text-sm font-medium">{c.displayName}</div>
-                  <div className="text-xs text-muted-foreground">{c.name} · {c.fields.length} fields</div>
-                </div>
-                <div className="flex gap-1">
-                  <Button variant="ghost" size="sm" onClick={() => openEdit(c.name)}>Edit</Button>
-                  <AlertDialog>
-                    <AlertDialogTrigger asChild><Button variant="ghost" size="sm">Delete</Button></AlertDialogTrigger>
-                    <AlertDialogContent>
-                      <AlertDialogHeader>
-                        <AlertDialogTitle>Delete “{c.displayName}”?</AlertDialogTitle>
-                        <AlertDialogDescription>This drops the search index and soft-deletes all its records.</AlertDialogDescription>
-                      </AlertDialogHeader>
-                      <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
-                        <AlertDialogAction onClick={() => void remove(c.name)}>Delete</AlertDialogAction>
-                      </AlertDialogFooter>
-                    </AlertDialogContent>
-                  </AlertDialog>
-                </div>
-              </div>
-            ))}
-            <Button variant="outline" onClick={openCreate} className="self-start">New collection</Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      <CollectionEditorSheet
-        open={panel.kind === 'create' || panel.kind === 'edit'}
-        mode={panel.kind === 'edit' ? 'edit' : 'create'}
-        name={editing}
-        onClose={close}
-      />
-    </>
-  )
+@ApiOperation({ summary: 'Stream a chat turn (SSE)' })
+@Post('chat/stream')
+async stream(@CurrentUser() user: Principal, @Body() dto: ChatStreamDto, @Res() res: Response): Promise<void> {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  await this.chatStream.stream(user, dto, { write: (f) => res.write(f) });
+  res.end();
 }
 ```
+Add `ChatStreamService` to `mastra.module.ts` `providers`.
 
-- [ ] **Step 4: Wire the toolbar** — in `record-toolbar.tsx`, import `useRecordMutations`, add the store opener + reindex, and render two admin buttons in the `ml-auto` group:
+- [ ] **Step 7: Build to verify wiring**
 
-```tsx
-// near the top of RecordToolbar:
-const openCollections = useDataManagementStore((s) => s.openCollections)
-const { reindex } = useRecordMutations()
-
-// inside the ml-auto action group, before "New record":
-{isAdmin && (<Button variant="outline" size="sm" onClick={openCollections}>Manage…</Button>)}
-{isAdmin && s.collection && (<Button variant="outline" size="sm" onClick={() => void reindex()}>Reindex</Button>)}
-```
-
-Add the import: `import { useRecordMutations } from '@/lib/hooks/use-record-mutations'`.
-
-- [ ] **Step 5: Mount the dialog** — in `data-management-view.tsx`, add the import and render `<CollectionManagerDialog />` at the top level (outside the `collection &&` guard):
-
-```tsx
-import { CollectionManagerDialog } from '@/components/data-management/collection-manager-dialog'
-// …after <RecordDataTable/>:
-<CollectionManagerDialog />
-```
-
-- [ ] **Step 6: Write the manager test** — `collection-manager-dialog.test.tsx`:
-
-```tsx
-import { describe, it, expect, vi } from 'vitest'
-import { render, screen } from '@testing-library/react'
-vi.mock('@/lib/hooks/use-collections', () => ({
-  useCollections: () => ({ collections: [{ name: 'products', displayName: 'Products', fields: [{ name: 'a', type: 'string' }] }] }),
-}))
-vi.mock('@/lib/hooks/use-collection-mutations', () => ({ useCollectionMutations: () => ({ remove: vi.fn() }) }))
-vi.mock('@/lib/hooks/use-collection-definition', () => ({ useCollectionDefinition: () => ({ definition: null, fields: [] }) }))
-vi.mock('@/lib/state-management/data-management.store', () => ({
-  useDataManagementStore: (sel: (s: unknown) => unknown) =>
-    sel({ collectionPanel: { kind: 'list' }, openCreateCollection: vi.fn(), openEditCollection: vi.fn(), closeCollectionPanel: vi.fn() }),
-}))
-import { CollectionManagerDialog } from '@/components/data-management/collection-manager-dialog'
-
-describe('CollectionManagerDialog', () => {
-  it('lists collections with a New button', () => {
-    render(<CollectionManagerDialog />)
-    expect(screen.getByText('Products')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /new collection/i })).toBeInTheDocument()
-  })
-})
-```
-
-- [ ] **Step 7: Run the tests**
-
-Run: `cd frontend && npx vitest run lib/state-management/__tests__/data-management.store.test.ts components/data-management/__tests__/collection-manager-dialog.test.tsx`
-Expected: PASS.
+Run: `cd api && pnpm build`
+Expected: build succeeds.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add frontend/lib/state-management/data-management.store.ts frontend/components/data-management/collection-manager-dialog.tsx frontend/components/data-management/record-toolbar.tsx frontend/components/data-management/data-management-view.tsx frontend/lib/state-management/__tests__/data-management.store.test.ts frontend/components/data-management/__tests__/collection-manager-dialog.test.tsx
-git commit -m "feat(data-mgmt): collection manager dialog + toolbar wiring"
+git add api/src/features/mastra/dto/chat-stream.dto.ts api/src/features/mastra/services/chat-stream.service.ts api/src/features/mastra/services/chat-stream.service.spec.ts api/src/features/mastra/controllers/chat.controller.ts api/src/features/mastra/mastra.module.ts
+git commit -m "feat(mastra): POST /agent/chat/stream SSE endpoint (new turn, ledger + approvals)"
 ```
 
 ---
 
-# Phase 3 — Query enrichment
-
-## Task 10: Query plumbing for facets + highlight
+## Task 9: Streaming resume-after-approval
 
 **Files:**
-- Modify: `frontend/lib/interfaces/search.interface.ts` (extend `SearchRequestBody`)
-- Modify: `frontend/lib/schema/serialize-query.ts`
-- Modify: `frontend/lib/services/record.service.ts`
-- Modify: `frontend/lib/hooks/use-records.ts`
-- Modify: `frontend/components/data-management/data-management-view.tsx` (call `useRecords(fields)`)
-- Test: `frontend/lib/schema/__tests__/serialize-query.test.ts` (extend)
+- Modify: `api/src/features/mastra/services/chat-stream.service.ts`
+- Test: `api/src/features/mastra/services/chat-stream.service.spec.ts` (extend)
 
 **Interfaces:**
-- Produces: `toSearchRequestBody(query, opts?: { facets?; highlight? })`; `recordService.query(collection, query, opts?)`; `useRecords(fields?: FieldSpec[])` derives facets (`filterable && enum`) + highlight (`searchable`).
+- Consumes: `ApprovalRepository.findById(id)` + `ApprovalRepository.decide(id, patch)`; `ConversationService.getOwned`; `agent.approveToolCall({ runId, toolCallId })` / `agent.declineToolCall({ runId, toolCallId })` (both return a streamable `MastraModelOutput`).
+- Produces: `ChatStreamService.resume(...)` streams the continuation and closes the approval + original run.
 
-- [ ] **Step 1: Extend `SearchRequestBody`** — add `facets?: string[]` and `highlight?: string[]`.
-
-- [ ] **Step 2: Extend the serializer**
-
-```ts
-export function toSearchRequestBody(
-  query: SearchQuery,
-  opts: { facets?: string[]; highlight?: string[] } = {},
-): SearchRequestBody {
-  const body: SearchRequestBody = { page: query.page, limit: query.limit }
-  if (query.q.trim()) body.q = query.q.trim()
-  const filters: Record<string, SearchQuery['filters'][string]> = {}
-  for (const [field, value] of Object.entries(query.filters)) {
-    if (value === undefined || value === null) continue
-    if (Array.isArray(value) && value.length === 0) continue
-    if (typeof value === 'string' && value === '') continue
-    filters[field] = value
-  }
-  if (Object.keys(filters).length) body.filters = filters
-  if (query.sort.length) body.sort = query.sort.map((s) => `${s.field}:${s.dir}`)
-  if (opts.facets?.length) body.facets = opts.facets
-  if (opts.highlight?.length) body.highlight = opts.highlight
-  return body
-}
-```
-
-- [ ] **Step 3: Extend the serializer test**
+- [ ] **Step 1: Write the failing resume test**
 
 ```ts
-it('includes facets and highlight when provided', () => {
-  const out = toSearchRequestBody(base, { facets: ['status'], highlight: ['title'] })
-  expect(out.facets).toEqual(['status'])
-  expect(out.highlight).toEqual(['title'])
-})
+// add to api/src/features/mastra/services/chat-stream.service.spec.ts
+describe('ChatStreamService.stream (resume)', () => {
+  it('approves, streams the continuation, and marks the approval executed', async () => {
+    const conversations = { ensure: jest.fn(), touch: jest.fn(), getOwned: jest.fn().mockResolvedValue({ id: 'conv-1', resourceId: 'user-1' }) };
+    const runs = { create: jest.fn(), finish: jest.fn() };
+    const approvals = {
+      findById: jest.fn().mockResolvedValue({ id: 'appr-1', status: 'pending', conversationId: 'conv-1', runId: 'run-1', mastraRunId: 'mr-9', toolCallId: 'tc-1' }),
+      decide: jest.fn().mockResolvedValue(undefined),
+    };
+    const agent = { approveToolCall: jest.fn().mockResolvedValue({
+      fullStream: (async function* () { yield { type: 'text-delta', runId: 'mr-9', payload: { text: 'sent!' } }; })(),
+      text: Promise.resolve('sent!'), usage: Promise.resolve({ inputTokens: 1, outputTokens: 1 }), finishReason: Promise.resolve('stop'),
+    }) };
+    const mastra = { getAgent: () => agent };
+    const frames: string[] = [];
+    const svc = new ChatStreamService(conversations as never, runs as never, approvals as never, mastra as never);
+    await svc.stream({ id: 'user-1', role: 'user' }, { conversationId: 'conv-1', resume: { approvalId: 'appr-1', approved: true } } as never, { write: (f: string) => frames.push(f) } as never);
+    expect(agent.approveToolCall).toHaveBeenCalledWith({ runId: 'mr-9', toolCallId: 'tc-1' });
+    expect(frames.join('')).toContain('"delta":"sent!"');
+    expect(approvals.decide).toHaveBeenCalledWith('appr-1', expect.objectContaining({ status: 'executed' }));
+    expect(runs.finish).toHaveBeenCalledWith('run-1', expect.objectContaining({ status: 'succeeded' }));
+    expect(frames.at(-1)).toContain('"status":"succeeded"');
+  });
+});
 ```
 
-- [ ] **Step 4: Extend `recordService.query`**
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cd api && npx jest src/features/mastra/services/chat-stream.service.spec.ts -t "resume"`
+Expected: FAIL — resume throws `not implemented`.
+
+- [ ] **Step 3: Replace the `resume` stub with the real implementation**
 
 ```ts
-  query(collection: string, query: SearchQuery, opts?: { facets?: string[]; highlight?: string[] }): Promise<SearchResults> {
-    return apiClient
-      .post<SearchResults>(`${base(collection)}/query`, toSearchRequestBody(query, opts))
-      .then((r) => r.data)
-  },
-```
-
-- [ ] **Step 5: Update `use-records.ts`** to accept `fields` and derive facets/highlight
-
-```ts
-import useSWR from 'swr'
-import { recordService } from '@/lib/services/record.service'
-import { useCollection, useRecordQuery } from '@/lib/state-management/data-management.store'
-import type { FieldSpec, SearchResults } from '@/lib/interfaces/search.interface'
-
-export function useRecords(fields: FieldSpec[] = []) {
-  const collection = useCollection()
-  const query = useRecordQuery()
-  const facets = fields.filter((f) => f.filterable && f.enum?.length).map((f) => f.name)
-  const highlight = fields.filter((f) => f.searchable).map((f) => f.name)
-  const key = collection ? (['records', collection, query] as const) : null
-  const { data, isLoading, isValidating, error, mutate } = useSWR<SearchResults>(
-    key,
-    () => recordService.query(collection as string, query, { facets, highlight }),
-    { keepPreviousData: true },
-  )
-  return { results: data, isLoading, isValidating, error, mutate }
-}
-```
-
-`data-management-view.tsx`: change to `const { results, isLoading, error, mutate } = useRecords(fields)`. `use-record-mutations.ts` keeps `useRecords()` (facets/highlight are not part of the SWR key — they are stable per `collection`, which is in the key — so an empty `fields` there does not fork the cache).
-
-- [ ] **Step 6: Run tests**
-
-Run: `cd frontend && npx vitest run lib/schema/__tests__/serialize-query.test.ts lib/hooks/__tests__/use-records.test.tsx`
-Expected: PASS. If `use-records.test.tsx` asserts exact `query` args, relax it to `expect.objectContaining(...)` to allow the 3rd `opts` arg.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add frontend/lib/interfaces/search.interface.ts frontend/lib/schema/serialize-query.ts frontend/lib/services/record.service.ts frontend/lib/hooks/use-records.ts frontend/components/data-management/data-management-view.tsx frontend/lib/schema/__tests__/serialize-query.test.ts
-git commit -m "feat(data-mgmt): request facets + highlight in queries"
-```
-
----
-
-## Task 11: Facet counts in the filter panel
-
-**Files:**
-- Modify: `frontend/components/data-management/field-to-filter.tsx`
-- Modify: `frontend/components/data-management/record-filters.tsx`
-- Modify: `frontend/components/data-management/record-toolbar.tsx`
-- Modify: `frontend/components/data-management/data-management-view.tsx`
-- Test: `frontend/components/data-management/__tests__/field-to-filter.test.tsx` (extend)
-
-**Interfaces:**
-- Produces: `FilterControl` accepts optional `counts?: Record<string, number>`; `RecordFilters`/`RecordToolbar` thread `facetDistribution` from results.
-
-- [ ] **Step 1: Extend `FilterControl`** — add `counts?: Record<string, number>` to props; in the enum branch, render the count beside the label:
-
-```tsx
-<Label htmlFor={`f-${field.name}-${key}`}>
-  {key}{counts && key in counts ? ` (${counts[key]})` : ''}
-</Label>
-```
-
-- [ ] **Step 2: Thread through `RecordFilters`** — accept `facetDistribution?: Record<string, Record<string, number>>`; pass `counts={facetDistribution?.[field.name]}` to each `FilterControl`.
-
-- [ ] **Step 3: Thread through `RecordToolbar`** — accept `facetDistribution?` and pass it to `<RecordFilters …/>`.
-
-- [ ] **Step 4: Pass from the view** — `<RecordToolbar fields={fields} facetDistribution={results?.facetDistribution} />`.
-
-- [ ] **Step 5: Extend the filter test**
-
-```tsx
-it('enum: renders facet counts when provided', () => {
-  render(<FilterControl field={{ name: 'status', type: 'string', enum: ['active'] }} value={undefined} counts={{ active: 7 }} onChange={() => {}} />)
-  expect(screen.getByText('active (7)')).toBeInTheDocument()
-})
-```
-
-- [ ] **Step 6: Run tests**
-
-Run: `cd frontend && npx vitest run components/data-management/__tests__/field-to-filter.test.tsx`
-Expected: PASS.
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add frontend/components/data-management/field-to-filter.tsx frontend/components/data-management/record-filters.tsx frontend/components/data-management/record-toolbar.tsx frontend/components/data-management/data-management-view.tsx frontend/components/data-management/__tests__/field-to-filter.test.tsx
-git commit -m "feat(data-mgmt): faceted filters with live counts"
-```
-
----
-
-## Task 12: Hit highlighting in cells
-
-**Files:**
-- Modify: `frontend/components/data-management/field-cell.tsx`
-- Modify: `frontend/lib/schema/field-to-column.tsx`
-- Test: `frontend/components/data-management/__tests__/field-cell.test.tsx` (extend)
-
-**Interfaces:**
-- Produces: `FieldCell` accepts optional `highlighted?: string` (a Meili `_formatted` fragment with `<em>`); when set for a string field, renders it (allowlist-sanitized) instead of the raw value.
-
-- [ ] **Step 1: Extend `FieldCell`** — add `highlighted?: string`; in the default (string) branch, prefer it:
-
-```tsx
-if (typeof highlighted === 'string' && highlighted.length) {
-  return <span className="block max-w-[28ch] truncate" dangerouslySetInnerHTML={{ __html: sanitizeMarks(highlighted) }} />
-}
-return <span className="block max-w-[28ch] truncate">{String(value)}</span>
-```
-
-Add the sanitizer at the bottom of the file:
-
-```tsx
-/** Escape everything, then re-allow only <em>/<mark> tags (Meili's default highlight tags). */
-function sanitizeMarks(html: string): string {
-  const escaped = html.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  return escaped.replace(/&lt;(\/?)(em|mark)&gt;/g, '<$1$2>')
-}
-```
-
-- [ ] **Step 2: Pass `_formatted` in the column cell** — in `field-to-column.tsx`, update the `cell` renderer:
-
-```tsx
-cell: ({ getValue, row }) => {
-  const formatted = (row.original as { _formatted?: Record<string, string> })._formatted
-  return <FieldCell field={field} value={getValue()} highlighted={formatted?.[field.name]} />
-},
-```
-
-- [ ] **Step 3: Extend the cell test**
-
-```tsx
-it('renders highlight marks for a string field', () => {
-  render(<FieldCell field={{ name: 'title', type: 'string' }} value="hello world" highlighted="<em>hello</em> world" />)
-  expect(screen.getByText('hello')).toBeInTheDocument()
-})
-```
-
-- [ ] **Step 4: Run tests**
-
-Run: `cd frontend && npx vitest run components/data-management/__tests__/field-cell.test.tsx`
-Expected: PASS.
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add frontend/components/data-management/field-cell.tsx frontend/lib/schema/field-to-column.tsx frontend/components/data-management/__tests__/field-cell.test.tsx
-git commit -m "feat(data-mgmt): render search hit highlighting in cells"
-```
-
----
-
-## Task 13: Multi-column sort
-
-**Files:**
-- Modify: `frontend/lib/state-management/data-management.store.ts`
-- Modify: `frontend/components/data-management/record-data-table.tsx`
-- Test: `frontend/lib/state-management/__tests__/data-management.store.test.ts` (extend)
-
-**Interfaces:**
-- Produces: `toggleSort(field: string, additive?: boolean)` — non-additive replaces (asc→desc→off, single); additive cycles that field within an ordered array, preserving others.
-
-- [ ] **Step 1: Rewrite `toggleSort`** and update its interface signature to `(field: string, additive?: boolean) => void`:
-
-```ts
-  toggleSort: (field, additive = false) =>
-    set(
-      (s) => {
-        const idx = s.sort.findIndex((x) => x.field === field)
-        const cur = idx >= 0 ? s.sort[idx] : undefined
-        const cycle = !cur ? { field, dir: 'asc' as const } : cur.dir === 'asc' ? { field, dir: 'desc' as const } : null
-        if (!additive) return { sort: cycle ? [cycle] : [] }
-        const next = s.sort.filter((x) => x.field !== field)
-        if (cycle) next.splice(idx >= 0 ? idx : next.length, 0, cycle)
-        return { sort: next }
-      },
-      false,
-      'dm/toggleSort',
-    ),
-```
-
-- [ ] **Step 2: Update the table header** — in `record-data-table.tsx`, replace the active-sort lookup and the click handler:
-
-```tsx
-const active = s.sort.find((x) => x.field === meta?.field.name)
-// …
-onClick={(e) => s.toggleSort(meta!.field.name, e.shiftKey)}
-```
-
-- [ ] **Step 3: Extend the store test**
-
-```ts
-it('additive toggleSort keeps prior sorts', () => {
-  get().toggleSort('price')
-  get().toggleSort('name', true)
-  expect(get().sort).toEqual([{ field: 'price', dir: 'asc' }, { field: 'name', dir: 'asc' }])
-  get().toggleSort('price', true)
-  expect(get().sort).toEqual([{ field: 'price', dir: 'desc' }, { field: 'name', dir: 'asc' }])
-})
-it('non-additive toggleSort still replaces', () => {
-  get().toggleSort('price'); get().toggleSort('name')
-  expect(get().sort).toEqual([{ field: 'name', dir: 'asc' }])
-})
-```
-
-- [ ] **Step 4: Run tests**
-
-Run: `cd frontend && npx vitest run lib/state-management/__tests__/data-management.store.test.ts`
-Expected: PASS (the existing single-sort cycle test stays green — the non-additive path is unchanged).
-
-- [ ] **Step 5: Commit**
-
-```bash
-git add frontend/lib/state-management/data-management.store.ts frontend/components/data-management/record-data-table.tsx frontend/lib/state-management/__tests__/data-management.store.test.ts
-git commit -m "feat(data-mgmt): multi-column sort (shift-click)"
-```
-
----
-
-## Task 14: URL sync (collection + query + record deep-link)
-
-**Files:**
-- Create: `frontend/lib/hooks/use-query-url-sync.ts`
-- Modify: `frontend/components/data-management/data-management-view.tsx`
-- Test: `frontend/lib/hooks/__tests__/use-query-url-sync.test.tsx`
-
-**Interfaces:**
-- Consumes: `next/navigation` (`useRouter`, `useSearchParams`, `usePathname`), the store.
-- Produces: `useQueryUrlSync()` — hydrates `collection`, `q`, `page`, `sort`, `detailId` (`?record`) from the URL on mount, then writes back with `router.replace`.
-
-- [ ] **Step 1: Write the failing test**
-
-```tsx
-import { describe, it, expect, vi } from 'vitest'
-import { renderHook } from '@testing-library/react'
-const replace = vi.fn()
-vi.mock('next/navigation', () => ({
-  useRouter: () => ({ replace }),
-  usePathname: () => '/dashboard/data-management',
-  useSearchParams: () => new URLSearchParams('collection=products&record=abc&q=laptop'),
-}))
-const actions = { setCollection: vi.fn(), setSearch: vi.fn(), setPage: vi.fn(), toggleSort: vi.fn(), openDetail: vi.fn() }
-vi.mock('@/lib/state-management/data-management.store', () => ({
-  useDataManagementStore: (sel: (s: unknown) => unknown) =>
-    sel({ ...actions, collection: null, q: '', page: 1, sort: [], detailId: null }),
-}))
-import { useQueryUrlSync } from '@/lib/hooks/use-query-url-sync'
-
-describe('useQueryUrlSync', () => {
-  it('hydrates collection, search, and record from the URL on mount', () => {
-    renderHook(() => useQueryUrlSync())
-    expect(actions.setCollection).toHaveBeenCalledWith('products')
-    expect(actions.setSearch).toHaveBeenCalledWith('laptop')
-    expect(actions.openDetail).toHaveBeenCalledWith('abc')
-  })
-})
-```
-
-- [ ] **Step 2: Run to verify it fails**
-
-Run: `cd frontend && npx vitest run lib/hooks/__tests__/use-query-url-sync.test.tsx`
-Expected: FAIL — module missing.
-
-- [ ] **Step 3: Implement `use-query-url-sync.ts`**
-
-```ts
-'use client'
-import * as React from 'react'
-import { usePathname, useRouter, useSearchParams } from 'next/navigation'
-import { useDataManagementStore } from '@/lib/state-management/data-management.store'
-
-/** Two-way projection between the URL and the data-management store. */
-export function useQueryUrlSync() {
-  const router = useRouter()
-  const pathname = usePathname()
-  const params = useSearchParams()
-  const store = useDataManagementStore((s) => s)
-  const hydrated = React.useRef(false)
-
-  React.useEffect(() => {
-    if (hydrated.current) return
-    hydrated.current = true
-    const collection = params.get('collection')
-    const q = params.get('q')
-    const page = params.get('page')
-    const sort = params.get('sort')
-    const record = params.get('record')
-    if (collection) store.setCollection(collection)
-    if (q) store.setSearch(q)
-    if (page) store.setPage(Number(page) || 1)
-    if (sort) {
-      const [field, dir] = sort.split(':')
-      if (field && (dir === 'asc' || dir === 'desc')) {
-        store.toggleSort(field)                 // → asc
-        if (dir === 'desc') store.toggleSort(field) // → desc
-      }
+// replace the placeholder resume(...) in chat-stream.service.ts
+  private async resume(
+    principal: PrincipalRef,
+    resume: { approvalId: string; approved: boolean },
+    sink: StreamSink,
+  ): Promise<void> {
+    const emit = (e: SseEvent) => sink.write(sseFrame(e));
+    const appr = await this.approvals.findById(resume.approvalId);
+    if (!appr || appr.status !== 'pending') {
+      emit({ type: 'error', message: 'Approval not found or already resolved' });
+      emit({ type: 'done', status: 'failed' });
+      return;
     }
-    if (record) store.openDetail(record)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+    if (principal.role !== 'admin' && appr.conversationId) {
+      await this.conversations.getOwned(principal, appr.conversationId); // throws 403/404
+    }
+    emit({ type: 'start', conversationId: appr.conversationId as string, runId: appr.runId });
+    try {
+      const agent = this.mastra.getAgent(AGENT_ID);
+      const payload = { runId: appr.mastraRunId as string, toolCallId: appr.toolCallId ?? undefined };
+      const output = resume.approved
+        ? await agent.approveToolCall(payload as never)
+        : await agent.declineToolCall(payload as never);
+      const { suspend, mastraRunId } = await this.pump(output as never, emit);
 
-  React.useEffect(() => {
-    if (!hydrated.current) return
-    const next = new URLSearchParams()
-    if (store.collection) next.set('collection', store.collection)
-    if (store.q) next.set('q', store.q)
-    if (store.page > 1) next.set('page', String(store.page))
-    if (store.sort[0]) next.set('sort', `${store.sort[0].field}:${store.sort[0].dir}`)
-    if (store.detailId) next.set('record', store.detailId)
-    const qs = next.toString()
-    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false })
-  }, [store.collection, store.q, store.page, store.sort, store.detailId, pathname, router])
-}
+      if (suspend) {
+        // A second approval surfaced during the continuation — record it and pause again.
+        const next = await this.approvals.create({
+          runId: appr.runId, conversationId: appr.conversationId, mastraRunId,
+          toolCallId: suspend.toolCallId, actionType: actionTypeForTool(suspend.toolName),
+          title: `Approve ${suspend.toolName}`, payload: suspend.args, status: 'pending',
+        } as never);
+        await this.approvals.decide(resume.approvalId, { status: resume.approved ? 'executed' : 'rejected', decidedByUserId: principal.id, decidedAt: new Date() } as never);
+        emit({ type: 'approval-required', approvalId: next.id, toolCallId: suspend.toolCallId, toolName: suspend.toolName, actionType: actionTypeForTool(suspend.toolName), title: `Approve ${suspend.toolName}`, payload: suspend.args });
+        emit({ type: 'done', status: 'awaiting_approval' });
+        return;
+      }
+
+      await this.approvals.decide(resume.approvalId, {
+        status: resume.approved ? 'executed' : 'rejected',
+        decidedByUserId: principal.id,
+        decidedAt: new Date(),
+      } as never);
+      await this.runs.finish(appr.runId, { status: resume.approved ? 'succeeded' : 'cancelled', finishedAt: new Date() } as never);
+      emit({ type: 'done', status: resume.approved ? 'succeeded' : 'cancelled' });
+    } catch (err) {
+      await this.approvals.decide(resume.approvalId, { status: 'failed', decidedByUserId: principal.id, decidedAt: new Date(), result: { error: err instanceof Error ? err.message : String(err) } } as never);
+      emit({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+      emit({ type: 'done', status: 'failed' });
+    }
+  }
 ```
 
-- [ ] **Step 4: Invoke in the view** — in `DataManagementView`, call `useQueryUrlSync()` before the "default to first collection" effect, and guard that effect so it only fires when the URL did not set a collection (it already checks `!collection`, which the hydration will have populated — no further change needed).
+Note: match `ApprovalRepository.decide`'s patch fields to `approval.service.ts` (`status`, `decidedByUserId`, `decidedAt`, `decisionNote`, `result`). `approveToolCall`/`declineToolCall` take `{ runId, toolCallId? }` (confirmed in `@mastra/core` agent `.d.ts` L1392/L1429; same arg shape as the buffered `approveToolCallGenerate` already used in `mastra-adapters.ts`).
 
-- [ ] **Step 5: Run to verify it passes**
+- [ ] **Step 4: Run the full service test to verify it passes**
 
-Run: `cd frontend && npx vitest run lib/hooks/__tests__/use-query-url-sync.test.tsx`
-Expected: PASS.
+Run: `cd api && npx jest src/features/mastra/services/chat-stream.service.spec.ts`
+Expected: PASS (3 tests — new turn ×2 + resume).
+
+- [ ] **Step 5: Build + run the feature suites**
+
+Run: `cd api && pnpm build && npx jest src/features/mastra src/features/document-ingest`
+Expected: build succeeds; all mastra + document-ingest specs pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add frontend/lib/hooks/use-query-url-sync.ts frontend/components/data-management/data-management-view.tsx frontend/lib/hooks/__tests__/use-query-url-sync.test.tsx
-git commit -m "feat(data-mgmt): URL-synced query + record deep-link"
+git add api/src/features/mastra/services/chat-stream.service.ts api/src/features/mastra/services/chat-stream.service.spec.ts
+git commit -m "feat(mastra): streaming resume-after-approval path"
 ```
 
 ---
 
-## Phase 3 gate: full suite + build
+## Manual end-to-end verification (after all tasks)
 
-- [ ] `cd frontend && npx vitest run` — all green.
-- [ ] `cd frontend && npm run build` — clean.
-- [ ] `cd api && npm test && npm run build` — clean.
+Run against the dev datastores (Postgres `:30898` / Redis `:30490` from `.env`; Meili on its configured port) with a valid JWT for a non-admin user. Start the API: `cd api && pnpm start:dev`.
 
----
-
-# Phase 4 — Optional: date-range filter
-
-> Implement only if date-range **filtering** is wanted this iteration. Recency **sort** already works (Task 13 + always-sortable `createdAt`/`updatedAt`). This adds range operators to the query filter builder.
-
-## Task 15 (optional): range filter operators + date-range control
-
-**Files:**
-- Modify: `api/src/features/search-service/search.types.ts` (`SearchFilterValue` +range)
-- Modify: `api/src/features/search-service/dto/search-query.dto.ts` (filter union +range)
-- Modify: `api/src/features/search-service/search-record.service.ts` (`toFilterClause` range)
-- Test: `api/src/features/search-service/search-record.service.spec.ts`
-- Modify: `frontend/lib/interfaces/search.interface.ts` (`FilterValue` +range)
-- Modify: `frontend/components/data-management/field-to-filter.tsx` (date/number range inputs)
-
-- [ ] **Step 1: Backend test**
-
-```ts
-it('emits >= / <= for a range filter value', async () => {
-  const { service, engine } = make()
-  await service.search('articles', { q: '', page: 1, filters: { createdAt: { gte: 100, lte: 200 } } as never })
-  expect(searchArg(engine).filter).toEqual(['createdAt >= 100 AND createdAt <= 200'])
-})
-```
-
-(`createdAt` is in the test collection's `filterableAttributes`.)
-
-- [ ] **Step 2: Widen `SearchFilterValue`** in `search.types.ts`:
-
-```ts
-export type SearchFilterValue =
-  | string | number | boolean | Array<string | number>
-  | { gte?: number; lte?: number };
-```
-
-- [ ] **Step 3: Extend `searchQuerySchema`** filter union:
-
-```ts
-z.union([
-  z.string(), z.number(), z.boolean(),
-  z.array(z.union([z.string(), z.number()])),
-  z.object({ gte: z.number().optional(), lte: z.number().optional() }),
-])
-```
-
-- [ ] **Step 4: Extend `toFilterClause`** (handle the range object before the array/scalar branches):
-
-```ts
-if (value && typeof value === 'object' && !Array.isArray(value)) {
-  const parts: string[] = []
-  const r = value as { gte?: number; lte?: number }
-  if (typeof r.gte === 'number') parts.push(`${field} >= ${r.gte}`)
-  if (typeof r.lte === 'number') parts.push(`${field} <= ${r.lte}`)
-  return parts.join(' AND ')
-}
-```
-
-- [ ] **Step 5: Frontend** — add `{ gte?: number; lte?: number }` to `FilterValue`; in `field-to-filter.tsx`, render two `type="date"`/`type="number"` inputs for `date`/`number` fields that emit `{ gte, lte }` (omit empty bounds; emit `undefined` when both empty).
-
-- [ ] **Step 6: Run, build, commit**
-
-```bash
-cd api && npx jest src/features/search-service/search-record.service.spec.ts && npm run build
-cd ../frontend && npx vitest run components/data-management/__tests__/field-to-filter.test.tsx && npm run build
-git add api/src/features/search-service/ frontend/lib/interfaces/search.interface.ts frontend/components/data-management/field-to-filter.tsx
-git commit -m "feat(search): range filter operators + date-range control"
-```
+1. **Ingestion:** `POST /files` (initiate) → upload bytes to the presigned URL → `POST /files/:id/complete` with a small `.md`, `.pdf`, and `.docx`. After a moment, `POST /search/collections/documents/query` with `{ "q": "", "page": 1 }` returns the three records (`fileId`, `ownerUserId`, `text` populated).
+2. **Doc search + streaming:** `curl -N -H "Authorization: Bearer <jwt>" -H 'Content-Type: application/json' -d '{"message":"summarize my uploaded documents"}' http://localhost:3000/agent/chat/stream` — observe `start` → `tool-input`(search-documents) → `tool-output` → `text-delta`… → `done:succeeded`.
+3. **HITL over stream:** send a message that triggers `send-email` → stream ends with `approval-required` + `done:awaiting_approval`. Then `curl -N ... -d '{"conversationId":"<id>","resume":{"approvalId":"<id>","approved":true}}' .../agent/chat/stream` → continuation streams and ends `done:succeeded`; the `agent_approval` row is `executed`, `agent_run` is `succeeded`.
+4. **History:** `GET /agent/conversations/:id/messages` returns the full ordered thread as `ChatMessageDto[]`. A call with a *different* user's JWT returns 403/404.
 
 ---
 
-## Self-Review
+## Self-review notes
 
-**Spec coverage:** §2.2 single-record read → T1; frontend read → T2–T3; §4 detail/edit off-page + live status → T3; deep-link → T14; §5 creation redesign → T4; §6 schema management → T5–T9; §7 facets → T10–T11, highlight → T10, T12, multi-sort + recency → T13, URL-sync → T14, date-range (optional) → T15; §10 RBAC/edge cases → T3 (404/not-found, read-only), T8 (reindex caveat banner), T9 (admin gating).
-
-**Placeholder scan:** no TBD/TODO; every code step shows complete code; every test step shows real assertions + a run command with expected output.
-
-**Type consistency:** `RecordDetail` (nested) vs `RecordHit` (flat) kept distinct; `RecordView` (backend) shape mirrors `RecordDetail` (frontend); `toSearchRequestBody(query, opts)` and `recordService.query(collection, query, opts)` share the same `{ facets?, highlight? }` opts; `toggleSort(field, additive?)` is defined once (T13) and called with the modifier in the table (T13) and hydration (T14); `CollectionPanel` union, `Create/UpdateCollectionInput`, and `collectionFormSchema`/`CollectionFormValues` are each defined once and imported consistently.
-
-**Known intentional deviations:** the optimistic "pending row" in the table (design §5) is omitted as non-load-bearing now that the PG read authoritatively shows a just-created record — the toast **View** action + bounded revalidation cover the flow; if a visible pending row is later wanted, it is an additive change to `record-data-table.tsx`.
-```
+- **Spec coverage:** streaming endpoint (Tasks 7–9) ✓; messages endpoint (Task 6) ✓; extraction→record pipeline (Tasks 1–4) ✓; owner-scoped doc-search tool (Task 5) ✓. All four Part-1 backend gaps from `current_design.md` are covered. Frontend (chat UI, `chat.store`, hooks, attachments UI, data-management upload dialog) is **Part 2**, written against the SSE contract + endpoints above.
+- **Deviation from design:** the design assumed a turnkey AI-SDK data stream; the installed `@mastra/core@1.50.1` exposes only `fullStream`/`textStream` and `ai` is not a backend dep, so we emit an explicit SSE protocol (documented above) and Part-2 consumes it with a small custom hook rather than stock `useChat`. Rationale recorded here and in memory ([[ai-assistant-ui-design]]).
+- **Scoping simplification:** `search-documents` filters by `ownerUserId` only (the tested `SearchRecordService.search` supports AND-ed equality/`IN`, not `OR`/`NOT EXISTS`). `conversationId` is stored for provenance; conversation-scoped retrieval is a future enhancement.
+- **Type consistency:** `INGEST_DOCUMENT_QUEUE`/`INGEST_DOCUMENT_JOB`/`DOCUMENTS_COLLECTION`/`isIngestableDocMime` defined in Task 1, reused verbatim in Tasks 3–5; `SseEvent`/`chunkToSse`/`sseFrame`/`actionTypeForTool` defined in Task 7, reused in Tasks 8–9; `ChatMessageDto`/`toChatMessages` in Task 6.
+- **Verify-at-implementation flags (marked inline):** exact `ExceptionService`/`ErrorCode` import paths (Task 2); `FileMetadata` field names (Task 3); Mastra memory-store typing (Task 6); exact `runs.create/finish` + `approvals.create/decide` patch field names (Tasks 8–9). Each has a fallback noted.

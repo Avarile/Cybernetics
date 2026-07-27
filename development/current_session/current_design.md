@@ -1,308 +1,209 @@
-# Design v2 — Single-Record Read, Schema Management, Creation Redesign & Query Enrichment
+# Design: Comprehensive AI Assistant UI (Claude-style) over the Mastra backend
 
-**Status:** Design phase (v2). Supersedes the v1 design in this session (v1 is built and preserved in git history + auto-memory `data-management-panel-v1`).
-**Scope:** Frontend, in `frontend/`, over the existing `search-service` + `file-processor` APIs — **plus one required and one optional backend change in `api/`** (both in `search-service`, both small):
-- **Required:** `GET /search/collections/:name/records/:id` (single-record read from Postgres).
-- **Optional:** range operators in the query filter builder, to enable date-range filtering.
+## Context
 
----
+The frontend already ships the full **AI Elements v1.9.0** component kit (`frontend/components/ai-elements/*`) but it is **100% unused** — there is no chat route, no `useChat` wiring, and the only agent client is a **buffered REST** call (`lib/services/agent.service.ts` → `POST /agent/chat`). The backend `api/src/features/mastra` exposes a working orchestrator agent with HITL tool-approvals, conversation metadata, and Postgres+Mastra persistence, but has **three gaps** for a Claude-grade UX: (1) no token-streaming endpoint that preserves the audit ledger + approvals, (2) no "get thread messages" endpoint for rehydrating history, (3) no document-text-extraction step linking an uploaded docx/pdf/markdown to a searchable record.
 
-## 0. What v1 already ships (baseline)
+This design delivers a **Claude-style assistant** (streaming, reasoning, tool calls, HITL approvals, attachments, persistent history) by composing the existing AI Elements, and specifies the **full-stack** work (frontend + the three backend gaps) needed to support it.
 
-A schema-driven records manager at `/dashboard/data-management`: collection switcher, server-paginated TanStack table (manual pagination/sort/filter), exact-match filter popover, debounced full-text search, single-column sort, admin-gated create/edit/delete, file attachments (presigned), and a detail drawer. Three state layers keep UI components near-stateless: **Zustand** (query/selection/panels), **RHF+zod** (record form, schema built from `FieldSpec[]`), **SWR** (server cache). Everything renders from the active collection's `FieldSpec[]` via `field-to-{column,input,filter,zod,cell}`.
+## Decisions (confirmed with user)
 
-**The two v1 limitations this iteration removes:**
-1. Detail/edit only sees rows already in `results.hits` (`hits.find(id)`) — you can't open, edit, or link to a record that isn't on the current page, and a just-created record (async-indexed) isn't visible until it lands in Meili. The create flow papers over this with a `setTimeout(1200ms)` guess.
-2. No collection/schema management UI (records only).
-
----
-
-## 1. This iteration — locked decisions
-
-| # | Decision |
-|---|---|
-| 1 | **Scope:** records CRUD **+ collection/schema management**. |
-| 2 | **Add `GET /records/:id` from Postgres** (reversal of the earlier Meili-only stance). It is the correctness backbone for detail/edit/deep-link and the just-created record. |
-| 3 | **Search/list stays Meili-only** — no PG list endpoint. Browsing/searching still goes through `POST /query`. |
-| 4 | **IA:** single page + collection dropdown; schema management via **modals/sheets**. Per-record deep links via **`?record=<id>`** on the same page (resolved through the new PG read), not routed record pages. |
-| 5 | **Query enrichment:** facets+counts, recency sort, date-range filter (optional backend touch), URL-sync, highlighting, multi-sort — all confirmed. |
-| 6 | **State boundary unchanged:** Zustand / RHF+zod / SWR. Optimistic pending rows live in the SWR cache, never Zustand. |
+| # | Decision | Choice |
+|---|----------|--------|
+| 1 | Chat delivery | **Add a proper streaming endpoint** (`POST /agent/chat/stream`) that preserves the `agent_run` ledger + HITL approvals. No use of the ownership-bypassing Mastra catch-all. |
+| 2 | Design scope | **Full-stack** — frontend UI + the 3 backend gaps (extraction→record, streaming, messages). |
+| 3 | Doc upload entry | **Both** — chat composer attachments *and* a document-upload flow on the data-management page. |
+| 4 | History | **Full persistent history** — left rail lists conversations; selecting one rehydrates its full message thread. |
 
 ---
 
-## 2. Backend contract
+## 1. Architecture overview
 
-### 2.1 Existing endpoints reused (no change)
-
-| Surface | Method | Auth | Use |
-|---|---|---|---|
-| `/search/collections` · `/:name` | GET | any authed | switcher · active `FieldSpec[]` |
-| `/search/collections` | POST | **admin** | **create collection (schema)** — *already exists, FE will now call it* |
-| `/search/collections/:name` | PATCH | **admin** | **edit collection (displayName/description/fields)** — *already exists* |
-| `/search/collections/:name` | DELETE | **admin** | **delete collection** — *already exists* |
-| `/search/collections/:name/query` | POST | any authed | table data (search/facets/sort) |
-| `/search/collections/:name/records` | POST | **admin** | create/update (upsert on `externalId`) → 202 |
-| `/search/collections/:name/records/:id` | DELETE | **admin** | delete (by id **or** externalId) → 204 |
-| `/search/collections/:name/reload` | POST | **admin** | reindex → 202 |
-| `/files*` | — | authed | presigned attachments (unchanged from v1) |
-
-The collection CRUD endpoints already exist and are validated (`createCollectionSchema`, `updateCollectionSchema`, `validateFieldSpec`). Schema management is therefore **frontend-only** work against a proven API.
-
-### 2.2 REQUIRED new endpoint — single-record read
+Three-pane, Claude-like layout inside the standard dashboard shell (`SidebarProvider` + `AppSidebar` + `SiteHeader` + `SidebarInset`, copied from `app/dashboard/data-management/page.tsx`).
 
 ```
-GET /search/collections/:name/records/:id          (any authenticated — reads are global)
-→ 200 { id, externalId, document, indexState, indexError, createdAt, updatedAt }
-→ 404 SEARCH_RECORD_NOT_FOUND  (missing, soft-deleted, or collection mismatch)
+┌──────────┬──────────────────────────────────────────────┬───────────────┐
+│ App      │  ┌ SiteHeader ───────────────────────────┐    │               │
+│ Sidebar  │  │ ☰  Assistant           [Context ⓘ]     │    │  Artifact /   │
+│ (nav)    │  ├────────────────────────────────────────┤    │  Detail panel │
+│          │  │                                        │    │  (optional,   │
+│  …       │  │   Conversation (stick-to-bottom log)   │    │  slide-in for │
+│  Assist. │  │   ┌ Message (assistant) ────────────┐  │    │  code /       │
+│  Data    │  │   │ Reasoning ▸                      │  │    │  markdown     │
+│  Files   │  │   │ MessageResponse (Streamdown md)  │  │    │  artifacts)   │
+│          │  │   │ Tool ▸ (input/output/approval)   │  │    │               │
+│  ┌─────┐ │  │   │ InlineCitation ¹ ²               │  │    │               │
+│  │Conv │ │  │   └──────────────────────────────────┘  │    │               │
+│  │hist │ │  │   ┌ Confirmation (HITL approval) ────┐  │    │               │
+│  │rail │ │  │   │ Approve / Reject                 │  │    │               │
+│  │(SWR)│ │  │   └──────────────────────────────────┘  │    │               │
+│  └─────┘ │  │   [ConversationScrollButton]           │    │               │
+│          │  ├────────────────────────────────────────┤    │               │
+│          │  │ PromptInput: [attach] textarea [▶/■]   │    │               │
+│          │  │  └ staged attachments (upload/extract) │    │               │
+│          │  └────────────────────────────────────────┘    │               │
+└──────────┴──────────────────────────────────────────────┴───────────────┘
 ```
 
-**Placement:** on `SearchQueryController` (`@Controller('search/collections/:name')`) as `@Get('records/:id')`. That controller is the *open-read* surface (its `POST query` is open; its `POST reload` is admin via a method-level guard). `RecordController` is class-level `@Roles('admin')`, so the read must not live there.
+- **History rail** = a second, inner column (not the app sidebar). Collapses into a `Sheet` on mobile. Lists conversations from `GET /agent/conversations`.
+- **Center** = `Conversation`/`ConversationContent` + `PromptInput`, driven by AI SDK `useChat`.
+- **Right panel** = optional Claude-style `Artifact` viewer (deferred-friendly; Phase 4).
 
-**Service method** (`SearchRecordService.get`) mirrors `remove()`'s dual-key resolution exactly:
+**Data flow:** `useChat` (AI SDK v6) owns the live streamed `UIMessage[]` + `ChatStatus`. A Zustand `chat.store` owns cross-cutting UI/selection/attachment/approval state. SWR owns server lists + history hydration. All HTTP goes through the existing `apiClient` (Bearer, no `/api` prefix, error-envelope), except the streaming fetch which uses a token-injecting wrapper.
 
-```ts
-async get(collection: string, key: string): Promise<RecordView> {
-  await this.requireCollection(collection);
-  let row = UUID_RE.test(key) ? await this.records.findLiveById(key) : null;
-  if (!row) row = await this.records.findLiveByExternalId(collection, key);
-  if (!row || row.collection !== collection) {
-    throw this.errors.create(ErrorCode.SEARCH_RECORD_NOT_FOUND);
-  }
-  return toRecordView(row); // { id, externalId, document, indexState, indexError, createdAt, updatedAt }
-}
+---
+
+## 2. Routes & navigation
+
+- **New route:** `app/dashboard/chat/page.tsx` — replicate the page-shell from `data-management/page.tsx`, render `<ChatView/>`. Auth-gating is inherited from `app/dashboard/layout.tsx` (`AuthGuard`) + `middleware.ts`.
+- **Active conversation in the URL:** sync `?c=<conversationId>` (refresh-safe, shareable) using the existing `lib/hooks/use-query-url-sync.ts` pattern.
+- **Nav entry:** append to `data.navMain` in `frontend/components/app-sidebar.tsx`:
+  `{ title: 'Assistant', url: '/dashboard/chat', icon: <HugeiconsIcon icon={AiChat02Icon} strokeWidth={2} /> }` (confirm exact Hugeicons export at build).
+- Add a nav test alongside the existing `components/__tests__/nav-main.test.tsx` precedent.
+
+---
+
+## 3. Frontend component tree (compose from AI Elements)
+
+New folder `frontend/components/chat/` (shared-folder convention, like `components/data-management/`):
+
+| File | Responsibility | Key AI Elements used |
+|------|----------------|----------------------|
+| `chat-view.tsx` | Top-level orchestrator: layout, wires `useChat` + `chat.store` + SWR, handles conversation switching/URL sync | layout only |
+| `conversation-history-rail.tsx` | SWR conversation list, new-chat button, active highlight, rename/delete, name filter | `ScrollArea`, `Button`, `Empty` |
+| `chat-thread.tsx` | Scroll log; maps `messages: UIMessage[]` → rows; renders scroll button + empty state | `Conversation`, `ConversationContent`, `ConversationScrollButton`, `ConversationEmptyState` |
+| `chat-message.tsx` | Renders one `UIMessage`'s parts in order (text/reasoning/tool/source/file) | `Message`, `MessageContent`, `MessageResponse`, `Reasoning`, `MessageActions` |
+| `chat-tool-call.tsx` | Renders a tool part by state (input-available/output-available/approval-requested/error) | `Tool`, `ToolHeader`, `ToolInput`, `ToolOutput`, `CodeBlock` |
+| `chat-approval-card.tsx` | HITL: renders a pending approval, calls decide + resumes stream | `Confirmation`, `ConfirmationActions`, `ConfirmationAction` |
+| `chat-citations.tsx` | Renders document-source citations from `search-documents` results | `InlineCitation*` |
+| `chat-composer.tsx` | Prompt textarea + submit/stop + attach button; submits via `useChat.sendMessage` | `PromptInput`, `PromptInputTextarea`, `PromptInputSubmit`, `PromptInputTools` |
+| `chat-attachments.tsx` | Staged attachment chips with upload/extract status | `Attachments`, `Attachment`, `AttachmentPreview`, `AttachmentRemove` |
+| `chat-empty-state.tsx` | Greeting + starter suggestion chips (no `Suggestion` element exists — build simple `Button` chips) | `ConversationEmptyState`, `Button` |
+| `artifact-panel.tsx` *(Phase 4, optional)* | Right-side viewer for code/markdown artifacts | `Artifact*`, `CodeBlock` |
+
+**Deferred (YAGNI) AI Elements:** `voice/*`, `workflow/*`, `model-selector` (single agent — no picker), `queue`, `checkpoint`, `MessageBranch*`, `web-preview`/`sandbox`. Kept as future work.
+
+---
+
+## 4. State management design
+
+Follow existing conventions exactly (Zustand `devtools` + `useShallow` composite selectors + labeled `set(..., false, 'chat/x')`; SWR tuple keys + service-closure fetchers + predicate invalidation).
+
+**A. `useChat` (AI SDK v6, `@ai-sdk/react`)** — owns the live turn:
+- Provides `messages: UIMessage[]`, `status: ChatStatus`, `sendMessage`, `stop`, `regenerate`, `addToolResult`, `setMessages`.
+- Configured per active conversation: `useChat({ id: conversationId, transport, onError })`; seed history via `setMessages(hydrated)` on switch.
+- Directly powers `MessageResponse`, `Reasoning.isStreaming`, `Tool` state, and `PromptInputSubmit status`.
+
+**B. `lib/state-management/chat.store.ts` (Zustand)** — cross-cutting UI/selection not owned by the stream:
 ```
-
-`findLiveById` / `findLiveByExternalId` already exist on `SearchRecordRepository`; `SearchRecordRow` already carries `document`, `indexState`, `indexError`, `createdAt`, `updatedAt`. So this is a thin controller method + a service method + a mapper — no schema/migration, no queue, no new dependency.
-
-**Why it matters (design consequences):**
-- **Always fresh** — reads Postgres (source of truth), so it returns a record the instant `persist` commits, *before* BullMQ indexes it into Meili.
-- **Authoritative index status** — the response carries live `indexState` (`PENDING`/`INDEXED`/`FAILED`) + `indexError`, which Meili hits cannot express (a Meili hit is, by definition, already indexed).
-- **Shape difference to respect:** the PG read returns `document` as a **nested object** with system fields (`id`, `externalId`, timestamps) as siblings. Search hits instead **flatten** `document` fields to the top level. The frontend models both (`RecordHit` flat; `RecordDetail` nested) and the detail/edit path consumes `RecordDetail.document` directly — cleaner than v1's `documentOf()` strip.
-
-### 2.3 OPTIONAL backend touch — date-range filter operators
-
-`buildFilter`/`toFilterClause` currently emit only `field = value` and `field IN […]`. True date-range filtering (`createdAt >= X AND createdAt <= Y`) needs range operators. This is a small, contained extension to the filter builder (accept `{ gte?, lte? }` range values and emit `>=`/`<=` clauses) — **still Meili-only reads, no new endpoint**. If deferred, the **recency *sort* ships free** (both `createdAt`/`updatedAt` are always sortable) and date-*range filtering* waits. Marked optional; recommended as a follow-up within this iteration if time allows.
-
----
-
-## 3. Information architecture (single page + dropdown)
-
+activeConversationId: string | null;  setActiveConversation(id | null)
+historyRailOpen: boolean;             toggleHistoryRail()
+artifact: { open: boolean; part?: … };  openArtifact / closeArtifact
+attachments: StagedAttachment[];      // { file, status, fileId?, recordId?, error? }
+addAttachments / patchAttachment / removeAttachment / clearAttachments
+approvals: PendingApproval[];         setApprovals / removeApproval   // surfaced from stream + SWR
 ```
-Data Management
-[collection ▾ · Manage…]  [🔍 search]  [Filters ▸]  [Columns ▾] [Reindex] [+ New record]
-────────────────────────────────────────────────────────────────────────────────────
-12 records · sort: price ↓                                        (facets live in Filters)
-┌────────────────────────────────────────────────────────────────────────────────────┐
-│ ☐  name        price   tag       ⋯                                                   │
-│ ☐  Widget A    9.99    new       ⋯   → row/⋯ opens detail (?record=…) ────────────┐  │
-│ ☐  Widget B    12.00   sale      ⋯                                                │  │
-└──────────────────────────────────────────────────────────────────────────────────┘  │
-‹ 1 2 3 ›                                                        20 / page ▾            │
-                                                                                        ▼
-  Manage… ──► Collection Manager dialog (list · new · edit · delete · reindex)   Detail/Edit drawer
-                     └─► Collection Editor sheet (identity + FieldSpec editor)    (PG-backed, live status)
-```
+Selectors: `useActiveConversationId`, `useHistoryRailOpen`, `useStagedAttachments` (`useShallow`), `usePendingApprovals`.
 
-- **Collection dropdown** keeps switching; its footer gains a **"Manage…"** item (admin-only) → **Collection Manager** dialog.
-- **Detail/Edit** is a drawer, but now **PG-backed and deep-linkable** via `?record=<id>`; `?collection=<name>` and the query params are URL-synced too.
+**C. SWR hooks (`lib/hooks/`)** — server lists + hydration:
+
+| Hook | Key | Source | Invalidation |
+|------|-----|--------|--------------|
+| `use-conversations.ts` | `['agent','conversations', page]` | `agentService.listConversations` | predicate `k[0]==='agent' && k[1]==='conversations'` after send/new/rename/delete |
+| `use-conversation-messages.ts` | `['agent','conversation', id, 'messages']` | `agentService.getMessages(id)` → `UIMessage[]` | on switch |
+| `use-approvals.ts` | `['agent','approvals']` | `agentService.listApprovals` | after decide |
+| `use-chat-attachments.ts` | — | wraps existing `useFileUpload` + poll ingest status | — |
 
 ---
 
-## 4. Single-record read on the frontend (headline change)
+## 5. Streaming integration
 
-### 4.1 Types + service + hook
+**Backend contract:** `POST /agent/chat/stream` returns a **Vercel AI SDK UI-message data stream** (`toUIMessageStreamResponse()` semantics) so `@ai-sdk/react` `useChat` consumes it natively. Same `memory` + `requestContext` wiring as the existing `AgentRunnerService.runChat`; the run is still recorded in `agent_run`, and suspended tool calls still create `agent_approval` rows and surface as a tool part in `approval-requested` state before the stream closes.
 
-```ts
-// interfaces/search.interface.ts (additions)
-export interface RecordDetail {
-  id: string
-  externalId: string | null
-  document: RecordDocument
-  indexState: IndexState            // 'PENDING' | 'INDEXED' | 'FAILED'
-  indexError?: string | null
-  createdAt: string
-  updatedAt: string
-}
-```
+**Auth transport (frontend):** `useChat` needs the Bearer token that today lives in the in-memory `lib/http/token-store.ts`. Add `lib/http/chat-fetch.ts`: a `fetch` wrapper that injects `Authorization: Bearer <token>` from the token store and, on an `AUTH_TOKEN_EXPIRED` response, runs the existing single-flight refresh (`lib/auth/session.ts`) once and retries — mirroring the `api-client` interceptor so streaming stays consistent with the rest of the app. Wire it as `transport: new DefaultChatTransport({ api: <apiUrl>/agent/chat/stream, fetch: chatFetch })`.
 
-```ts
-// services/record.service.ts (addition)
-get(collection: string, id: string): Promise<RecordDetail> {
-  return apiClient
-    .get<RecordDetail>(`${base(collection)}/records/${encodeURIComponent(id)}`)
-    .then((r) => r.data)
-}
-```
-
-```ts
-// hooks/use-record.ts (new) — single record, polls while PENDING
-export function useRecord(collection: string | null, id: string | null) {
-  const key = collection && id ? (['record', collection, id] as const) : null
-  const { data, isLoading, error, mutate } = useSWR<RecordDetail>(
-    key,
-    () => recordService.get(collection!, id!),
-    { refreshInterval: (d) => (d?.indexState === 'PENDING' ? 1500 : 0) },
-  )
-  return { record: data, isLoading, error, mutate }
-}
-```
-
-`refreshInterval` as a function polls **only** while the record is `PENDING`, then stops on `INDEXED`/`FAILED` — a live, self-terminating status without a manual timer.
-
-### 4.2 Detail/Edit drawer redesign
-
-`record-detail-drawer.tsx` changes from *"find the row in the current page"* to *"fetch the record by id from Postgres"*:
-
-- Drops the `results` prop and `results.hits.find(id)`. Consumes `useRecord(collection, detailId)`.
-- **Works for any record** — off the current page, filtered out, or just created and not yet in Meili.
-- **Live status header:** a `RecordStatusBadge` reads `record.indexState` (`◐ Indexing · ● Indexed · ⚠ Failed` + `indexError` tooltip); it updates as polling converges.
-- **Loading/error states:** skeleton while fetching; an error empty-state with retry (`mutate`) for a bad id / 404.
-- **Edit** (admin + `externalId` present): `RecordForm` in edit mode, seeded from `record.document` (nested — no `documentOf` strip). On save → `persist` by `externalId` → `mutate(['record',…])` + bounded list revalidation. Records with `externalId === null` render read-only (a second persist would duplicate them), with an explanatory badge.
-
-### 4.3 Deep-linking on the single page (`?record=`)
-
-A small URL-sync hook (`use-query-url-sync.ts`, also used by query state in §7) maps `store.detailId ↔ ?record` and `store.collection ↔ ?collection`:
-
-- On mount: if `?collection` / `?record` are present, hydrate the store (`setCollection`, `openDetail`) → the drawer opens and `useRecord` fetches from PG.
-- On change: pushing/replacing the param keeps a **shareable record URL** without routed record pages — satisfying "deep-link to a record" while honoring the single-page IA (decision #4).
-- A future routed `/[collection]/[id]` page is a **non-goal** now; the PG read makes it trivial later if wanted.
+**Message mapping (history):** `GET /agent/conversations/:id/messages` returns `UIMessage[]` already shaped for the SDK (role + ordered parts: `text`, `reasoning`, `tool-*`, `file`). The frontend feeds it into `setMessages` — no client-side transform of Mastra internals.
 
 ---
 
-## 5. Creation & editing redesign (the async-indexing gap, solved honestly)
+## 6. HITL approval flow (streaming-aware)
 
-**Status model — three sources, one truth:**
-- **Detail drawer** = authoritative (PG read, live `indexState`, polls while PENDING).
-- **Table** = whatever Meili returns = INDEXED records. A `PENDING` record simply isn't in the list yet — so the list is *not* where we assert "your record exists."
-- **Optimistic pending row (optional):** immediately after create we may prepend a synthetic row (submitted `document` + returned `id`, badged PENDING) so the table doesn't look empty; it reconciles away on the next list revalidation. This is cosmetic, not load-bearing.
+1. Stream emits a tool part; when the tool requires approval the run suspends → stream surfaces a `PendingApproval` (as the tool part's `approval-requested` state and/or a typed data part) and closes; `agent_run.status = awaiting_approval`.
+2. `chat-approval-card.tsx` renders `Confirmation` with the `title` + `payload`.
+3. User approves/rejects → `agentService.decideApproval(id, { approved, note? })` (existing `POST /agent/approvals/:id`).
+4. On approve, resume: `POST /agent/chat/stream` with `{ conversationId, resume: { approvalId } }` → server resumes the suspended Mastra run and streams the continuation into the same `useChat` thread. (Exact Mastra resume API — `resumeStream`/`sendToolApproval` — confirmed at implementation.)
 
-**Create flow (replaces the 1200ms guess):**
-1. `RHF submit → (attachments upload → ids) → recordService.persist(collection, [{ externalId, document }]) → 202 [{ id, indexState:'PENDING' }]`.
-2. Toast **"Record queued for indexing"** with a **View** action → `store.openDetail(id)`.
-3. The drawer's `useRecord` reads the record from **Postgres immediately** (fresh, even pre-index), shows the PENDING badge, and **polls to INDEXED/FAILED**. The user sees their record and its real status right away — no guessing.
-4. The list revalidates on a **bounded schedule** (a couple of delayed `mutate`s) so the row appears in the table once indexed; the optional optimistic row covers the interim.
-
-**Edit flow:** unchanged contract (re-persist by `externalId`) but now reachable for **any** record via the PG-backed drawer; on success, revalidate the `['record',…]` key (drawer) and the list.
-
-**`ApiError.fieldErrors`** still map onto RHF fields via `setError` (validation envelope from `api-client`), unchanged from v1.
+This reuses the `Confirmation`/`Tool` elements whose state machine already models `approval-requested → executed/rejected`.
 
 ---
 
-## 6. Schema / collection management (new surface, existing endpoints)
+## 7. File → text → record pipeline
 
-### 6.1 Service + mutation hook
+**Goal:** uploading a docx/pdf/markdown produces a persisted, agent-searchable text **record**, from **both** the chat composer and the data-management page, using the **same server-side pipeline**.
 
-```ts
-// services/collection.service.ts (additions)
-create(input: CreateCollectionInput): Promise<CollectionView>            // POST /search/collections
-update(name: string, patch: UpdateCollectionInput): Promise<CollectionView> // PATCH /search/collections/:name
-remove(name: string): Promise<void>                                       // DELETE /search/collections/:name
-```
+**Frontend (both entry points reuse the same primitives):**
+- Reuse `lib/hooks/use-file-upload.ts` (`sha256Hex` + `fileService.initiate/uploadToPolicy/complete`) and the `file-dropzone.tsx` pattern.
+- **Chat:** `PromptInput` attach → `use-chat-attachments` uploads with metadata `{ conversationId }`, shows per-file status (`hashing → uploading → extracting → ready`), then the doc is available to the agent in that conversation.
+- **Data-management:** add `components/data-management/document-upload-dialog.tsx` + a toolbar action; when the `documents` collection is selected, uploaded docs appear as records in the existing `RecordDataTable`.
 
-```ts
-// hooks/use-collection-mutations.ts (new)
-// create/update/remove → service + revalidate SWR '/search/collections'
-//   (+ the ':name' definition key on update) + toast. Admin-only call sites.
-```
-
-### 6.2 Collection Manager dialog
-
-Admin-only, opened from the dropdown's **"Manage…"** footer. Lists collections (`displayName · name · field count · updatedAt`) with **New / Edit / Delete / Reindex** actions. **Delete** routes through a confirm `AlertDialog` explaining it drops the Meili index and soft-deletes the collection's records.
-
-### 6.3 Collection Editor sheet (create & edit)
-
-- **Identity:** `name` (lower_snake_case; **immutable on edit** — PATCH accepts only `displayName`/`description`/`fields`), `displayName`, `description`.
-- **FieldSpec editor** (`field-spec-editor.tsx`): repeatable rows — `name`, `type` select, flag checkboxes (`required`/`searchable`/`filterable`/`sortable`), optional `enum` chips; add/remove/reorder.
-- **Client validation mirrors `validateFieldSpec` + `createCollectionSchema`** (`lib/schema/validate-field-spec.ts`), so errors surface before submit:
-  - `name` matches `^[a-zA-Z][a-zA-Z0-9_]*$`; not reserved (`id, externalId, collection, createdAt, updatedAt`); no duplicates.
-  - `searchable` only on `string`/`string[]`; `sortable` only on scalars (`string/number/boolean/date`) — **invalid flags are disabled at source** (greyed), not just error-after.
-  - **≥1 searchable field** and **≥1 field** overall.
-  - Collection `name` `^[a-z][a-z0-9_]*$` (≤100), `displayName` 1–255, `description` ≤500.
-- **Edit caveats surfaced in-UI before save:** changing `fields` triggers a **background reindex** (the service enqueues `REINDEX_COLLECTION_JOB`) and does **not** retro-validate existing records (`validateDocument` runs only on new persists) — a banner warns of both.
-
-### 6.4 Reindex
-
-The existing `recordService.reload` + `useRecordMutations.reindex` (v1) are surfaced as a **Reindex** action in the Manager and the toolbar (admin).
+**Backend delta (owner-scoped, NOT the admin HTTP route):**
+- **Extraction service** in `api/src/features/file-processor/`: add libs `mammoth` (docx→text), `pdf-parse` (pdf→text), markdown/txt read as UTF-8. `DocumentExtractionService.extract(mime, stream): Promise<{ title, text }>`.
+- **Ingest step:** on upload-complete for a supported doc mime, enqueue `ingest-document` (extend `processors/file-processing.processor.ts` or add a consumer): `FileService.getContentStream(fileId, owner)` → extract → `SearchRecordService.persist('documents', [{ externalId: fileId, document: {...} }])` **in-process** (bypasses the admin-gated `RecordController`, stays owner-scoped). Link `recordId` onto file metadata and set `ownerUserId` + optional `conversationId` on the record.
+- **`documents` collection** (bootstrap/migration) field spec: `title:string`, `text:string(searchable)`, `fileId:string`, `mimeType:string`, `ownerUserId:string(filterable)`, `conversationId:string(filterable,optional)`, `createdAt`. v1 = one record per document; paragraph chunking + embeddings are future (Meili is lexical; `semanticRecall` is off).
+- **Agent retrieval:** add a `search-documents` tool (or extend `search-query`) that targets `documents` and injects a Meili filter `ownerUserId = <principal> AND (conversationId = <ctx.conversationId> OR conversationId NOT EXISTS)` from `tools/tool-context.ts` requestContext. Update `agents/prompts.ts` so the orchestrator uses it. Results feed `InlineCitation` in the UI.
 
 ---
 
-## 7. Query enrichment
+## 8. Backend deltas — summary (contracts)
 
-| Feature | Backend need | Design |
-|---|---|---|
-| **Faceted filters + counts** | none (facetDistribution already returned) | `useRecords` requests `facets` for **filterable enum/boolean (low-cardinality)** fields. `record-filters.tsx` renders each enum option with its live count (`sale (42)`) from `facetDistribution`, driving the existing `IN […]` filter. Free discovery UI. |
-| **Recency sort** | none (createdAt/updatedAt always sortable) | Sort presets "Newest/Oldest" + sortable `createdAt`/`updatedAt` header affordances on every collection. |
-| **Date-range filter** | **optional** (range operators, §2.3) | A range control on `createdAt`/`updatedAt`. Ships only if the filter builder gains `>=`/`<=`; otherwise deferred, with recency sort covering the common need. |
-| **URL-synced query** | none | `use-query-url-sync.ts` mirrors `collection + q + filters + sort + page (+ record)` ↔ `?searchParams`. Shareable/bookmarkable queries on the single page; store stays source of truth (URL is a projection). |
-| **Highlighting** | none (`highlight` already supported) | `useRecords` sends `highlight` for searchable fields; `field-cell.tsx` renders Meili's `_formatted` `<mark>` spans for text cells. |
-| **Multi-column sort** | none (`sort[]` already supported) | `store.toggleSort(field, additive?)` keeps an **ordered array** (shift-click header = add/cycle within the array; plain click = replace). Serializer already maps `sort[]` → `["field:dir", …]`. |
+| Area | File(s) | Change |
+|------|---------|--------|
+| Streaming chat | `mastra/controllers/chat.controller.ts`, `services/agent-runner.service.ts` | `POST /agent/chat/stream` (data-stream; ledger + approvals preserved; `{ resume:{approvalId} }` continuation) |
+| Messages | `mastra/controllers/chat.controller.ts` (or new `conversation.controller.ts`), `services/conversation.service.ts` | `GET /agent/conversations/:id/messages` → owner-checked `UIMessage[]` |
+| Doc search tool | `mastra/tools/search-documents.tool.ts`, `agents/orchestrator.agent.ts`, `agents/prompts.ts`, `tools/tool-context.ts` | conversation/owner-scoped document search |
+| Extraction + ingest | `file-processor/services/document-extraction.service.ts`, `processors/file-processing.processor.ts`, `file.controller.ts` | extract text; in-process persist to `documents`; link file↔record; pass `conversationId` metadata |
+| Collection bootstrap | search-service migration/seed | create `documents` collection field spec |
 
----
-
-## 8. State management deltas
-
-**Boundary unchanged.** Additions only:
-
-- **Zustand store** — add collection-manager UI state: `collectionPanel: 'closed' | 'list' | { mode: 'create' } | { mode: 'edit'; name: string }` with open/close actions. Extend `toggleSort` to support `additive` (multi-sort ordered array). `detailId` already exists (now drives a PG fetch, not an in-memory find). **No record data in the store** — the store stays UI/query-only.
-- **SWR hooks** — **new:** `use-record.ts` (single record, PENDING-polling), `use-collection-mutations.ts`. **Changed:** `use-records.ts` (request `facets` + `highlight`), `use-record-mutations.ts` (create → open PG detail + bounded revalidate, drop the fixed-delay-as-correctness).
-- **RHF+zod** — the record form gains an edit path seeded from `RecordDetail.document`; a **new** `fieldSpec` zod schema backs the Collection Editor form.
-- **URL** — `use-query-url-sync.ts` projects store ↔ searchParams (query + `collection` + `record`). Optimistic/pending record data stays in the **SWR cache**, never Zustand.
+All new `/agent/*` and `/files/*` routes stay behind the global `JwtAuthGuard`; document ingest is owner-scoped (no admin requirement) because it runs in-process, not via `RecordController`.
 
 ---
 
-## 9. Component inventory
+## 9. Reuse map (do not rebuild)
 
-**Backend (`api/src/features/search-service/`)**
-- **New:** `SearchRecordService.get()` + `toRecordView()` mapper; `@Get('records/:id')` on `SearchQueryController`; a `RecordView` type. Tests: service resolve-by-id/externalId + 404, controller 200/404.
-- **Optional:** range-operator support in `buildFilter`/`toFilterClause` + `searchQuerySchema` filter value union.
-
-**Frontend — new**
-`lib/services` → `collection.service.ts` (+create/update/remove)
-`lib/hooks` → `use-record.ts`, `use-collection-mutations.ts`, `use-query-url-sync.ts`
-`lib/schema` → `validate-field-spec.ts`, `field-spec-to-zod.ts`
-`components/data-management` → `collection-manager-dialog.tsx`, `collection-editor-sheet.tsx`, `field-spec-editor.tsx`, `record-status-badge.tsx`, `facet-list.tsx` (or fold into `record-filters`)
-
-**Frontend — changed**
-`record-detail-drawer.tsx` (PG fetch via `useRecord`, live status, off-page edit) · `data-management-view.tsx` (stop passing `results` to the drawer; mount URL-sync) · `use-records.ts` (facets + highlight) · `use-record-mutations.ts` (create→PG detail + bounded revalidate) · `record-toolbar.tsx` (Manage… + Reindex) · `record-data-table.tsx` (optional optimistic pending row + multi-sort headers) · `record-filters.tsx` (facet counts, date range) · `field-cell.tsx` (highlight) · `data-management.store.ts` (collectionPanel, additive sort) · `interfaces/search.interface.ts` (`RecordDetail`).
-
-Each file stays focused and under the ~500-line guideline.
+- **AI UI:** `frontend/components/ai-elements/{chatbot,code}/*` — compose, don't author from scratch.
+- **Upload:** `lib/hooks/use-file-upload.ts`, `lib/services/file.service.ts`, `app/dashboard/file-management/components/file-dropzone.tsx`.
+- **Records:** `lib/services/record.service.ts` (`persist/query/get`), `components/data-management/record-data-table.tsx` (`buildColumns` + manual TanStack + `DataTablePagination`).
+- **Agent client:** `lib/services/agent.service.ts` (+ extend with `getMessages`, streaming wired via transport), `lib/interfaces/mastra.interface.ts`.
+- **Patterns:** `data-management.store.ts` (Zustand shape), `data-management-view.tsx` (view composition), `swr-fetcher.ts`, `lib/http/api-client.ts` + `token-store.ts`, `use-query-url-sync.ts`, `lib/auth/guards.tsx`.
+- **Theme:** emerald oklch tokens in `app/globals.css`, Geist fonts, Hugeicons, `cn()`.
 
 ---
 
-## 10. RBAC & edge cases
+## 10. Phased implementation plan
 
-- **RBAC:** `useIsAdmin()` gates New record, edit, delete, reindex, and **all** collection management (Manage…, editor, delete). The new **single-record GET is open to any authenticated role** (consistent with query); non-admins get a full read/detail experience with no write affordances.
-- **Just-created record:** visible immediately via PG detail with a PENDING badge; the table catches up on revalidation. If indexing **fails**, the drawer shows `FAILED` + `indexError`, and an admin **Reindex** is offered.
-- **Deep link to a deleted/unknown record** (`?record=<id>`): the PG read 404s → drawer shows a "record not found" empty state; the rest of the page is unaffected.
-- **Collection edit → reindex:** banner warns the list may briefly reflect the old index while the reindex runs; existing records are not retro-validated against the new schema.
-- **Collection delete:** confirmed; the switcher falls back to the first remaining collection.
-- **Search-engine outage (`SEARCH_UNAVAILABLE`):** the table shows the retry empty-state (v1), but **detail/edit still work** (PG read is independent of Meili) — a resilience win from the new endpoint.
-
----
-
-## 11. Testing
-
-- **Backend:** `SearchRecordService.get` resolves by UUID and by externalId, rejects collection mismatch / soft-deleted (404); controller returns 200 shape and 404; (optional) filter builder emits `>=`/`<=` for range values.
-- **Store:** `collectionPanel` transitions; multi-sort `toggleSort(additive)` ordering (add/cycle/replace); existing v1 store tests stay green.
-- **Hooks:** `useRecord` polls while PENDING and stops on INDEXED/FAILED (mocked SWR); `useCollectionMutations` calls the right endpoints + revalidates.
-- **Schema mirror:** `validate-field-spec` matches backend rules (reserved/dup names, searchable/sortable type constraints, ≥1 searchable).
-- **Components:** detail drawer fetches by id and renders status/edit/read-only branches; collection editor blocks invalid field specs and posts a valid one; facet list renders counts and dispatches `IN` filters; RBAC hides admin controls for non-admins; deep-link hydration opens the drawer from `?record`.
+- **Phase 0 — Backend foundations:** `documents` collection; `DocumentExtractionService` + ingest pipeline (docx/pdf/md); `GET /agent/conversations/:id/messages`; `POST /agent/chat/stream` (+resume); `search-documents` tool + prompt update.
+- **Phase 1 — Chat shell & streaming:** add `@ai-sdk/react`; route + nav + `ChatView` + history rail + `chat-thread` + `chat-composer` on `useChat` streaming; empty state + suggestions; `?c=` URL sync.
+- **Phase 2 — Tools, reasoning, HITL:** `chat-tool-call`, `Reasoning`/`ChainOfThought`, `chat-approval-card` + resume, `chat-citations`.
+- **Phase 3 — Attachments & ingestion:** chat composer attachments → conversation-scoped doc records; data-management `document-upload-dialog`.
+- **Phase 4 — History & polish:** full rehydration, rename/delete conversation, optional `artifact-panel`, mobile `Sheet` rail, a11y (`role="log"`, focus), dark-mode QA.
 
 ---
 
-## 12. Resolved decisions
+## 11. Verification
 
-1. **Single-record read:** **added** as `GET /records/:id` from Postgres (reversal of the initial Meili-only choice) — the correctness backbone for detail/edit/deep-link and the just-created record.
-2. **Search/list:** stays **Meili-only**; no PG list endpoint.
-3. **Deep links:** per-record via **`?record=<id>`** on the single page, not routed record pages.
-4. **Scope:** records CRUD **+ collection/schema management** (admin), via modals/sheets off the dropdown.
-5. **Creation gap:** solved by **PG detail + polling**, not a fixed delay; optimistic list row is cosmetic/optional.
-6. **Query enrichment:** facets+counts, recency sort, URL-sync, highlight, multi-sort — **in**; **date-range filter** gated on the optional filter-builder extension.
-7. **State boundary:** unchanged (Zustand / RHF+zod / SWR); optimistic data lives in SWR.
+- **Frontend (Vitest, co-located `__tests__/`, `*.test.tsx`, `@testing-library/react` + `axios-mock-adapter`):**
+  - `chat.store` reducers; `use-conversations`/`use-conversation-messages`/`use-chat-attachments` (mocked services); `chat-thread` renders text/reasoning/tool/citation parts; `chat-approval-card` calls `decideApproval` + triggers resume; `chat-composer` submit/stop; `nav-main` includes Assistant entry. Streaming transport tested with a mocked SSE/data-stream reader.
+- **Backend (Jest, `*.spec.ts`):**
+  - `DocumentExtractionService` over docx/pdf/md fixtures; ingest pipeline (`getContentStream`→`persist`) writes a `documents` record + links file; `POST /agent/chat/stream` emits a data stream, writes `agent_run`, and suspends→`agent_approval` on an approval tool; `GET …/messages` maps to `UIMessage[]` and enforces ownership; `search-documents` applies the owner/conversation filter.
+- **Manual E2E (dev):**
+  1. Data-management → select `documents` → upload a pdf/docx/md → record appears.
+  2. Assistant → new chat → attach a pdf → ask about it → agent calls `search-documents`, answer cites the doc.
+  3. Ask something triggering `send-email` → `Confirmation` card → approve → stream resumes and completes.
+  4. Refresh mid-conversation → history rail lists it, selecting rehydrates full thread.
+  5. Toggle dark mode (`d`) and narrow viewport → rail collapses to `Sheet`, layout holds.
 
-## 13. Non-goals / deferred
+---
 
-- No routed record/collection pages (single-page IA); no PG list/browse endpoint.
-- No bulk import/export (CSV/JSON), no saved views, no inline-grid editing (edit is the drawer form). The batch `persist` API keeps bulk import a cheap later add.
-- Date-range **filtering** deferred unless the optional filter-builder extension lands this iteration (recency **sort** ships regardless).
-- No cross-collection/global search; no per-tenant record scoping (reads are global, as today).
+## Status & next step
+
+This is the **design-stage** artifact of the `goal → design → plan → implement` session workflow. The design is approved. The next stage is a detailed, task-numbered **implementation plan** (TDD-style, per phase) before any code is written.

@@ -132,3 +132,31 @@
 [2026-07-17T12:02:16.551Z] [INFO] Worker optimize completed in 1ms
 [2026-07-17T12:05:16.581Z] [INFO] Starting worker: audit (1/2 concurrent)
 [2026-07-17T12:05:16.583Z] [INFO] Worker audit completed in 2ms
+[2026-07-24T02:18:29.315Z] [INFO] AI workers disabled (default) - all workers run local-only. Enable with `daemon start --headless`, daemon.aiWorkers.enabled=true, or RUFLO_DAEMON_AI_WORKERS=1 (#2661)
+[2026-07-24T02:18:29.315Z] [INFO] Scheduled map (interval: 900s, first run in 0s)
+[2026-07-24T02:18:29.316Z] [INFO] Scheduled audit (interval: 600s, first run in 120s)
+[2026-07-24T02:18:29.316Z] [INFO] Scheduled optimize (interval: 900s, first run in 240s)
+[2026-07-24T02:18:29.316Z] [INFO] Scheduled consolidate (interval: 1800s, first run in 360s)
+[2026-07-24T02:18:29.316Z] [INFO] Scheduled testgaps (interval: 1200s, first run in 480s)
+[2026-07-24T02:18:29.316Z] [INFO] Scheduled backup (interval: 86400s, first run in 600s)
+[2026-07-24T02:18:29.316Z] [INFO] Scheduled harness (interval: 21600s, first run in 720s)
+[2026-07-24T02:18:29.316Z] [INFO] Lifecycle monitor active (workspace-removal, ttl=43200s)
+[2026-07-24T02:18:29.317Z] [INFO] Daemon started (PID: 83287, CPUs: 16, workers: 7, maxCpuLoad: 12.8, minFreeMemoryPercent: 10%)
+[2026-07-24T02:18:29.318Z] [INFO] Starting worker: map (1/2 concurrent)
+[2026-07-24T02:18:29.318Z] [INFO] Worker map completed in 0ms
+[2026-07-24T02:20:29.321Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-24T02:20:29.322Z] [INFO] Worker audit completed in 2ms
+[2026-07-24T02:22:29.320Z] [INFO] Starting worker: optimize (1/2 concurrent)
+[2026-07-24T02:22:29.320Z] [INFO] Worker optimize completed in 1ms
+[2026-07-24T02:24:29.321Z] [INFO] Starting worker: consolidate (1/2 concurrent)
+[2026-07-24T02:24:29.322Z] [INFO] Consolidate worker: distillation skipped (no-db)
+[2026-07-24T02:24:29.322Z] [INFO] Worker consolidate completed in 2ms
+[2026-07-24T02:26:29.321Z] [INFO] Starting worker: testgaps (1/2 concurrent)
+[2026-07-24T02:26:29.321Z] [INFO] Worker testgaps completed in 1ms
+[2026-07-24T02:28:29.320Z] [INFO] Starting worker: backup (1/2 concurrent)
+[2026-07-24T02:28:29.320Z] [INFO] Worker backup completed in 1ms
+[2026-07-24T02:30:29.320Z] [INFO] Starting worker: harness (1/2 concurrent)
+[2026-07-24T02:30:29.335Z] [INFO] Worker harness completed in 16ms
+[2026-07-24T02:30:29.336Z] [INFO] Starting worker: audit (1/2 concurrent)
+[2026-07-24T02:30:29.336Z] [INFO] Worker audit completed in 0ms
+[2026-07-24T02:33:29.448Z] [INFO] Worker map deferred: CPU load too high: 106.56

@@ -1,23 +1,13 @@
-# Goal (v2): extend the data control panel with a Postgres-backed single-record read, collection/schema management, a redesigned creation flow, and an enriched query experience.
+# Goal
 
-Builds on the shipped v1 data control panel (`/dashboard/data-management`, records CRUD over the search-service). v1 design/plan are in git history; v2 supersedes them in this session.
+- Design a comprehensive AI UI based on the existing UIs in `frontend/components/ai-elements`.
+- Design the state managements accordingly.
+- Connect to the backend module `api/src/features/mastra`.
+- Including the file upload and data processing pipeline(for docx, pdf, markdown, when those file is uploaded, they will be transformed into texts and save to a record). This feature will be add to 
+- Basically, should follow the design of the Claude.
+- Discuss with me if you have any other suggestions.
+- Design the UI in a fashion and neat way
 
-feature description: Add to the existing data-management page. Frontend-first, with two backend touches — one required, one optional:
+# Output the design to development/current_session/current_design.md
 
-1. Single-record read (REQUIRED backend endpoint): add `GET /search/collections/:name/records/:id` served from Postgres (source of truth, always fresh, exposes indexState). Resolves by UUID or externalId, mirroring the DELETE route's dual-key logic; open to any authenticated principal (reads are global). This unlocks: detail/edit for ANY record (on or off the current result page), per-record deep links, and immediate visibility of a just-created record before it is indexed — the core fix for the async-indexing gap.
-2. Collection / schema management (admin): create, edit, and delete collections and their field schemas from the UI, via modals/sheets reached from the collection dropdown. The backend collection CRUD endpoints already exist — the frontend just doesn't call them yet.
-3. Creation / editing redesign: stop hiding the async-indexing gap. On create, open an immediate PG-backed detail view that shows live index status (PENDING → INDEXED / FAILED) and polls while pending — this replaces the fixed 1200ms guess as the correctness path. The list still revalidates on a bounded schedule (optionally with an optimistic pending row). Edit stays a re-persist on externalId and now works for any record via the PG read; records without an externalId are read-only.
-4. Query enrichment (all four confirmed): faceted filters with live counts (facetDistribution), recency sort (free) + date-range filter (the OPTIONAL backend touch — needs range operators in the query filter builder), URL-synced query state, and hit highlighting + multi-column sort.
-
-## Constraints (locked with user)
-- Search/list reads stay on Meili (POST /query). The only new read endpoint is GET /records/:id from Postgres. No PG list endpoint — browsing still flows through Meili.
-- Per-record deep links are delivered on the single page via a `?record=<id>` URL param (resolved through the new PG read), NOT routed record pages — the single-page IA stays.
-- IA stays single-page + collection dropdown; schema management lives in modals/sheets, not routes.
-- Preserve the clean v1 state boundary: Zustand (UI/query/selection/panels) · react-hook-form+zod (record & schema forms) · SWR (server cache). Optimistic pending rows live in the SWR cache, not Zustand.
-
-## Actions to take
-Design this iteration and output the design to development/current_session/current_design.md, then an implementation plan to development/current_session/current_implementation_plan.md.
-
-
-Resume this session with:
-claude --resume 42d7018f-4b64-4d17-97ea-87f41e11ee1b
+claude --resume 4a74696c-4a90-449c-aada-fbbba68ff6f9
