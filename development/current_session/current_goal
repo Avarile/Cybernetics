@@ -10,4 +10,5 @@
 
 # Output the design to development/current_session/current_design.md
 
-claude --resume 4a74696c-4a90-449c-aada-fbbba68ff6f9
+Resume this session with:
+claude --resume 45645b0d-1740-4188-8b9e-dd9c30f2087c
