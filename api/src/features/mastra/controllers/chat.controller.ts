@@ -14,6 +14,7 @@ import { CurrentUser } from '../../../common/decorators/current-user.decorator';
 import type { Principal } from '../../../common/principal';
 import { ChatDto } from '../dto/chat.dto';
 import { ChatStreamDto } from '../dto/chat-stream.dto';
+import { ListConversationsDto } from '../dto/list-conversations.dto';
 import { AgentRunnerService } from '../services/agent-runner.service';
 import { ChatStreamService } from '../services/chat-stream.service';
 import { ConversationMessagesService } from '../services/conversation-messages.service';
@@ -52,12 +53,8 @@ export class ChatController {
 
   @ApiOperation({ summary: 'List agent conversations' })
   @Get('conversations')
-  list(
-    @CurrentUser() user: Principal,
-    @Query('page') page = '1',
-    @Query('limit') limit = '20',
-  ) {
-    return this.conversations.listForOwner(user, Number(page), Number(limit));
+  list(@CurrentUser() user: Principal, @Query() query: ListConversationsDto) {
+    return this.conversations.listForOwner(user, query.page, query.limit);
   }
 
   @ApiOperation({ summary: 'Get messages for a conversation' })

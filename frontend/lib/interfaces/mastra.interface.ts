@@ -17,9 +17,15 @@ export interface ChatResult {
   pendingApprovals: PendingApproval[]
 }
 
+/** A chat thread as listed in the history rail. `title` is null until the
+ *  backend can resolve one (explicit override, else Mastra's generated title). */
 export interface Conversation {
   id: string
   title: string | null
+  kind: string
+  status: string
+  lastMessageAt: string | null
+  messageCount: number
   createdAt: string
   updatedAt: string
 }

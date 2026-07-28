@@ -4,7 +4,40 @@ import {
   ExceptionService,
 } from '../../../infrastructure/exceptions';
 import type { ConversationKind, PrincipalRef } from '../mastra.types';
-import { ConversationRepository } from '../repositories/conversation.repository';
+import {
+  ConversationRepository,
+  type ConversationListRow,
+} from '../repositories/conversation.repository';
+import { sanitizeTitle } from './conversation-title';
+
+/** The conversation shape the client sees — no ownership or storage internals. */
+export interface PublicConversation {
+  id: string;
+  title: string | null;
+  kind: ConversationKind;
+  status: string;
+  lastMessageAt: Date | null;
+  messageCount: number;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+/**
+ * `title` is an explicit override (backfilled, or renamed by a user later);
+ * when unset we fall back to the title Mastra generated for the thread.
+ */
+function toPublicConversation(row: ConversationListRow): PublicConversation {
+  return {
+    id: row.id,
+    title: sanitizeTitle(row.title) ?? sanitizeTitle(row.generatedTitle),
+    kind: row.kind,
+    status: row.status,
+    lastMessageAt: row.lastMessageAt,
+    messageCount: row.messageCount,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
 
 /**
  * Resolves/creates the Mastra-thread-backed conversation for a principal and
@@ -54,10 +87,29 @@ export class ConversationService {
     } as never);
   }
 
-  /** Page of conversations owned by the principal; empty for anonymous principals. */
-  async listForOwner(principal: PrincipalRef, page = 1, limit = 20) {
-    if (!principal.id) return [];
-    return this.repo.listByOwner(principal.id, page, limit);
+  /**
+   * Page of conversations owned by the principal; empty for anonymous ones.
+   *
+   * Returns the `{ data, total, page, limit }` envelope every paginated list in
+   * this API uses (cf. `UsersService.list`) — the history rail reads `.data`.
+   */
+  async listForOwner(
+    principal: PrincipalRef,
+    page = 1,
+    limit = 20,
+  ): Promise<{
+    data: PublicConversation[];
+    total: number;
+    page: number;
+    limit: number;
+  }> {
+    if (!principal.id) return { data: [], total: 0, page, limit };
+    const { rows, total } = await this.repo.listByOwner(
+      principal.id,
+      page,
+      limit,
+    );
+    return { data: rows.map(toPublicConversation), total, page, limit };
   }
 
   /** Fetch a conversation by id, 404 if missing, 403 if not owned by the principal. */

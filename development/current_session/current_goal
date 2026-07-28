@@ -9,6 +9,3 @@
 - Design the UI in a fashion and neat way
 
 # Output the design to development/current_session/current_design.md
-
-Resume this session with:
-claude --resume 45645b0d-1740-4188-8b9e-dd9c30f2087c
