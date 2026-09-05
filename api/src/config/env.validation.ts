@@ -76,6 +76,46 @@ export const envSchema = z
       .default(5_000),
     SEARCH_DEFAULT_PAGE_SIZE: z.coerce.number().int().positive().default(20),
     SEARCH_MAX_PAGE_SIZE: z.coerce.number().int().positive().default(100),
+    /** Meili `pagination.maxTotalHits` — the deep-pagination ceiling per index. */
+    SEARCH_MAX_TOTAL_HITS: z.coerce.number().int().positive().default(10_000),
+
+    // Search indexing pipeline (Postgres → async → Meili)
+    /** How often the reconciliation sweep repairs unconverged records. */
+    SEARCH_RECONCILE_EVERY_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(60_000),
+    /** A record must be unconverged for this long before the sweep retries it. */
+    SEARCH_RECONCILE_STALE_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(300_000),
+    /** Max records re-enqueued per sweep. */
+    SEARCH_RECONCILE_BATCH: z.coerce.number().int().positive().default(500),
+    /** BullMQ worker concurrency for the search-indexing queue. */
+    SEARCH_INDEX_CONCURRENCY: z.coerce.number().int().positive().default(4),
+    /** Max record ids carried in one batched index job. */
+    SEARCH_INDEX_BATCH_SIZE: z.coerce.number().int().positive().default(500),
+    /** Attempt count past which a record is reported as stuck (observability only). */
+    SEARCH_MAX_INDEX_ATTEMPTS: z.coerce.number().int().positive().default(10),
+    /** Retention for soft-deleted records whose removal Meili has confirmed. */
+    SEARCH_PURGE_AFTER_DAYS: z.coerce.number().int().positive().default(30),
+    /** How often the purge sweep runs. */
+    SEARCH_PURGE_EVERY_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(86_400_000),
+    /** Max rows hard-deleted per purge sweep. */
+    SEARCH_PURGE_BATCH: z.coerce.number().int().positive().default(1_000),
+    /** Ceiling for the optional `?wait=true` convergence poll on persist. */
+    SEARCH_WAIT_TIMEOUT_MS: z.coerce.number().int().positive().default(5_000),
+    /** Index lag past which the health check reports search as degraded. */
+    SEARCH_LAG_ALERT_SECONDS: z.coerce.number().int().positive().default(300),
+    /** TTL on compiled-collection cache entries (backstop for lost invalidations). */
+    SEARCH_REGISTRY_TTL_MS: z.coerce.number().int().positive().default(60_000),
 
     // Mastra AI agent
     AI_GATEWAY_API_KEY: z.string().default(''),
@@ -152,6 +192,17 @@ export const envSchema = z
         code: z.ZodIssueCode.custom,
         path: ['MEILISEARCH_MASTER_KEY'],
         message: 'MEILISEARCH_MASTER_KEY is required when NODE_ENV=production.',
+      });
+    }
+
+    // A page larger than the index's total-hits ceiling can never be filled, so
+    // the two limits would silently contradict each other.
+    if (env.SEARCH_MAX_TOTAL_HITS < env.SEARCH_MAX_PAGE_SIZE) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['SEARCH_MAX_TOTAL_HITS'],
+        message:
+          'SEARCH_MAX_TOTAL_HITS must be >= SEARCH_MAX_PAGE_SIZE (a page cannot exceed the index hit ceiling).',
       });
     }
 

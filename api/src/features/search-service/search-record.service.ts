@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -9,12 +10,13 @@ import {
   SearchEngineError,
   type SearchEngine,
 } from '../../infrastructure/search-engine/search-engine.interface';
+import type { NewSearchRecordRow } from '../../infrastructure/database/schema/search.schema';
 import { validateDocument } from './document-validator';
 import { IndexRegistry, type CompiledCollection } from './index-registry';
+import { SearchMetrics } from './search.metrics';
 import { SearchRecordRepository } from './search-record.repository';
 import {
-  DELETE_RECORD_JOB,
-  INDEX_RECORD_JOB,
+  INDEX_RECORDS_JOB,
   REINDEX_COLLECTION_JOB,
   SEARCH_INDEXING_QUEUE,
 } from './search.constants';
@@ -24,10 +26,13 @@ import type {
   SearchRequest,
   SearchResults,
 } from './search.types';
-import { computeChecksum, INDEXING_JOB_OPTS } from './search.util';
+import { chunk, computeChecksum, INDEXING_JOB_OPTS } from './search.util';
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Interval between convergence polls when a caller opts into `wait`. */
+const WAIT_POLL_MS = 100;
 
 export interface RecordInput {
   externalId?: string;
@@ -46,20 +51,26 @@ export interface RecordView {
   document: Record<string, unknown>;
   indexState: IndexState;
   indexError: string | null;
+  indexAttempts: number;
+  indexedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
 
 /**
  * Owns record persistence and querying. Writes go to Postgres (source of truth)
- * then enqueue an async index job; queries hit Meili only. Reads are global —
+ * then hand off to the async indexer; queries hit Meili only. Reads are global —
  * authorization is enforced by the controller's role guards.
+ *
+ * The handoff is deliberately **non-fatal**: the row is already committed with
+ * `indexState = 'PENDING'`, and the reconciliation sweep re-drives anything that
+ * did not converge. Failing the request because Redis blinked would report a
+ * write as lost when it is durably stored and will be indexed shortly.
  */
 @Injectable()
 export class SearchRecordService {
   private readonly logger = new Logger(SearchRecordService.name);
-  private readonly defaultPageSize: number;
-  private readonly maxPageSize: number;
+  private readonly cfg: SearchConfig;
 
   constructor(
     @Inject(SEARCH_ENGINE) private readonly engine: SearchEngine,
@@ -68,15 +79,22 @@ export class SearchRecordService {
     @InjectQueue(SEARCH_INDEXING_QUEUE) private readonly queue: Queue,
     config: ConfigService,
     private readonly errors: ExceptionService,
+    private readonly metrics: SearchMetrics,
   ) {
-    const cfg = config.getOrThrow<SearchConfig>('search');
-    this.defaultPageSize = cfg.defaultPageSize;
-    this.maxPageSize = cfg.maxPageSize;
+    this.cfg = config.getOrThrow<SearchConfig>('search');
   }
 
+  /**
+   * Validate, upsert atomically, then hand the touched ids to the indexer.
+   *
+   * @param wait when true, poll until every touched record has settled (or
+   *   `waitTimeoutMs` elapses) and return the observed states — for importers
+   *   and tests that query immediately afterwards.
+   */
   async persist(
     collection: string,
     inputs: RecordInput[],
+    wait = false,
   ): Promise<PersistResult[]> {
     const def = await this.requireCollection(collection);
 
@@ -91,83 +109,107 @@ export class SearchRecordService {
       }
     }
 
-    const results: PersistResult[] = [];
-    const toIndex: string[] = [];
-    for (const input of inputs) {
+    // Later entries win, so one payload can carry a record twice without
+    // tripping Postgres's "cannot affect row a second time" on the upsert.
+    const deduped = dedupeByExternalId(inputs);
+
+    const withKey = deduped.filter((r) => r.externalId);
+    const existing = await this.records.findLiveByExternalIds(
+      collection,
+      withKey.map((r) => r.externalId as string),
+    );
+    const byExternalId = new Map(existing.map((row) => [row.externalId, row]));
+
+    // Plan first, write once. Each entry keeps its slot so the returned array
+    // stays parallel to `deduped` without depending on RETURNING order.
+    type Plan =
+      | { kind: 'skip'; result: PersistResult }
+      | { kind: 'write'; externalId: string | null; id: string };
+    const plans: Plan[] = [];
+    const rows: NewSearchRecordRow[] = [];
+    const handedOff = new Date();
+
+    for (const input of deduped) {
       const externalId = input.externalId ?? null;
       const checksum = computeChecksum(externalId, input.document);
+      const prior = externalId ? byExternalId.get(externalId) : undefined;
 
-      if (externalId) {
-        const existing = await this.records.findLiveByExternalId(
-          collection,
-          externalId,
-        );
-        if (existing) {
-          if (
-            existing.checksum === checksum &&
-            existing.indexState === 'INDEXED'
-          ) {
-            results.push({
-              id: existing.id,
-              externalId: existing.externalId,
-              indexState: existing.indexState,
-            });
-            continue;
-          }
-          const updated = await this.records.update(existing.id, {
-            document: input.document,
-            checksum,
-            indexState: 'PENDING',
-            indexError: null,
-          });
-          const row = updated ?? existing;
-          toIndex.push(row.id);
-          results.push({ id: row.id, externalId, indexState: 'PENDING' });
-          continue;
-        }
+      // Unchanged content that Meili already serves: nothing to write, nothing
+      // to index. This is what makes re-ingest of an unchanged upstream free.
+      if (
+        prior &&
+        prior.checksum === checksum &&
+        prior.indexState === 'INDEXED'
+      ) {
+        plans.push({
+          kind: 'skip',
+          result: {
+            id: prior.id,
+            externalId: prior.externalId,
+            indexState: prior.indexState,
+          },
+        });
+        continue;
       }
 
-      const row = await this.records.create({
+      // Ids are minted here rather than left to the column default, so a fresh
+      // insert's id is known before the write. On conflict the existing row
+      // keeps its own id, recovered from `written` by business key.
+      const id = prior?.id ?? randomUUID();
+      plans.push({ kind: 'write', externalId, id });
+      rows.push({
+        id,
         collection,
         externalId,
         document: input.document,
         checksum,
         indexState: 'PENDING',
+        indexError: null,
+        indexAttemptedAt: handedOff,
+        indexAttempts: 0,
       });
-      toIndex.push(row.id);
-      results.push({ id: row.id, externalId, indexState: 'PENDING' });
     }
 
-    for (const id of toIndex) {
-      await this.queue.add(INDEX_RECORD_JOB, { id }, INDEXING_JOB_OPTS);
-    }
-    return results;
+    const written = await this.records.upsertMany(rows);
+    const writtenByExternalId = new Map(
+      written
+        .filter((row) => row.externalId !== null)
+        .map((row) => [row.externalId, row]),
+    );
+
+    const results = plans.map<PersistResult>((plan) => {
+      if (plan.kind === 'skip') return plan.result;
+      const row = plan.externalId
+        ? writtenByExternalId.get(plan.externalId)
+        : undefined;
+      return {
+        id: row?.id ?? plan.id,
+        externalId: plan.externalId,
+        indexState: row?.indexState ?? 'PENDING',
+      };
+    });
+
+    const ids = results
+      .filter((_, i) => plans[i].kind === 'write')
+      .map((r) => r.id);
+    await this.enqueueIndexJobs(collection, ids);
+    if (!wait || ids.length === 0) return results;
+    return this.awaitConvergence(results, ids);
   }
 
   async remove(collection: string, key: string): Promise<void> {
     await this.requireCollection(collection);
-    let row = UUID_RE.test(key) ? await this.records.findLiveById(key) : null;
-    if (!row) row = await this.records.findLiveByExternalId(collection, key);
-    if (!row || row.collection !== collection) {
-      throw this.errors.create(ErrorCode.SEARCH_RECORD_NOT_FOUND);
-    }
+    const row = await this.resolveRow(collection, key);
     await this.records.softDelete(row.id);
-    await this.queue.add(
-      DELETE_RECORD_JOB,
-      { collection, id: row.id },
-      INDEXING_JOB_OPTS,
-    );
+    // The indexer reads the row's current state, so the same job that indexes a
+    // live record removes a soft-deleted one. No separate delete job needed.
+    await this.enqueueIndexJobs(collection, [row.id]);
   }
 
   /** Read one record from Postgres (source of truth). Resolves by id or externalId. */
   async get(collection: string, key: string): Promise<RecordView> {
     await this.requireCollection(collection);
-    let row = UUID_RE.test(key) ? await this.records.findLiveById(key) : null;
-    if (!row) row = await this.records.findLiveByExternalId(collection, key);
-    if (!row || row.collection !== collection) {
-      throw this.errors.create(ErrorCode.SEARCH_RECORD_NOT_FOUND);
-    }
-    return toRecordView(row);
+    return toRecordView(await this.resolveRow(collection, key));
   }
 
   async reload(collection: string): Promise<void> {
@@ -185,8 +227,8 @@ export class SearchRecordService {
   ): Promise<SearchResults<T>> {
     const def = await this.requireCollection(collection);
     const hitsPerPage = Math.min(
-      request.limit ?? this.defaultPageSize,
-      this.maxPageSize,
+      request.limit ?? this.cfg.defaultPageSize,
+      this.cfg.maxPageSize,
     );
     const filter = this.buildFilter(def, request.filters);
     const sort = this.buildSort(def, request.sort);
@@ -219,6 +261,62 @@ export class SearchRecordService {
       }
       throw error;
     }
+  }
+
+  /**
+   * Hand ids to the indexer in batches. A failure here is logged and counted,
+   * never thrown: the rows are committed `PENDING` and the reconciliation sweep
+   * owns recovery.
+   */
+  private async enqueueIndexJobs(
+    collection: string,
+    ids: string[],
+  ): Promise<void> {
+    if (ids.length === 0) return;
+    for (const batch of chunk(ids, this.cfg.indexBatchSize)) {
+      try {
+        await this.queue.add(
+          INDEX_RECORDS_JOB,
+          { collection, ids: batch },
+          INDEXING_JOB_OPTS,
+        );
+      } catch (error) {
+        this.metrics.increment('enqueueFailure');
+        this.logger.warn(
+          `Index handoff failed for ${batch.length} record(s) in "${collection}" — ` +
+            `left PENDING for the reconciliation sweep: ${asMessage(error)}`,
+        );
+      }
+    }
+  }
+
+  /** Poll until every id has left PENDING, or the configured ceiling elapses. */
+  private async awaitConvergence(
+    results: PersistResult[],
+    ids: string[],
+  ): Promise<PersistResult[]> {
+    const deadline = Date.now() + this.cfg.waitTimeoutMs;
+    const settled = new Map<string, IndexState>();
+    while (Date.now() < deadline && settled.size < ids.length) {
+      await sleep(WAIT_POLL_MS);
+      for (const row of await this.records.findByIds(ids)) {
+        if (row.indexState !== 'PENDING') settled.set(row.id, row.indexState);
+      }
+    }
+    return results.map((r) => ({
+      ...r,
+      indexState: settled.get(r.id) ?? r.indexState,
+    }));
+  }
+
+  /** Resolve a record by uuid or business key, scoped to the collection. */
+  private async resolveRow(collection: string, key: string) {
+    let row = UUID_RE.test(key) ? await this.records.findLiveById(key) : null;
+    if (!row) row = await this.records.findLiveByExternalId(collection, key);
+    if (!row || row.collection !== collection) {
+      throw this.errors.create(ErrorCode.SEARCH_RECORD_NOT_FOUND);
+    }
+    return row;
   }
 
   private async requireCollection(name: string): Promise<CompiledCollection> {
@@ -280,6 +378,20 @@ export class SearchRecordService {
   }
 }
 
+/**
+ * Collapse duplicate business keys, keeping the last occurrence. Records without
+ * an `externalId` are always distinct inserts and pass through untouched.
+ */
+function dedupeByExternalId(inputs: RecordInput[]): RecordInput[] {
+  const keyed = new Map<string, RecordInput>();
+  const unkeyed: RecordInput[] = [];
+  for (const input of inputs) {
+    if (input.externalId) keyed.set(input.externalId, input);
+    else unkeyed.push(input);
+  }
+  return [...keyed.values(), ...unkeyed];
+}
+
 /** Map a DB row to the API record view. */
 function toRecordView(row: {
   id: string;
@@ -287,6 +399,8 @@ function toRecordView(row: {
   document: Record<string, unknown>;
   indexState: IndexState;
   indexError: string | null;
+  indexAttempts: number;
+  indexedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }): RecordView {
@@ -296,6 +410,8 @@ function toRecordView(row: {
     document: row.document,
     indexState: row.indexState,
     indexError: row.indexError,
+    indexAttempts: row.indexAttempts,
+    indexedAt: row.indexedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -318,4 +434,12 @@ function toFilterClause(field: string, value: SearchFilterValue): string {
     return `${field} = ${value}`;
   }
   return `${field} = ${quote(value)}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function asMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

@@ -2,8 +2,6 @@ import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { IndexRegistry } from './index-registry';
 import { CollectionService } from './collection.service';
 
-/* eslint-disable @typescript-eslint/no-unsafe-argument */
-
 const fields = [{ name: 'title', type: 'string', searchable: true }] as const;
 
 function make(overrides: { existing?: boolean } = {}) {
@@ -33,14 +31,22 @@ function make(overrides: { existing?: boolean } = {}) {
   };
   const recordsRepo = {
     softDeleteByCollection: jest.fn(async () => undefined),
+    markCollectionPurged: jest.fn(async () => undefined),
   };
   const engine = {
     ensureIndex: jest.fn(async () => undefined),
     deleteIndex: jest.fn(async () => ({ taskUid: 1 })),
+    clearIndex: jest.fn(async () => ({ taskUid: 2 })),
     waitForTask: jest.fn(async () => undefined),
   };
   const queue = { add: jest.fn(async () => undefined) };
-  const registry = new IndexRegistry(collectionsRepo as never);
+  const redis = { duplicate: jest.fn(), publish: jest.fn(async () => 1) };
+  const config = { getOrThrow: () => ({ registryTtlMs: 60_000 }) };
+  const registry = new IndexRegistry(
+    collectionsRepo as never,
+    redis as never,
+    config as never,
+  );
   const service = new CollectionService(
     engine as never,
     collectionsRepo as never,
@@ -72,6 +78,40 @@ describe('CollectionService', () => {
     expect(view.name).toBe('articles');
   });
 
+  it('writes the Postgres row before touching Meili', async () => {
+    const order: string[] = [];
+    const { service, engine, collectionsRepo } = make();
+    collectionsRepo.create.mockImplementationOnce(async (v: never) => {
+      order.push('db');
+      return {
+        id: 'c1',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        description: null,
+        ...(v as object),
+      };
+    });
+    engine.ensureIndex.mockImplementationOnce(async () => {
+      order.push('meili');
+    });
+    await service.create(input as never);
+    expect(order).toEqual(['db', 'meili']);
+  });
+
+  it('clears the index on create so a recycled name cannot inherit documents', async () => {
+    const { service, engine } = make();
+    await service.create(input as never);
+    expect(engine.clearIndex).toHaveBeenCalledWith('articles');
+  });
+
+  it('still creates the collection when Meili is unavailable', async () => {
+    const { service, engine, collectionsRepo } = make();
+    engine.ensureIndex.mockRejectedValueOnce(new Error('meili down'));
+    const view = await service.create(input as never);
+    expect(view.name).toBe('articles');
+    expect(collectionsRepo.create).toHaveBeenCalled();
+  });
+
   it('409s when the collection name already exists', async () => {
     const { service } = make({ existing: true });
     await expect(service.create(input as never)).rejects.toMatchObject({
@@ -96,6 +136,20 @@ describe('CollectionService', () => {
     expect(collectionsRepo.softDeleteByName).toHaveBeenCalledWith('articles');
     expect(recordsRepo.softDeleteByCollection).toHaveBeenCalledWith('articles');
     expect(engine.deleteIndex).toHaveBeenCalledWith('articles');
+    // Only an observed drop lets the soft-deleted rows count as converged.
+    expect(recordsRepo.markCollectionPurged).toHaveBeenCalledWith('articles');
+  });
+
+  it('queues a retry and leaves records unconverged when the index drop fails', async () => {
+    const { service, engine, recordsRepo, queue } = make({ existing: true });
+    engine.deleteIndex.mockRejectedValueOnce(new Error('meili down'));
+    await service.remove('articles');
+    expect(recordsRepo.markCollectionPurged).not.toHaveBeenCalled();
+    expect(queue.add).toHaveBeenCalledWith(
+      'drop-index',
+      { collection: 'articles' },
+      expect.anything(),
+    );
   });
 
   it('update with new fields re-ensures settings and enqueues a reload', async () => {

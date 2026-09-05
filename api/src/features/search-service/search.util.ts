@@ -14,7 +14,10 @@ export function computeChecksum(
   externalId: string | null,
   document: Record<string, unknown>,
 ): string {
-  const canonical = stableStringify({ externalId: externalId ?? null, document });
+  const canonical = stableStringify({
+    externalId: externalId ?? null,
+    document,
+  });
   return createHash('sha256').update(canonical).digest('hex');
 }
 
@@ -29,6 +32,16 @@ export function toMeiliDocument(row: SearchRecordRow): Record<string, unknown> {
   };
 }
 
+/** Split a list into fixed-size chunks (one batched index job per chunk). */
+export function chunk<T>(items: T[], size: number): T[][] {
+  if (size < 1) return items.length ? [items] : [];
+  const out: T[][] = [];
+  for (let i = 0; i < items.length; i += size) {
+    out.push(items.slice(i, i + size));
+  }
+  return out;
+}
+
 /** Deterministic JSON with recursively sorted object keys. */
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -37,6 +50,9 @@ function stableStringify(value: unknown): string {
   }
   const entries = Object.keys(value as Record<string, unknown>)
     .sort()
-    .map((k) => `${JSON.stringify(k)}:${stableStringify((value as Record<string, unknown>)[k])}`);
+    .map(
+      (k) =>
+        `${JSON.stringify(k)}:${stableStringify((value as Record<string, unknown>)[k])}`,
+    );
   return `{${entries.join(',')}}`;
 }

@@ -2,9 +2,8 @@ import type { ConfigService } from '@nestjs/config';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { SearchEngineError } from '../../infrastructure/search-engine/search-engine.interface';
 import type { CompiledCollection } from './index-registry';
+import { SearchMetrics } from './search.metrics';
 import { SearchRecordService } from './search-record.service';
-
-/* eslint-disable @typescript-eslint/no-unsafe-argument */
 
 const compiled: CompiledCollection = {
   name: 'articles',
@@ -23,14 +22,21 @@ const compiled: CompiledCollection = {
   },
 };
 
-const config = {
-  getOrThrow: () => ({ defaultPageSize: 20, maxPageSize: 100 }),
-} as unknown as ConfigService;
+const CONFIG = {
+  defaultPageSize: 20,
+  maxPageSize: 100,
+  indexBatchSize: 500,
+  waitTimeoutMs: 300,
+};
 
 function make(
   repoOverrides: Record<string, any> = {},
   engineOverrides: Record<string, any> = {},
+  cfgOverrides: Partial<typeof CONFIG> = {},
 ) {
+  const config = {
+    getOrThrow: () => ({ ...CONFIG, ...cfgOverrides }),
+  } as unknown as ConfigService;
   const engine = {
     search: jest.fn(async () => ({
       hits: [{ id: '1' }],
@@ -44,17 +50,15 @@ function make(
   };
   const records = {
     findLiveByExternalId: jest.fn(async () => null),
+    findLiveByExternalIds: jest.fn(async () => []),
     findLiveById: jest.fn(async () => null),
-    create: jest.fn(async (v: Record<string, unknown>) => ({
-      id: 'rec-1',
-      externalId: v.externalId ?? null,
-      ...v,
-    })),
-    update: jest.fn(async (id: string, patch: Record<string, unknown>) => ({
-      id,
-      externalId: 'ext',
-      ...patch,
-    })),
+    findByIds: jest.fn<Promise<Array<Record<string, unknown>>>, [string[]]>(
+      async () => [],
+    ),
+    // Echo the planned rows back, as the real upsert's RETURNING does.
+    upsertMany: jest.fn(async (rows: Array<Record<string, unknown>>) =>
+      rows.map((r) => ({ ...r })),
+    ),
     softDelete: jest.fn(async () => undefined),
     ...repoOverrides,
   };
@@ -64,6 +68,7 @@ function make(
       name === 'articles' ? compiled : null,
     ),
   };
+  const metrics = new SearchMetrics();
   const service = new SearchRecordService(
     engine as never,
     records as never,
@@ -71,8 +76,9 @@ function make(
     queue as never,
     config,
     new ExceptionService(),
+    metrics,
   );
-  return { service, engine, records, queue, registry };
+  return { service, engine, records, queue, registry, metrics };
 }
 
 function searchArg(engine: any) {
@@ -108,42 +114,186 @@ describe('SearchRecordService.persist', () => {
     });
   });
 
-  it('creates a PENDING row and enqueues an index job', async () => {
+  it('rejects the whole batch before writing anything when one record is bad', async () => {
+    const { service, records } = make();
+    await expect(
+      service.persist('articles', [
+        { document: { title: 'ok' } },
+        { document: { title: 123 } },
+      ]),
+    ).rejects.toMatchObject({ code: ErrorCode.VALIDATION_FAILED });
+    expect(records.upsertMany).not.toHaveBeenCalled();
+  });
+
+  it('writes a PENDING row and hands the id to the indexer', async () => {
     const { service, records, queue } = make();
     const results = await service.persist('articles', [
       { document: { title: 'Hello' } },
     ]);
-    expect(records.create).toHaveBeenCalledWith(
+    expect(records.upsertMany).toHaveBeenCalledWith([
       expect.objectContaining({
         collection: 'articles',
         indexState: 'PENDING',
+        indexAttempts: 0,
       }),
-    );
+    ]);
     expect(queue.add).toHaveBeenCalledWith(
-      'index-record',
-      { id: 'rec-1' },
+      'index-records',
+      { collection: 'articles', ids: [results[0].id] },
       expect.anything(),
     );
     expect(results[0].indexState).toBe('PENDING');
   });
 
+  it('writes the whole batch in one upsert', async () => {
+    const { service, records, queue } = make();
+    await service.persist('articles', [
+      { externalId: 'a', document: { title: 'A' } },
+      { externalId: 'b', document: { title: 'B' } },
+    ]);
+    expect(records.upsertMany).toHaveBeenCalledTimes(1);
+    expect(records.upsertMany.mock.calls[0][0]).toHaveLength(2);
+    expect(queue.add).toHaveBeenCalledTimes(1);
+  });
+
+  it('collapses a duplicated externalId so the upsert cannot touch a row twice', async () => {
+    const { service, records } = make();
+    await service.persist('articles', [
+      { externalId: 'dup', document: { title: 'first' } },
+      { externalId: 'dup', document: { title: 'last' } },
+    ]);
+    const rows = records.upsertMany.mock.calls[0][0];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].document).toEqual({ title: 'last' });
+  });
+
+  it('splits the handoff into jobs of at most indexBatchSize', async () => {
+    const { service, queue } = make({}, {}, { indexBatchSize: 2 });
+    await service.persist(
+      'articles',
+      Array.from({ length: 5 }, (_, i) => ({
+        externalId: `e${i}`,
+        document: { title: `T${i}` },
+      })),
+    );
+    expect(queue.add).toHaveBeenCalledTimes(3);
+  });
+
   it('is a no-op when an unchanged, already-indexed record is re-sent', async () => {
     const { computeChecksum } = await import('./search.util');
     const checksum = computeChecksum('ext-1', { title: 'Hello' });
-    const { service, queue } = make({
-      findLiveByExternalId: jest.fn(async () => ({
-        id: 'rec-1',
-        externalId: 'ext-1',
-        indexState: 'INDEXED',
-        checksum,
-      })),
-      create: jest.fn(),
+    const { service, queue, records } = make({
+      findLiveByExternalIds: jest.fn(async () => [
+        {
+          id: 'rec-1',
+          externalId: 'ext-1',
+          indexState: 'INDEXED',
+          checksum,
+        },
+      ]),
     });
     const results = await service.persist('articles', [
       { externalId: 'ext-1', document: { title: 'Hello' } },
     ]);
-    expect(results[0].indexState).toBe('INDEXED');
+    expect(results[0]).toMatchObject({ id: 'rec-1', indexState: 'INDEXED' });
+    expect(records.upsertMany).toHaveBeenCalledWith([]);
     expect(queue.add).not.toHaveBeenCalled();
+  });
+
+  it('re-indexes an unchanged record that never converged', async () => {
+    const { computeChecksum } = await import('./search.util');
+    const checksum = computeChecksum('ext-1', { title: 'Hello' });
+    const { service, queue } = make({
+      findLiveByExternalIds: jest.fn(async () => [
+        { id: 'rec-1', externalId: 'ext-1', indexState: 'FAILED', checksum },
+      ]),
+    });
+    await service.persist('articles', [
+      { externalId: 'ext-1', document: { title: 'Hello' } },
+    ]);
+    expect(queue.add).toHaveBeenCalled();
+  });
+
+  it('reuses the existing id when upserting over a known business key', async () => {
+    const { service, records } = make({
+      findLiveByExternalIds: jest.fn(async () => [
+        {
+          id: 'rec-existing',
+          externalId: 'ext-1',
+          indexState: 'INDEXED',
+          checksum: 'stale',
+        },
+      ]),
+    });
+    const results = await service.persist('articles', [
+      { externalId: 'ext-1', document: { title: 'Changed' } },
+    ]);
+    expect(records.upsertMany.mock.calls[0][0][0].id).toBe('rec-existing');
+    expect(results[0].id).toBe('rec-existing');
+  });
+
+  it('keeps results parallel to the input across a mix of skips and writes', async () => {
+    const { computeChecksum } = await import('./search.util');
+    const { service } = make({
+      findLiveByExternalIds: jest.fn(async () => [
+        {
+          id: 'rec-skip',
+          externalId: 'skip-me',
+          indexState: 'INDEXED',
+          checksum: computeChecksum('skip-me', { title: 'same' }),
+        },
+      ]),
+    });
+    const results = await service.persist('articles', [
+      { externalId: 'skip-me', document: { title: 'same' } },
+      { externalId: 'write-me', document: { title: 'new' } },
+    ]);
+    expect(results.map((r) => r.externalId)).toEqual(['skip-me', 'write-me']);
+    expect(results[0].indexState).toBe('INDEXED');
+    expect(results[1].indexState).toBe('PENDING');
+  });
+
+  // The durability guarantee: the row is committed, so a failed handoff must not
+  // be reported to the caller as a failed write. The sweep owns recovery.
+  it('does not fail the write when the index handoff cannot be enqueued', async () => {
+    const { service, queue, metrics } = make();
+    queue.add.mockRejectedValueOnce(new Error('redis down'));
+    const results = await service.persist('articles', [
+      { document: { title: 'Hello' } },
+    ]);
+    expect(results[0].indexState).toBe('PENDING');
+    expect(metrics.snapshot().enqueueFailure).toBe(1);
+  });
+
+  it('returns the settled state when the caller opts into waiting', async () => {
+    const { service, records } = make();
+    let polls = 0;
+    records.findByIds.mockImplementation(async (ids: string[]) => {
+      polls += 1;
+      return ids.map((id) => ({
+        id,
+        indexState: polls > 1 ? 'INDEXED' : 'PENDING',
+      }));
+    });
+    const results = await service.persist(
+      'articles',
+      [{ document: { title: 'Hello' } }],
+      true,
+    );
+    expect(results[0].indexState).toBe('INDEXED');
+  });
+
+  it('falls back to PENDING when waiting times out', async () => {
+    const { service, records } = make();
+    records.findByIds.mockImplementation(async (ids: string[]) =>
+      ids.map((id) => ({ id, indexState: 'PENDING' })),
+    );
+    const results = await service.persist(
+      'articles',
+      [{ document: { title: 'Hello' } }],
+      true,
+    );
+    expect(results[0].indexState).toBe('PENDING');
   });
 });
 
@@ -217,7 +367,7 @@ describe('SearchRecordService.remove / reload', () => {
     );
   });
 
-  it('remove soft-deletes the row and enqueues a delete job', async () => {
+  it('soft-deletes the row and lets the indexer derive the removal', async () => {
     const { service, records, queue } = make({
       findLiveByExternalId: jest.fn(async () => ({
         id: 'rec-9',
@@ -228,14 +378,37 @@ describe('SearchRecordService.remove / reload', () => {
     await service.remove('articles', 'ext-9');
     expect(records.softDelete).toHaveBeenCalledWith('rec-9');
     expect(queue.add).toHaveBeenCalledWith(
-      'delete-record',
-      { collection: 'articles', id: 'rec-9' },
+      'index-records',
+      { collection: 'articles', ids: ['rec-9'] },
       expect.anything(),
     );
+  });
+
+  it('does not fail a delete when the handoff cannot be enqueued', async () => {
+    const { service, queue, records } = make({
+      findLiveByExternalId: jest.fn(async () => ({
+        id: 'rec-9',
+        collection: 'articles',
+        externalId: 'ext-9',
+      })),
+    });
+    queue.add.mockRejectedValueOnce(new Error('redis down'));
+    await expect(service.remove('articles', 'ext-9')).resolves.toBeUndefined();
+    expect(records.softDelete).toHaveBeenCalledWith('rec-9');
   });
 });
 
 describe('SearchRecordService.get', () => {
+  const base = {
+    document: {},
+    indexState: 'INDEXED' as const,
+    indexError: null,
+    indexAttempts: 0,
+    indexedAt: null,
+    createdAt: new Date('2020-01-01'),
+    updatedAt: new Date('2020-01-02'),
+  };
+
   it('404s on an unknown collection', async () => {
     const { service } = make();
     await expect(service.get('nope', 'rec-1')).rejects.toMatchObject({
@@ -247,32 +420,69 @@ describe('SearchRecordService.get', () => {
     const uuid = '11111111-1111-1111-1111-111111111111';
     const { service, records } = make({
       findLiveById: jest.fn(async () => ({
-        id: uuid, collection: 'articles', externalId: 'ext-1',
-        document: { title: 'Hi' }, indexState: 'INDEXED', indexError: null,
-        createdAt: new Date('2020-01-01'), updatedAt: new Date('2020-01-02'),
+        ...base,
+        id: uuid,
+        collection: 'articles',
+        externalId: 'ext-1',
+        document: { title: 'Hi' },
       })),
     });
     const view = await service.get('articles', uuid);
     expect(records.findLiveById).toHaveBeenCalledWith(uuid);
-    expect(view).toMatchObject({ id: uuid, externalId: 'ext-1', document: { title: 'Hi' }, indexState: 'INDEXED' });
+    expect(view).toMatchObject({
+      id: uuid,
+      externalId: 'ext-1',
+      document: { title: 'Hi' },
+      indexState: 'INDEXED',
+    });
   });
 
   it('resolves a non-UUID key via findLiveByExternalId', async () => {
     const { service, records } = make({
       findLiveByExternalId: jest.fn(async () => ({
-        id: 'rec-9', collection: 'articles', externalId: 'ext-9',
-        document: {}, indexState: 'PENDING', indexError: null,
-        createdAt: new Date(), updatedAt: new Date(),
+        ...base,
+        id: 'rec-9',
+        collection: 'articles',
+        externalId: 'ext-9',
+        indexState: 'PENDING',
       })),
     });
     const view = await service.get('articles', 'ext-9');
-    expect(records.findLiveByExternalId).toHaveBeenCalledWith('articles', 'ext-9');
+    expect(records.findLiveByExternalId).toHaveBeenCalledWith(
+      'articles',
+      'ext-9',
+    );
     expect(view.indexState).toBe('PENDING');
+  });
+
+  it('exposes the sync bookkeeping so clients can observe convergence', async () => {
+    const { service } = make({
+      findLiveByExternalId: jest.fn(async () => ({
+        ...base,
+        id: 'rec-9',
+        collection: 'articles',
+        externalId: 'ext-9',
+        indexState: 'FAILED',
+        indexError: 'meili down',
+        indexAttempts: 3,
+      })),
+    });
+    const view = await service.get('articles', 'ext-9');
+    expect(view).toMatchObject({
+      indexState: 'FAILED',
+      indexError: 'meili down',
+      indexAttempts: 3,
+    });
   });
 
   it('404s when the row belongs to another collection', async () => {
     const { service } = make({
-      findLiveByExternalId: jest.fn(async () => ({ id: 'r', collection: 'other', externalId: 'e', document: {} })),
+      findLiveByExternalId: jest.fn(async () => ({
+        ...base,
+        id: 'r',
+        collection: 'other',
+        externalId: 'e',
+      })),
     });
     await expect(service.get('articles', 'e')).rejects.toMatchObject({
       code: ErrorCode.SEARCH_RECORD_NOT_FOUND,

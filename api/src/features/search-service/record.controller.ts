@@ -5,15 +5,20 @@ import {
   HttpCode,
   Param,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Roles } from '../../common/decorators/roles.decorator';
-import { PersistRecordsDto } from './dto/persist-records.dto';
+import {
+  PersistOptionsDto,
+  PersistRecordsDto,
+} from './dto/persist-records.dto';
 import { SearchRecordService } from './search-record.service';
 
 /**
  * Record persistence. Admin-only: persist (upsert on externalId) and delete.
- * Writes land in Postgres and are indexed asynchronously (202 Accepted).
+ * Writes land in Postgres and are indexed asynchronously (202 Accepted). Pass
+ * `?wait=true` to block, briefly and boundedly, until the records have settled.
  */
 @ApiTags('Search')
 @Controller('search/collections/:name/records')
@@ -24,8 +29,12 @@ export class RecordController {
   @ApiOperation({ summary: 'Persist records into a collection' })
   @Post()
   @HttpCode(202)
-  persist(@Param('name') name: string, @Body() dto: PersistRecordsDto) {
-    return this.records.persist(name, dto.records);
+  persist(
+    @Param('name') name: string,
+    @Body() dto: PersistRecordsDto,
+    @Query() options: PersistOptionsDto,
+  ) {
+    return this.records.persist(name, dto.records, options.wait);
   }
 
   @ApiOperation({ summary: 'Delete a record by id' })

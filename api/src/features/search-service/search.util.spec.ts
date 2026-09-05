@@ -9,11 +9,15 @@ describe('computeChecksum', () => {
   });
 
   it('changes when the document changes', () => {
-    expect(computeChecksum('x', { a: 1 })).not.toBe(computeChecksum('x', { a: 2 }));
+    expect(computeChecksum('x', { a: 1 })).not.toBe(
+      computeChecksum('x', { a: 2 }),
+    );
   });
 
   it('changes when the externalId changes', () => {
-    expect(computeChecksum('x', { a: 1 })).not.toBe(computeChecksum('y', { a: 1 }));
+    expect(computeChecksum('x', { a: 1 })).not.toBe(
+      computeChecksum('y', { a: 1 }),
+    );
   });
 });
 
@@ -27,6 +31,8 @@ describe('toMeiliDocument', () => {
     indexState: 'PENDING',
     indexError: null,
     indexedAt: null,
+    indexAttemptedAt: null,
+    indexAttempts: 0,
     isDeleted: false,
     deletedAt: null,
     createdAt: new Date('2026-01-01T00:00:00.000Z'),

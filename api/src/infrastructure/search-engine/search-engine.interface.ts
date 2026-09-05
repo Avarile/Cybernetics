@@ -51,6 +51,8 @@ export class SearchEngineError extends Error {
 /** Index-agnostic search capability. Knows nothing about any domain. */
 export interface SearchEngine {
   ensureIndex(def: IndexDefinition): Promise<void>;
+  /** Whether the index currently exists. One cheap read, no async task. */
+  indexExists(index: string): Promise<boolean>;
   addOrReplace(
     index: string,
     docs: Array<Record<string, unknown>>,

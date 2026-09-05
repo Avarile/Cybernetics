@@ -11,10 +11,7 @@ export type CollectionName = string;
 
 /** A structured filter value from a caller (never raw Meili syntax). */
 export type SearchFilterValue =
-  | string
-  | number
-  | boolean
-  | Array<string | number>;
+  string | number | boolean | Array<string | number>;
 
 /** External/internal search request (post-validation). */
 export interface SearchRequest {
@@ -25,6 +22,20 @@ export interface SearchRequest {
   sort?: string[]; // "field:asc" | "field:desc"
   facets?: string[];
   highlight?: string[];
+}
+
+/**
+ * Sync-health counters over `search_records`. `oldestUnsyncedAt` is the lag
+ * signal: how long the least-recently-attempted unconverged record has waited.
+ * Soft-deleted rows still awaiting removal count as unconverged, because Meili
+ * is still serving documents that Postgres says are gone.
+ */
+export interface SyncStats {
+  pending: number;
+  indexed: number;
+  failed: number;
+  oldestUnsyncedAt: Date | null;
+  maxAttempts: number;
 }
 
 /** Normalised search response. */

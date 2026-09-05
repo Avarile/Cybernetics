@@ -15,6 +15,7 @@ import { fieldSpecToIndexDefinition } from './document-validator';
 import { IndexRegistry } from './index-registry';
 import { SearchRecordRepository } from './search-record.repository';
 import {
+  DROP_INDEX_JOB,
   REINDEX_COLLECTION_JOB,
   SEARCH_INDEXING_QUEUE,
 } from './search.constants';
@@ -83,21 +84,41 @@ export class CollectionService implements OnApplicationBootstrap {
     }
   }
 
+  /**
+   * Postgres row first, Meili index second. The reverse order — which this used
+   * to do — orphans an index whenever the insert fails, and contradicts the rule
+   * that Postgres is the source of truth. If `ensureIndex` fails the collection
+   * still exists and its settings converge on the next write or the next boot.
+   */
   async create(input: CreateCollectionInput): Promise<CollectionView> {
     if (await this.collections.findByName(input.name)) {
       throw this.errors.create(ErrorCode.SEARCH_COLLECTION_EXISTS, {
         message: `Collection "${input.name}" already exists`,
       });
     }
-    await this.engine.ensureIndex(
-      fieldSpecToIndexDefinition(input.name, input.fields),
-    );
     const row = await this.collections.create({
       name: input.name,
       displayName: input.displayName,
       description: input.description ?? null,
       fields: input.fields,
     });
+    await this.registry.invalidate(input.name);
+
+    try {
+      await this.engine.ensureIndex(
+        fieldSpecToIndexDefinition(input.name, input.fields),
+      );
+      // A recycled name can inherit documents from a previous collection whose
+      // index outlived it (e.g. a failed delete). Settings alone would not
+      // remove them, so start the new collection from an empty index.
+      const cleared = await this.engine.clearIndex(input.name);
+      await this.engine.waitForTask(cleared.taskUid);
+    } catch (error) {
+      this.logger.warn(
+        `Collection "${input.name}" created, but its index is not yet converged ` +
+          `(will retry on next write/boot): ${asMessage(error)}`,
+      );
+    }
     return toView(row);
   }
 
@@ -146,7 +167,7 @@ export class CollectionService implements OnApplicationBootstrap {
         message: `Unknown collection "${name}"`,
       });
     }
-    this.registry.invalidate(name);
+    await this.registry.invalidate(name);
 
     if (input.fields) {
       await this.queue.add(
@@ -158,6 +179,12 @@ export class CollectionService implements OnApplicationBootstrap {
     return toView(row);
   }
 
+  /**
+   * Soft-delete the collection and its records, then drop the index. The records
+   * are left `PENDING` and the drop is retried through the queue on failure, so
+   * an index that outlives its collection is a transient state the pipeline
+   * repairs rather than a silent orphan.
+   */
   async remove(name: string): Promise<void> {
     const existing = await this.collections.findByName(name);
     if (!existing) {
@@ -167,11 +194,24 @@ export class CollectionService implements OnApplicationBootstrap {
     }
     await this.collections.softDeleteByName(name);
     await this.records.softDeleteByCollection(name);
-    this.registry.invalidate(name);
+    await this.registry.invalidate(name);
     try {
-      await this.engine.deleteIndex(name);
+      const { taskUid } = await this.engine.deleteIndex(name);
+      await this.engine.waitForTask(taskUid);
+      // The documents are gone, so the soft-deleted rows have converged.
+      await this.records.markCollectionPurged(name);
     } catch (error) {
-      this.logger.warn(`Failed to delete index "${name}": ${asMessage(error)}`);
+      this.logger.warn(
+        `Failed to delete index "${name}", queued for retry: ${asMessage(error)}`,
+      );
+      await this.queue
+        .add(DROP_INDEX_JOB, { collection: name }, INDEXING_JOB_OPTS)
+        .catch((queueError: unknown) =>
+          this.logger.error(
+            `Could not queue index drop for "${name}"; its documents remain ` +
+              `searchable until an operator reloads or deletes the index: ${asMessage(queueError)}`,
+          ),
+        );
     }
   }
 }

@@ -1,10 +1,29 @@
 /** BullMQ queue that applies index mutations off the request path. */
 export const SEARCH_INDEXING_QUEUE = 'search-indexing';
 
-/** Job: sync a single record (by id) to Meili — add/replace, or delete if the row is soft-deleted. */
+/**
+ * Job: sync a batch of records (by id) to Meili. Live rows are added/replaced
+ * and soft-deleted rows are removed, both derived from the current Postgres
+ * state — so one job handles a mixed batch and is order-insensitive.
+ */
+export const INDEX_RECORDS_JOB = 'index-records';
+
+/**
+ * Job: sync a single record. Retained so jobs enqueued by an older deployment
+ * are still consumed during a rolling upgrade; the processor treats it as a
+ * one-element batch. New code should enqueue {@link INDEX_RECORDS_JOB}.
+ *
+ * @deprecated superseded by {@link INDEX_RECORDS_JOB}
+ */
 export const INDEX_RECORD_JOB = 'index-record';
 
-/** Job: delete a record's document from a collection's index. */
+/**
+ * Job: delete a record's document from a collection's index. Also retained for
+ * rolling-upgrade compatibility — {@link INDEX_RECORDS_JOB} already deletes
+ * soft-deleted rows, since it reads their state from Postgres.
+ *
+ * @deprecated superseded by {@link INDEX_RECORDS_JOB}
+ */
 export const DELETE_RECORD_JOB = 'delete-record';
 
 /** Job: clear a collection's index and reload every live record from Postgres. */
@@ -13,5 +32,15 @@ export const REINDEX_COLLECTION_JOB = 'reindex-collection';
 /** Job: sweep for records that never converged and re-enqueue them. */
 export const RECONCILE_JOB = 'reconcile';
 
-/** A record must be un-synced for at least this long before reconciliation retries it. */
-export const RECONCILE_STALE_MS = 300_000; // 5 minutes
+/** Job: hard-delete soft-deleted records whose removal from Meili is confirmed. */
+export const PURGE_RECORDS_JOB = 'purge-records';
+
+/** Job: retry dropping a Meili index whose collection was already deleted. */
+export const DROP_INDEX_JOB = 'drop-index';
+
+/** Stable scheduler ids — `upsertJobScheduler` is keyed by these and idempotent. */
+export const RECONCILE_SCHEDULER_ID = 'search-reconcile';
+export const PURGE_SCHEDULER_ID = 'search-purge';
+
+/** Redis pub/sub channel broadcasting collection-registry invalidations. */
+export const REGISTRY_INVALIDATE_CHANNEL = 'search:registry:invalidate';

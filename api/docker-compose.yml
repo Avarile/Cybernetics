@@ -52,7 +52,27 @@ services:
       timeout: 5s
       retries: 10
 
+  meilisearch:
+    image: getmeili/meilisearch:latest
+    container_name: cybernetics-meilisearch
+    restart: unless-stopped
+    environment:
+      # development mode runs keyless and serves the bundled web UI; set
+      # MEILI_MASTER_KEY (and MEILISEARCH_MASTER_KEY in .env) for anything else.
+      MEILI_ENV: development
+      MEILI_NO_ANALYTICS: 'true'
+    ports:
+      - '7700:7700'
+    volumes:
+      - meili-data:/meili_data
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO - http://localhost:7700/health || exit 1']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   postgres-data:
   redis-data:
   minio-data:
+  meili-data:

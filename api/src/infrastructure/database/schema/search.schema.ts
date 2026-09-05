@@ -1,6 +1,7 @@
 import { sql } from 'drizzle-orm';
 import {
   index,
+  integer,
   jsonb,
   pgEnum,
   pgTable,
@@ -12,12 +13,7 @@ import { baseColumns } from './common';
 
 /** Primitive field types a collection document may declare. */
 export type FieldType =
-  | 'string'
-  | 'number'
-  | 'boolean'
-  | 'date'
-  | 'string[]'
-  | 'number[]';
+  'string' | 'number' | 'boolean' | 'date' | 'string[]' | 'number[]';
 
 /**
  * One field in a collection's schema. The per-field flags drive BOTH write-time
@@ -67,6 +63,14 @@ export const collections = pgTable(
  * read model. `id` is the Meili document primary key. `externalId` is the
  * caller's optional business key enabling idempotent upsert. `checksum` detects
  * unchanged re-writes. `indexState` is the outbox marker reconciliation repairs.
+ *
+ * Sync bookkeeping is deliberately split from `updatedAt`:
+ *  - `updatedAt` means "the record's content changed" and is never touched by
+ *    indexing, so `updatedAt > indexedAt` is a truthful drift predicate.
+ *  - `indexAttemptedAt` means "we last tried to index it" and is what the
+ *    reconciliation sweep orders and filters by.
+ *  - `indexAttempts` counts tries, so a permanently stuck record is visible
+ *    rather than merely inferred.
  */
 export const searchRecords = pgTable(
   'search_records',
@@ -82,13 +86,27 @@ export const searchRecords = pgTable(
     indexState: searchIndexState('index_state').notNull().default('PENDING'),
     indexError: varchar('index_error', { length: 1000 }),
     indexedAt: timestamp('indexed_at', { withTimezone: true }),
+    indexAttemptedAt: timestamp('index_attempted_at', { withTimezone: true }),
+    indexAttempts: integer('index_attempts').notNull().default(0),
   },
   (t) => [
     uniqueIndex('search_records_collection_external_idx')
       .on(t.collection, t.externalId)
       .where(sql`${t.externalId} IS NOT NULL AND ${t.isDeleted} = false`),
-    index('search_records_collection_deleted_idx').on(t.collection, t.isDeleted),
+    index('search_records_collection_deleted_idx').on(
+      t.collection,
+      t.isDeleted,
+    ),
     index('search_records_collection_state_idx').on(t.collection, t.indexState),
+    // The reconciliation sweep's exact predicate. Partial, so the index only
+    // ever holds unconverged rows — it stays tiny no matter how large the table.
+    index('search_records_unsynced_idx')
+      .on(t.indexAttemptedAt)
+      .where(sql`${t.indexState} <> 'INDEXED'`),
+    // The purge sweep's predicate: soft-deleted rows whose removal Meili confirmed.
+    index('search_records_purgeable_idx')
+      .on(t.deletedAt)
+      .where(sql`${t.isDeleted} = true AND ${t.indexState} = 'INDEXED'`),
   ],
 );
 

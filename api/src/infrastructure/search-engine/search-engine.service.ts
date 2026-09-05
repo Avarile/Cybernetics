@@ -22,6 +22,7 @@ export class SearchEngineService implements SearchEngine {
   private readonly logger = new Logger(SearchEngineService.name);
   private readonly prefix: string;
   private readonly taskTimeoutMs: number;
+  private readonly maxTotalHits: number;
 
   constructor(
     @Inject(MEILI_CLIENT) private readonly client: MeiliSearch,
@@ -30,6 +31,7 @@ export class SearchEngineService implements SearchEngine {
     const cfg = config.getOrThrow<SearchConfig>('search');
     this.prefix = cfg.indexPrefix;
     this.taskTimeoutMs = cfg.taskTimeoutMs;
+    this.maxTotalHits = cfg.maxTotalHits;
   }
 
   private uid(index: string): string {
@@ -51,9 +53,22 @@ export class SearchEngineService implements SearchEngine {
       filterableAttributes: def.filterableAttributes,
       sortableAttributes: def.sortableAttributes,
       ...(def.rankingRules ? { rankingRules: def.rankingRules } : {}),
-      pagination: { maxTotalHits: def.maxTotalHits ?? 1000 },
+      // Caps deep pagination: pages beyond this ceiling return nothing and
+      // `totalHits` saturates, so it is configured rather than hardcoded and is
+      // validated against SEARCH_MAX_PAGE_SIZE at startup.
+      pagination: { maxTotalHits: def.maxTotalHits ?? this.maxTotalHits },
     });
     await this.waitForTask(settings.taskUid);
+  }
+
+  async indexExists(index: string): Promise<boolean> {
+    try {
+      await this.client.index(this.uid(index)).getRawInfo();
+      return true;
+    } catch (error) {
+      if (errorCode(error) === 'index_not_found') return false;
+      throw this.wrap(error);
+    }
   }
 
   async addOrReplace(
@@ -154,11 +169,32 @@ export class SearchEngineService implements SearchEngine {
   }
 
   private isAlreadyExists(error: unknown): boolean {
-    return (error as { code?: string })?.code === 'index_already_exists';
+    return errorCode(error) === 'index_already_exists';
   }
 
   private wrap(error: unknown): SearchEngineError {
-    const e = error as { message?: string; code?: string };
-    return new SearchEngineError(e?.message ?? 'search engine error', e?.code);
+    const e = error as { message?: string };
+    return new SearchEngineError(
+      e?.message ?? 'search engine error',
+      errorCode(error),
+    );
   }
+}
+
+/**
+ * Read a MeiliSearch error code from either shape it arrives in.
+ *
+ * `createIndex` returns a task that *fails*, which `waitForTask` converts into a
+ * `SearchEngineError` carrying `code` directly. A synchronous REST rejection
+ * instead throws a `MeiliSearchApiError`, whose code sits at `cause.code` — its
+ * own enumerable keys are only `name`, `cause`, `response`. Reading just `.code`
+ * silently misses the second case, which is how a deleted index was reported as
+ * an unexpected failure rather than as "not found".
+ */
+function errorCode(error: unknown): string | undefined {
+  const e = error as {
+    code?: string;
+    cause?: { code?: string };
+  } | null;
+  return e?.code ?? e?.cause?.code;
 }
