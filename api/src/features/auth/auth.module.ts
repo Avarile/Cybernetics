@@ -1,3 +1,5 @@
+import { BullModule } from '@nestjs/bullmq';
+import { QueueModule } from '../../infrastructure/queue/queue.module';
 import { Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
@@ -9,10 +11,14 @@ import { PasswordResetRepository } from './password-reset.repository';
 import { PasswordResetService } from './password-reset.service';
 import { ResetCodeHasher } from './reset-code-hasher';
 import { ResetMailer } from './reset-mailer';
-import { ServiceCredentialRepository } from './service-credential.repository';
 import { ServiceCredentialService } from './service-credential.service';
 import { ServiceCredentialsController } from './service-credentials.controller';
-import { SessionRepository } from './session.repository';
+import { AUTH_CLEANUP_QUEUE } from './auth.constants';
+import {
+  AuthCleanupProcessor,
+  AuthCleanupScheduler,
+} from './schedulers/auth-cleanup.scheduler';
+import { TokenRevocationModule } from './token-revocation.module';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { LocalStrategy } from './strategies/local.strategy';
 import { TokenService } from './token.service';
@@ -24,21 +30,31 @@ import { TokenService } from './token.service';
  * EmailModule is imported for ResetMailer's MailerService dependency.
  */
 @Module({
-  imports: [UsersModule, PassportModule, JwtModule.register({}), EmailModule],
+  imports: [
+    UsersModule,
+    PassportModule,
+    JwtModule.register({}),
+    EmailModule,
+    TokenRevocationModule,
+    QueueModule,
+    BullModule.registerQueue({ name: AUTH_CLEANUP_QUEUE }),
+  ],
   controllers: [AuthController, ServiceCredentialsController],
   providers: [
     AuthService,
     TokenService,
-    SessionRepository,
-    ServiceCredentialRepository,
     ServiceCredentialService,
     LocalStrategy,
     JwtStrategy,
     PasswordResetService,
     PasswordResetRepository,
+    AuthCleanupScheduler,
+    AuthCleanupProcessor,
     ResetCodeHasher,
     ResetMailer,
   ],
-  exports: [AuthService, TokenService],
+  // TokenRevocationModule is re-exported so an importer of AuthModule also gets
+  // the revocation surface without having to know it was split out.
+  exports: [AuthService, TokenService, TokenRevocationModule],
 })
 export class AuthModule {}

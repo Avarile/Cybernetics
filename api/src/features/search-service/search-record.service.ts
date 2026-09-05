@@ -3,6 +3,7 @@ import { InjectQueue } from '@nestjs/bullmq';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Queue } from 'bullmq';
+import type { Principal } from '../../common/principal';
 import type { SearchConfig } from '../../config/configurations/search.config';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { SEARCH_ENGINE } from '../../infrastructure/search-engine/meili.constants';
@@ -13,6 +14,7 @@ import {
 import type { NewSearchRecordRow } from '../../infrastructure/database/schema/search.schema';
 import { validateDocument } from './document-validator';
 import { IndexRegistry, type CompiledCollection } from './index-registry';
+import { resolveReadScope, type ReadScope } from './read-scope';
 import { SearchMetrics } from './search.metrics';
 import { SearchRecordRepository } from './search-record.repository';
 import {
@@ -59,8 +61,18 @@ export interface RecordView {
 
 /**
  * Owns record persistence and querying. Writes go to Postgres (source of truth)
- * then hand off to the async indexer; queries hit Meili only. Reads are global —
- * authorization is enforced by the controller's role guards.
+ * then hand off to the async indexer; queries hit Meili only.
+ *
+ * Reads are authorized HERE, against the collection's own `visibility` policy —
+ * not by the caller and not by a controller guard. Every read path
+ * (`search`, `get`, and both agent tools) funnels through `requireReadScope`,
+ * which is what stops the three call sites from drifting apart again.
+ *
+ * Writes remain admin-only at the controller (`RecordController`), which is why
+ * `persist` may still trust the owner field in a caller-supplied document. If
+ * record writes ever become user-facing, `persist` must instead FORCE the owner
+ * field from the principal — otherwise a user could file a record under someone
+ * else's id.
  *
  * The handoff is deliberately **non-fatal**: the row is already committed with
  * `indexState = 'PENDING'`, and the reconciliation sweep re-drives anything that
@@ -101,6 +113,18 @@ export class SearchRecordService {
     // Validate every document first — no partial writes on a bad record.
     for (const [i, input] of inputs.entries()) {
       const validationErrors = validateDocument(def.fields, input.document);
+      // An owner-scoped record with no owner is unreadable by anyone but an
+      // admin, so writing one is a silent data-loss bug rather than a subtle
+      // policy question. Fail the write instead. (This is what stopped
+      // document-ingest's `ownerUserId: meta.ownerId ?? ''` from landing.)
+      if (def.visibility === 'owner_scoped' && def.ownerField) {
+        const owner = input.document[def.ownerField];
+        if (typeof owner !== 'string' || owner.length === 0) {
+          validationErrors.push(
+            `Collection "${collection}" is owner-scoped, so "${def.ownerField}" must be a non-empty string`,
+          );
+        }
+      }
       if (validationErrors.length) {
         throw this.errors.validation(
           validationErrors.map((m) => ({ path: `records[${i}]`, message: m })),
@@ -206,10 +230,32 @@ export class SearchRecordService {
     await this.enqueueIndexJobs(collection, [row.id]);
   }
 
-  /** Read one record from Postgres (source of truth). Resolves by id or externalId. */
-  async get(collection: string, key: string): Promise<RecordView> {
-    await this.requireCollection(collection);
-    return toRecordView(await this.resolveRow(collection, key));
+  /**
+   * Read one record from Postgres (source of truth). Resolves by id or externalId.
+   *
+   * Enforces the same read policy as {@link search}. It has to: this path
+   * returns the whole `document` straight from Postgres, and for the
+   * `documents` collection the `externalId` is the caller-visible `fileId`, so
+   * an unscoped read here would hand over another user's extracted text just as
+   * effectively as an unscoped query.
+   */
+  async get(
+    collection: string,
+    key: string,
+    principal: Principal,
+  ): Promise<RecordView> {
+    const def = await this.requireCollection(collection);
+    const scope = this.requireReadScope(def, principal);
+    const row = await this.resolveRow(collection, key);
+    if (scope.ownerFilter) {
+      const owner = row.document[scope.ownerFilter.field];
+      if (owner !== scope.ownerFilter.userId) {
+        // NOT_FOUND, not FORBIDDEN: whether a record exists under a given
+        // externalId is itself owner-scoped information.
+        throw this.errors.create(ErrorCode.SEARCH_RECORD_NOT_FOUND);
+      }
+    }
+    return toRecordView(row);
   }
 
   async reload(collection: string): Promise<void> {
@@ -224,13 +270,35 @@ export class SearchRecordService {
   async search<T = Record<string, unknown>>(
     collection: string,
     request: SearchRequest,
+    principal: Principal,
   ): Promise<SearchResults<T>> {
     const def = await this.requireCollection(collection);
+    const scope = this.requireReadScope(def, principal);
     const hitsPerPage = Math.min(
       request.limit ?? this.cfg.defaultPageSize,
       this.cfg.maxPageSize,
     );
+    // Meili caps deep pagination at `pagination.maxTotalHits`; past that a page
+    // comes back empty and `totalHits` saturates, which is indistinguishable
+    // from "no more results". Say so instead of lying by omission.
+    const maxPage = Math.ceil(this.cfg.maxTotalHits / hitsPerPage);
+    if (request.page > maxPage) {
+      throw this.errors.create(ErrorCode.SEARCH_QUERY_INVALID, {
+        message:
+          `Page ${request.page} is beyond the index ceiling of ` +
+          `${this.cfg.maxTotalHits} hits (max page ${maxPage} at ${hitsPerPage} per page). ` +
+          `Narrow the query with filters rather than paging deeper.`,
+      });
+    }
     const filter = this.buildFilter(def, request.filters);
+    if (scope.ownerFilter) {
+      // Appended, and therefore non-negotiable: Meili ANDs the elements of a
+      // `filter` array, so a caller cannot OR their way past it, and a
+      // conflicting owner filter of their own just yields nothing.
+      filter.push(
+        toFilterClause(scope.ownerFilter.field, scope.ownerFilter.userId),
+      );
+    }
     const sort = this.buildSort(def, request.sort);
 
     try {
@@ -319,6 +387,25 @@ export class SearchRecordService {
     return row;
   }
 
+  /**
+   * Apply the collection's read policy, or refuse.
+   *
+   * Every read path goes through here, so a new caller cannot accidentally
+   * inherit the old "reads are global" behaviour by forgetting to filter.
+   */
+  private requireReadScope(
+    def: CompiledCollection,
+    principal: Principal,
+  ): Extract<ReadScope, { allowed: true }> {
+    const scope = resolveReadScope(def, principal);
+    if (!scope.allowed) {
+      throw this.errors.create(ErrorCode.FORBIDDEN, {
+        message: `You do not have access to collection "${def.name}"`,
+      });
+    }
+    return scope;
+  }
+
   private async requireCollection(name: string): Promise<CompiledCollection> {
     const def = await this.registry.resolve(name);
     if (!def) {
@@ -345,16 +432,28 @@ export class SearchRecordService {
     return clauses;
   }
 
+  /**
+   * Parse `field:asc|desc`, exactly.
+   *
+   * `split(':')` accepted `a:b:c` by taking the first two segments and dropping
+   * the rest. It failed closed on the direction, so this was never an injection
+   * — but the filter/sort builders are the boundary against Meili expression
+   * injection, and a boundary should reject malformed input rather than
+   * silently reinterpret it.
+   */
   private buildSort(def: CompiledCollection, sort?: string[]): string[] {
     if (!sort) return [];
     return sort.map((entry) => {
-      const [field, dir] = entry.split(':');
+      const parts = entry.split(':');
+      const [field, dir] = parts;
       if (
+        parts.length !== 2 ||
+        !field ||
         !def.definition.sortableAttributes.includes(field) ||
         (dir !== 'asc' && dir !== 'desc')
       ) {
         throw this.errors.create(ErrorCode.SEARCH_QUERY_INVALID, {
-          message: `Invalid sort "${entry}"`,
+          message: `Invalid sort "${entry}" (expected "field:asc" or "field:desc")`,
         });
       }
       return `${field}:${dir}`;

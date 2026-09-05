@@ -12,6 +12,7 @@ import {
   emailMessages,
   emailSyncState,
 } from '../src/infrastructure/database/schema/mailbox.schema';
+import { imapConfigs } from '../src/infrastructure/database/schema/system.schema';
 import { FileManageModule } from '../src/infrastructure/file-manage/file-manage.module';
 import { InboxService } from '../src/infrastructure/email/inbox.service';
 import { ExceptionsModule } from '../src/infrastructure/exceptions';
@@ -24,10 +25,18 @@ import { MailboxRepository } from '../src/features/mailbox/mailbox.repository';
 
 jest.setTimeout(30_000);
 
-/** A fake IMAP source: one message with one small attachment. */
-const fakeInbox = {
-  mailboxState: async () => ({ uidValidity: 1, uidNext: 2 }),
+/**
+ * A fake IMAP source: one message with one small attachment.
+ *
+ * Shaped as a session, not as loose per-operation calls: `MailboxIngestService`
+ * now runs the whole batch inside a single `withSession(accountId, mailbox, fn)`
+ * so a sync costs one login rather than one per message. This double kept the
+ * older flat API and stopped matching the service it stands in for.
+ */
+const fakeSession = {
+  state: async () => ({ uidValidity: 1, uidNext: 2 }),
   listUidsSince: async (since: number) => (since < 1 ? [1] : []),
+  setSeen: async () => undefined,
   fetchForIngest: async (uid: number) => ({
     uid,
     raw: Buffer.from('From: a@x.com\r\nSubject: Hello\r\n\r\nbody'),
@@ -39,6 +48,10 @@ const fakeInbox = {
     cc: [],
     subject: 'Hello',
     sentAt: new Date('2020-01-01'),
+    // The server's INTERNALDATE, deliberately distinct from the sender-supplied
+    // `sentAt`. It is NOT NULL in `email_messages` and has no DB default, so a
+    // double that omits it fails the insert rather than the assertion.
+    receivedAt: new Date('2020-01-02'),
     text: 'body',
     html: null,
     seen: false,
@@ -54,6 +67,14 @@ const fakeInbox = {
       },
     ],
   }),
+};
+
+const fakeInbox = {
+  withSession: async <T>(
+    _accountId: string,
+    _mailbox: string,
+    fn: (session: typeof fakeSession) => Promise<T>,
+  ): Promise<T> => fn(fakeSession),
 };
 
 /**
@@ -100,6 +121,23 @@ describe('Mailbox ingestion (e2e)', () => {
     ingest = moduleRef.get(MailboxIngestService);
     repo = moduleRef.get(MailboxRepository);
     db = moduleRef.get(DRIZZLE);
+
+    // Migration 0012 added `email_sync_state.account_id -> imap_configs.id`
+    // (plus four sibling FKs on the mailbox tables). This suite used to sync
+    // against a bare synthetic uuid, which the FK now rejects — so give the
+    // fixture a real config row to point at. `isActive` stays false: there is a
+    // partial unique index allowing only one active config, and this must not
+    // collide with whatever the environment already has.
+    await db
+      .insert(imapConfigs)
+      .values({
+        id: accountId,
+        name: 'mailbox-ingest-e2e',
+        host: 'imap.invalid',
+        port: 993,
+        isActive: false,
+      })
+      .onConflictDoNothing();
   });
 
   afterAll(async () => {
@@ -148,6 +186,9 @@ describe('Mailbox ingestion (e2e)', () => {
       if (fileIds.size > 0) {
         await db.delete(files).where(inArray(files.id, [...fileIds]));
       }
+
+      // Last: everything above references it via the migration-0012 FKs.
+      await db.delete(imapConfigs).where(eq(imapConfigs.id, accountId));
     }
 
     await moduleRef?.close();

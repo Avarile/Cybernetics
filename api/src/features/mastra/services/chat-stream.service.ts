@@ -3,12 +3,18 @@ import { ConfigService } from '@nestjs/config';
 import { MastraService } from '@mastra/nestjs';
 import type { MastraConfig } from '../../../config/configurations/mastra.config';
 import { AGENT_ID } from '../mastra.constants';
+import { isAdmin, userIdOrNull } from '../../../common/principal';
 import type { PrincipalRef } from '../mastra.types';
 import { AgentRunRepository } from '../repositories/agent-run.repository';
 import { ApprovalRepository } from '../repositories/approval.repository';
 import { buildRequestContext } from './mastra-adapters';
 import { ConversationService } from './conversation.service';
-import { actionTypeForTool, chunkToSse, sseFrame, type SseEvent } from './chunk-to-sse';
+import {
+  actionTypeForTool,
+  chunkToSse,
+  sseFrame,
+  type SseEvent,
+} from './chunk-to-sse';
 
 export interface StreamSink {
   write(frame: string): void;
@@ -31,6 +37,7 @@ export class ChatStreamService {
    * the buffered `AgentRunnerService.runChat` — see `mastra-adapters.ts::readUsage`.
    */
   private readonly configuredModel: string;
+  private readonly approvalTtlMs: number;
 
   constructor(
     private readonly conversations: ConversationService,
@@ -39,10 +46,16 @@ export class ChatStreamService {
     private readonly mastra: MastraService,
     config: ConfigService,
   ) {
-    this.configuredModel = config.getOrThrow<MastraConfig>('mastra').model;
+    const cfg = config.getOrThrow<MastraConfig>('mastra');
+    this.configuredModel = cfg.model;
+    this.approvalTtlMs = cfg.approvalTtlMs;
   }
 
-  async stream(principal: PrincipalRef, input: StreamInput, sink: StreamSink): Promise<void> {
+  async stream(
+    principal: PrincipalRef,
+    input: StreamInput,
+    sink: StreamSink,
+  ): Promise<void> {
     const emit = (e: SseEvent) => sink.write(sseFrame(e));
     let run: Awaited<ReturnType<AgentRunRepository['create']>> | undefined;
     let startedAt = 0;
@@ -52,11 +65,15 @@ export class ChatStreamService {
         await this.resume(principal, input.resume, sink);
         return;
       }
-      const conv = await this.conversations.ensure(principal, input.conversationId, 'chat');
+      const conv = await this.conversations.ensure(
+        principal,
+        input.conversationId,
+        'chat',
+      );
       run = await this.runs.create({
         conversationId: conv.id,
         trigger: 'user_message',
-        triggeredByUserId: principal.id,
+        triggeredByUserId: userIdOrNull(principal),
         status: 'running',
         agentId: AGENT_ID,
         input: { message: input.message },
@@ -66,13 +83,28 @@ export class ChatStreamService {
       emit({ type: 'start', conversationId: conv.id, runId: run.id });
 
       const agent = this.mastra.getAgent(AGENT_ID);
-      const output = await agent.stream(input.message as string, {
-        memory: { resource: conv.resourceId, thread: { id: conv.id } },
-        requestContext: buildRequestContext({ principal, runId: run.id, conversationId: conv.id }),
-      } as never);
+      const output = await agent.stream(
+        input.message as string,
+        {
+          memory: { resource: conv.resourceId, thread: { id: conv.id } },
+          requestContext: buildRequestContext({
+            principal,
+            runId: run.id,
+            conversationId: conv.id,
+          }),
+        } as never,
+      );
 
       const { suspend, mastraRunId } = await this.pump(output as never, emit);
-      await this.finishTurn(run.id, conv, output as never, suspend, mastraRunId, startedAt, emit);
+      await this.finishTurn(
+        run.id,
+        conv,
+        output as never,
+        suspend,
+        mastraRunId,
+        startedAt,
+        emit,
+      );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       if (run) {
@@ -91,16 +123,29 @@ export class ChatStreamService {
 
   /** Consume the Mastra stream, forwarding client-facing chunks; capture suspend + runId. */
   private async pump(
-    output: { fullStream: AsyncIterable<{ type: string; runId?: string; payload?: Record<string, unknown> }> },
+    output: {
+      fullStream: AsyncIterable<{
+        type: string;
+        runId?: string;
+        payload?: Record<string, unknown>;
+      }>;
+    },
     emit: (e: SseEvent) => void,
   ): Promise<{ suspend: Suspend | null; mastraRunId: string | null }> {
     let suspend: Suspend | null = null;
     let mastraRunId: string | null = null;
     for await (const chunk of output.fullStream) {
       mastraRunId ??= chunk.runId ?? null;
-      if (chunk.type === 'tool-call-approval' || chunk.type === 'tool-call-suspended') {
+      if (
+        chunk.type === 'tool-call-approval' ||
+        chunk.type === 'tool-call-suspended'
+      ) {
         const p = chunk.payload ?? {};
-        suspend = { toolCallId: String(p.toolCallId ?? ''), toolName: String(p.toolName ?? ''), args: (p.args as Record<string, unknown>) ?? {} };
+        suspend = {
+          toolCallId: String(p.toolCallId ?? ''),
+          toolName: String(p.toolName ?? ''),
+          args: (p.args as Record<string, unknown>) ?? {},
+        };
         continue;
       }
       const event = chunkToSse(chunk);
@@ -112,7 +157,11 @@ export class ChatStreamService {
   private async finishTurn(
     runId: string,
     conv: { id: string },
-    output: { text: Promise<string>; usage: Promise<{ inputTokens?: number; outputTokens?: number }>; finishReason: Promise<string | undefined> },
+    output: {
+      text: Promise<string>;
+      usage: Promise<{ inputTokens?: number; outputTokens?: number }>;
+      finishReason: Promise<string | undefined>;
+    },
     suspend: Suspend | null,
     mastraRunId: string | null,
     startedAt: number,
@@ -130,6 +179,7 @@ export class ChatStreamService {
         title: `Approve ${s.toolName}`,
         payload: s.args,
         status: 'pending',
+        expiresAt: new Date(Date.now() + this.approvalTtlMs),
       } as never);
       await this.runs.finish(runId, {
         status: 'awaiting_approval',
@@ -137,7 +187,15 @@ export class ChatStreamService {
         latencyMs: Date.now() - startedAt,
         finishedAt: new Date(),
       } as never);
-      emit({ type: 'approval-required', approvalId: appr.id, toolCallId: s.toolCallId, toolName: s.toolName, actionType: actionTypeForTool(s.toolName), title: `Approve ${s.toolName}`, payload: s.args });
+      emit({
+        type: 'approval-required',
+        approvalId: appr.id,
+        toolCallId: s.toolCallId,
+        toolName: s.toolName,
+        actionType: actionTypeForTool(s.toolName),
+        title: `Approve ${s.toolName}`,
+        payload: s.args,
+      });
       emit({ type: 'done', status: 'awaiting_approval' });
       return;
     }
@@ -169,23 +227,36 @@ export class ChatStreamService {
     const emit = (e: SseEvent) => sink.write(sseFrame(e));
     const appr = await this.approvals.findById(resume.approvalId);
     if (!appr || appr.status !== 'pending') {
-      emit({ type: 'error', message: 'Approval not found or already resolved' });
+      emit({
+        type: 'error',
+        message: 'Approval not found or already resolved',
+      });
       emit({ type: 'done', status: 'failed' });
       return;
     }
-    if (principal.role !== 'admin') {
+    if (!isAdmin(principal)) {
       if (!appr.conversationId) {
-        emit({ type: 'error', message: 'Not authorized to resume this approval' });
+        emit({
+          type: 'error',
+          message: 'Not authorized to resume this approval',
+        });
         emit({ type: 'done', status: 'failed' });
         return;
       }
       await this.conversations.getOwned(principal, appr.conversationId); // throws 403/404
     }
-    emit({ type: 'start', conversationId: appr.conversationId as string, runId: appr.runId });
+    emit({
+      type: 'start',
+      conversationId: appr.conversationId as string,
+      runId: appr.runId,
+    });
     const startedAt = Date.now();
     try {
       const agent = this.mastra.getAgent(AGENT_ID);
-      const payload = { runId: appr.mastraRunId as string, toolCallId: appr.toolCallId ?? undefined };
+      const payload = {
+        runId: appr.mastraRunId as string,
+        toolCallId: appr.toolCallId ?? undefined,
+      };
       const output = resume.approved
         ? await agent.approveToolCall(payload as never)
         : await agent.declineToolCall(payload as never);
@@ -194,19 +265,36 @@ export class ChatStreamService {
       if (suspend) {
         // A second approval surfaced during the continuation — record it and pause again.
         const next = await this.approvals.create({
-          runId: appr.runId, conversationId: appr.conversationId, mastraRunId,
-          toolCallId: suspend.toolCallId, actionType: actionTypeForTool(suspend.toolName),
-          title: `Approve ${suspend.toolName}`, payload: suspend.args, status: 'pending',
+          runId: appr.runId,
+          conversationId: appr.conversationId,
+          mastraRunId,
+          toolCallId: suspend.toolCallId,
+          actionType: actionTypeForTool(suspend.toolName),
+          title: `Approve ${suspend.toolName}`,
+          payload: suspend.args,
+          status: 'pending',
         } as never);
-        await this.approvals.decide(resume.approvalId, { status: resume.approved ? 'executed' : 'rejected', decidedByUserId: principal.id, decidedAt: new Date() } as never);
-        emit({ type: 'approval-required', approvalId: next.id, toolCallId: suspend.toolCallId, toolName: suspend.toolName, actionType: actionTypeForTool(suspend.toolName), title: `Approve ${suspend.toolName}`, payload: suspend.args });
+        await this.approvals.decide(resume.approvalId, {
+          status: resume.approved ? 'executed' : 'rejected',
+          decidedByUserId: userIdOrNull(principal),
+          decidedAt: new Date(),
+        } as never);
+        emit({
+          type: 'approval-required',
+          approvalId: next.id,
+          toolCallId: suspend.toolCallId,
+          toolName: suspend.toolName,
+          actionType: actionTypeForTool(suspend.toolName),
+          title: `Approve ${suspend.toolName}`,
+          payload: suspend.args,
+        });
         emit({ type: 'done', status: 'awaiting_approval' });
         return;
       }
 
       await this.approvals.decide(resume.approvalId, {
         status: resume.approved ? 'executed' : 'rejected',
-        decidedByUserId: principal.id,
+        decidedByUserId: userIdOrNull(principal),
         decidedAt: new Date(),
       } as never);
       const [text, usage] = await Promise.all([output.text, output.usage]);
@@ -219,10 +307,21 @@ export class ChatStreamService {
         latencyMs: Date.now() - startedAt,
         finishedAt: new Date(),
       } as never);
-      emit({ type: 'done', status: resume.approved ? 'succeeded' : 'cancelled' });
+      emit({
+        type: 'done',
+        status: resume.approved ? 'succeeded' : 'cancelled',
+      });
     } catch (err) {
-      await this.approvals.decide(resume.approvalId, { status: 'failed', decidedByUserId: principal.id, decidedAt: new Date(), result: { error: err instanceof Error ? err.message : String(err) } } as never);
-      emit({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+      await this.approvals.decide(resume.approvalId, {
+        status: 'failed',
+        decidedByUserId: userIdOrNull(principal),
+        decidedAt: new Date(),
+        result: { error: err instanceof Error ? err.message : String(err) },
+      } as never);
+      emit({
+        type: 'error',
+        message: err instanceof Error ? err.message : String(err),
+      });
       emit({ type: 'done', status: 'failed' });
     }
   }

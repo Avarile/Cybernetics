@@ -8,6 +8,7 @@ import type { MailboxConfig } from '../../config/configurations/mailbox.config';
 import type { PresignedTarget } from '../../infrastructure/file-manage/object-storage.interface';
 import { SYSTEM_PRINCIPAL } from '../../common/principal';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
+import { InboxService } from '../../infrastructure/email/inbox.service';
 import { FileService } from '../file-processor/file.service';
 import { CollectionService } from '../search-service/collection.service';
 import { SearchRecordService } from '../search-service/search-record.service';
@@ -40,6 +41,7 @@ export class MailboxService implements OnApplicationBootstrap {
 
   constructor(
     private readonly repo: MailboxRepository,
+    private readonly inbox: InboxService,
     private readonly files: FileService,
     private readonly search: SearchRecordService,
     private readonly collections: CollectionService,
@@ -53,21 +55,21 @@ export class MailboxService implements OnApplicationBootstrap {
   /** Ensure the system-owned inbound_email collection exists (best-effort). */
   async onApplicationBootstrap(): Promise<void> {
     try {
-      await this.collections.get(INBOUND_EMAIL_COLLECTION);
-    } catch {
-      try {
-        await this.collections.create({
-          name: INBOUND_EMAIL_COLLECTION,
-          displayName: 'Inbound Email',
-          description: 'Durably persisted inbound messages',
-          fields: INBOUND_EMAIL_FIELDS,
-        });
-        this.logger.log(`Created "${INBOUND_EMAIL_COLLECTION}" collection`);
-      } catch (err) {
-        this.logger.warn(
-          `Could not ensure inbound_email collection: ${err instanceof Error ? err.message : String(err)}`,
-        );
-      }
+      await this.collections.ensureSystemCollection({
+        name: INBOUND_EMAIL_COLLECTION,
+        displayName: 'Inbound Email',
+        description: 'Durably persisted inbound messages',
+        fields: INBOUND_EMAIL_FIELDS,
+        // A shared company mailbox with no per-user owner, mirroring the
+        // `@Roles('admin')` on MailboxController. Before this the generic search
+        // endpoint served these bodies — `bodyText` and all — to any
+        // authenticated user, bypassing that guard entirely.
+        visibility: 'private',
+      });
+    } catch (err) {
+      this.logger.warn(
+        `Could not ensure inbound_email collection: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -136,6 +138,25 @@ export class MailboxService implements OnApplicationBootstrap {
   async markSeen(id: string, seen: boolean): Promise<void> {
     const row = await this.repo.setSeen(id, seen);
     if (!row) throw this.errors.create(ErrorCode.MAILBOX_MESSAGE_NOT_FOUND);
+
+    // Push the flag back to the server when configured to. Previously this only
+    // ever wrote the local row, so read state diverged from the real mailbox
+    // immediately and permanently — and `MAILBOX_PUSH_FLAGS`, which exists for
+    // exactly this, was referenced by nothing.
+    if (this.cfg.pushFlags) {
+      try {
+        await this.inbox.withSession(row.accountId, row.mailbox, (session) =>
+          session.setSeen(row.uid, seen),
+        );
+      } catch (error) {
+        // Local state is already updated and is the source of truth for the UI;
+        // a failed push is a divergence to log, not a reason to fail the call.
+        this.logger.warn(
+          `Could not push \\Seen=${seen} for message ${row.id} (uid ${row.uid}) ` +
+            `to the server: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
     try {
       await this.search.persist(INBOUND_EMAIL_COLLECTION, [
         { externalId: row.id, document: toSearchDocument(row) },

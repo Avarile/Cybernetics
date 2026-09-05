@@ -106,3 +106,41 @@ describe('SearchStatusService', () => {
     });
   });
 });
+
+describe('SearchStatusService.cachedStats', () => {
+  // `syncStats` is four filtered aggregates plus min/max over the largest table
+  // in the schema, and the readiness probe called it on every request.
+  it('does not re-query within the cache window', async () => {
+    const { service, records } = make();
+    await service.cachedStats();
+    await service.cachedStats();
+    await service.cachedStats();
+    expect(records.syncStats).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns the same snapshot while cached', async () => {
+    const { service } = make();
+    expect(await service.cachedStats()).toEqual(await service.cachedStats());
+  });
+
+  it('re-queries once the window lapses', async () => {
+    jest.useFakeTimers();
+    try {
+      const { service, records } = make();
+      await service.cachedStats();
+      jest.advanceTimersByTime(20_000);
+      await service.cachedStats();
+      expect(records.syncStats).toHaveBeenCalledTimes(2);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('leaves the uncached accessor alone for the admin status view', async () => {
+    const { service, records } = make();
+    await service.cachedStats();
+    await service.stats();
+    // The admin endpoint must show current numbers, not a cached snapshot.
+    expect(records.syncStats).toHaveBeenCalledTimes(2);
+  });
+});

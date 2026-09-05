@@ -1,19 +1,45 @@
-import { getQueueToken } from '@nestjs/bullmq';
-import { INestApplication } from '@nestjs/common';
+import {
+  BullModule,
+  Processor,
+  WorkerHost,
+  getQueueToken,
+} from '@nestjs/bullmq';
+import { INestApplication, Logger, Module } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import type { Job, Queue } from 'bullmq';
 import type { Redis } from 'ioredis';
 import { ConfigModule } from '../src/config/config.module';
-import { ExampleProcessor } from '../src/infrastructure/queue/processors/example.processor';
-import { DEFAULT_QUEUE } from '../src/infrastructure/queue/queue.constants';
 import { QueueModule } from '../src/infrastructure/queue/queue.module';
+
+/**
+ * Test-only queue + worker.
+ *
+ * These used to live in `src/` as `ExampleProcessor`/`ExampleScheduler`, which
+ * meant every production replica ran a worker polling an empty queue forever.
+ * The wiring is worth testing; shipping it is not — so the fixture moved here.
+ */
+const TEST_QUEUE = 'e2e-test-queue';
+
+@Processor(TEST_QUEUE)
+class TestProcessor extends WorkerHost {
+  private readonly logger = new Logger(TestProcessor.name);
+  async process(job: Job): Promise<void> {
+    this.logger.log(`Processing job ${job.id ?? '?'} (${job.name})`);
+  }
+}
+
+@Module({
+  imports: [QueueModule, BullModule.registerQueue({ name: TEST_QUEUE })],
+  providers: [TestProcessor],
+})
+class TestQueueModule {}
 
 /**
  * BullMQ integration test.
  *
  * Boots only the ConfigModule + QueueModule (no HTTP/DB/Sentry) and drives the
- * real `QueueModule` wiring — the shared Redis connection, the `default` queue,
- * and the `ExampleProcessor` worker — against the live Redis configured in
+ * real `QueueModule` wiring — the shared Redis connection, a registered queue,
+ * and a locally-declared worker — against the live Redis configured in
  * `.env`. Verifies: connection, enqueue → consume → complete, and delayed jobs.
  *
  * Requires a reachable Redis (see the REDIS_* vars in `.env`). Run with
@@ -48,17 +74,17 @@ describe('BullMQ queue (e2e)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
-      imports: [ConfigModule, QueueModule],
+      imports: [ConfigModule, TestQueueModule],
     }).compile();
 
     app = moduleRef.createNestApplication();
 
     // Must be set before init() — see the note in the file header.
-    processSpy = jest.spyOn(ExampleProcessor.prototype, 'process');
+    processSpy = jest.spyOn(TestProcessor.prototype, 'process');
 
-    await app.init(); // starts the ExampleProcessor worker
+    await app.init(); // starts the TestProcessor worker
 
-    queue = app.get<Queue>(getQueueToken(DEFAULT_QUEUE));
+    queue = app.get<Queue>(getQueueToken(TEST_QUEUE));
   });
 
   afterAll(async () => {
@@ -70,7 +96,7 @@ describe('BullMQ queue (e2e)', () => {
 
   it('connects the default queue to the configured Redis', async () => {
     expect(queue).toBeDefined();
-    expect(queue.name).toBe(DEFAULT_QUEUE);
+    expect(queue.name).toBe(TEST_QUEUE);
 
     // waitUntilReady resolves with the live ioredis client once connected.
     // bullmq types it as the narrow IRedisClient, so cast to expose ping().
@@ -90,7 +116,7 @@ describe('BullMQ queue (e2e)', () => {
 
     await waitFor(async () => (await job.getState()) === 'completed');
 
-    // The worker actually invoked ExampleProcessor.process with our job.
+    // The worker actually invoked TestProcessor.process with our job.
     const call = processSpy.mock.calls.find(
       ([j]) => (j as Job).name === 'e2e-test-job',
     );

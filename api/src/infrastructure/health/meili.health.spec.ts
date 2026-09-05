@@ -12,7 +12,7 @@ describe('MeiliHealthIndicator', () => {
   /** Status service reporting a given lag, or absent entirely. */
   function statusService(lagSeconds: number, degraded: boolean) {
     return {
-      stats: jest.fn(async () => ({
+      cachedStats: jest.fn(async () => ({
         pending: degraded ? 5 : 0,
         indexed: 100,
         failed: degraded ? 2 : 0,
@@ -84,7 +84,7 @@ describe('MeiliHealthIndicator', () => {
 
   it('reports down when the status query itself fails', async () => {
     const status = {
-      stats: jest.fn(async () => {
+      cachedStats: jest.fn(async () => {
         throw new Error('db down');
       }),
       lagSeconds: jest.fn(),

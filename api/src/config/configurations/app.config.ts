@@ -8,6 +8,8 @@ export const appConfig = registerAs('app', () => {
     env: env.NODE_ENV,
     port: env.PORT,
     logLevel: env.LOG_LEVEL,
+    bodyLimit: env.REQUEST_BODY_LIMIT,
+    healthHeapThresholdBytes: env.HEALTH_HEAP_THRESHOLD_BYTES,
     isProduction: env.NODE_ENV === 'production',
   };
 });

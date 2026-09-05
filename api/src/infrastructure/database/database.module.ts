@@ -26,7 +26,17 @@ const pgPoolProvider: Provider = {
       user: db.username,
       password: db.password,
       database: db.database,
-      ssl: db.ssl ? { rejectUnauthorized: false } : false,
+      // Verify the server certificate by default. `rejectUnauthorized: false`
+      // was unconditional, so enabling DATABASE_SSL produced a connection that
+      // was encrypted but not authenticated — i.e. still MITM-able, while
+      // looking secure. Opt out explicitly for a self-signed dev server.
+      ssl: db.ssl ? { rejectUnauthorized: db.sslRejectUnauthorized } : false,
+      // pg defaults to max:10 for the whole process, shared by HTTP handlers,
+      // five queue workers and Mastra's own store. Sized explicitly, with a
+      // connection timeout so a saturated pool fails instead of hanging.
+      max: db.poolMax,
+      idleTimeoutMillis: db.poolIdleTimeoutMs,
+      connectionTimeoutMillis: db.poolConnectionTimeoutMs,
     });
   },
 };

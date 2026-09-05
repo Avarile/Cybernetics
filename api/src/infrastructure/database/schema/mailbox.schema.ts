@@ -13,6 +13,8 @@ import {
   varchar,
 } from 'drizzle-orm/pg-core';
 import { baseColumns } from './common';
+import { files } from './file.schema';
+import { imapConfigs } from './system.schema';
 
 /** One address as parsed from a message header. */
 export interface EmailAddress {
@@ -29,9 +31,17 @@ export const emailMessages = pgTable(
   'email_messages',
   {
     ...baseColumns,
-    accountId: uuid('account_id').notNull(),
+    accountId: uuid('account_id')
+      .notNull()
+      .references(() => imapConfigs.id),
     mailbox: varchar('mailbox', { length: 255 }).notNull().default('INBOX'),
-    uid: integer('uid').notNull(),
+    /**
+     * IMAP UID. `bigint`, not `integer`: UIDs are unsigned 32-bit and run to
+     * 4,294,967,295, while a Postgres `integer` stops at 2,147,483,647. A
+     * long-lived mailbox does cross that, and the insert then fails with a
+     * numeric overflow.
+     */
+    uid: bigint('uid', { mode: 'number' }).notNull(),
     uidValidity: bigint('uid_validity', { mode: 'number' }).notNull(),
     messageId: varchar('message_id', { length: 998 }),
     inReplyTo: varchar('in_reply_to', { length: 998 }),
@@ -57,7 +67,7 @@ export const emailMessages = pgTable(
     seen: boolean('seen').notNull().default(false),
     flagged: boolean('flagged').notNull().default(false),
     hasAttachments: boolean('has_attachments').notNull().default(false),
-    rawFileId: uuid('raw_file_id'),
+    rawFileId: uuid('raw_file_id').references(() => files.id),
   },
   (t) => [
     uniqueIndex('email_messages_identity_idx')
@@ -75,8 +85,12 @@ export const emailAttachments = pgTable(
   'email_attachments',
   {
     ...baseColumns,
-    emailId: uuid('email_id').notNull(),
-    fileId: uuid('file_id').notNull(),
+    emailId: uuid('email_id')
+      .notNull()
+      .references(() => emailMessages.id),
+    fileId: uuid('file_id')
+      .notNull()
+      .references(() => files.id),
     filename: varchar('filename', { length: 512 }),
     contentType: varchar('content_type', { length: 255 }).notNull(),
     size: integer('size').notNull(),
@@ -91,7 +105,9 @@ export const emailSyncState = pgTable(
   'email_sync_state',
   {
     ...baseColumns,
-    accountId: uuid('account_id').notNull(),
+    accountId: uuid('account_id')
+      .notNull()
+      .references(() => imapConfigs.id),
     mailbox: varchar('mailbox', { length: 255 }).notNull().default('INBOX'),
     uidValidity: bigint('uid_validity', { mode: 'number' }),
     lastSeenUid: integer('last_seen_uid').notNull().default(0),

@@ -34,7 +34,9 @@ export class MeiliHealthIndicator {
       }
       if (!this.status) return indicator.up();
 
-      const stats = await this.status.stats();
+      // Cached: this runs on every readiness probe, and uncached it is a full
+      // aggregate over the largest table in the schema.
+      const stats = await this.status.cachedStats();
       const lagSeconds = this.status.lagSeconds(stats);
       const detail = {
         lagSeconds,

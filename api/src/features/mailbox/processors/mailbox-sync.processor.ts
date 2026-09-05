@@ -1,5 +1,5 @@
 import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
+import { Logger, type OnModuleInit } from '@nestjs/common';
 import { Job, Queue } from 'bullmq';
 import { MailboxIngestService } from '../mailbox-ingest.service';
 import {
@@ -8,6 +8,7 @@ import {
   SYNC_JOB_OPTS,
   SYNC_MAILBOX_JOB,
 } from '../mailbox.constants';
+import { haltWorkerIfApiOnly } from '../../../infrastructure/queue/worker-role';
 
 interface SyncJobData {
   accountId: string;
@@ -21,7 +22,7 @@ interface SyncJobData {
  *                       may be missing/stale (best-effort, idempotent).
  */
 @Processor(MAILBOX_SYNC_QUEUE)
-export class MailboxSyncProcessor extends WorkerHost {
+export class MailboxSyncProcessor extends WorkerHost implements OnModuleInit {
   private readonly logger = new Logger(MailboxSyncProcessor.name);
 
   constructor(
@@ -29,6 +30,10 @@ export class MailboxSyncProcessor extends WorkerHost {
     @InjectQueue(MAILBOX_SYNC_QUEUE) private readonly queue: Queue,
   ) {
     super();
+  }
+
+  onModuleInit(): void {
+    haltWorkerIfApiOnly(this.worker, (m) => this.logger.log(m));
   }
 
   async process(job: Job): Promise<void> {

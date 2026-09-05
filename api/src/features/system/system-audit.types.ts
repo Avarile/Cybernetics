@@ -1,5 +1,6 @@
 /** The kinds of records the system module audits. */
-export type AuditEntityType = 'smtp' | 'imap' | 'integration' | 'setting';
+export type AuditEntityType =
+  'smtp' | 'imap' | 'integration' | 'setting' | 'conversation';
 
 /** Who/where a mutation came from — sourced from the request principal. */
 export interface AuditContext {

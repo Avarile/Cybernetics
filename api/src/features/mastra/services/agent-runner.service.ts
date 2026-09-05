@@ -1,8 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MastraService } from '@mastra/nestjs';
+import { withTimeout } from '../../../common/with-timeout';
 import type { MastraConfig } from '../../../config/configurations/mastra.config';
 import { AGENT_ID } from '../mastra.constants';
+import { userIdOrNull } from '../../../common/principal';
 import type { PendingApproval, PrincipalRef } from '../mastra.types';
 import { AgentRunRepository } from '../repositories/agent-run.repository';
 import { ApprovalRepository } from '../repositories/approval.repository';
@@ -39,6 +41,10 @@ export class AgentRunnerService {
    * served model id on the result — see `mastra-adapters.ts::readUsage`.
    */
   private readonly configuredModel: string;
+  /** How long a pending approval stays actionable (MASTRA_APPROVAL_TTL_MS). */
+  private readonly approvalTtlMs: number;
+  /** Ceiling on one buffered agent turn (MASTRA_RUN_TIMEOUT_MS). */
+  private readonly runTimeoutMs: number;
 
   constructor(
     private readonly conversations: ConversationService,
@@ -47,7 +53,10 @@ export class AgentRunnerService {
     private readonly mastra: MastraService,
     config: ConfigService,
   ) {
-    this.configuredModel = config.getOrThrow<MastraConfig>('mastra').model;
+    const cfg = config.getOrThrow<MastraConfig>('mastra');
+    this.configuredModel = cfg.model;
+    this.approvalTtlMs = cfg.approvalTtlMs;
+    this.runTimeoutMs = cfg.runTimeoutMs;
   }
 
   async runChat(
@@ -62,7 +71,7 @@ export class AgentRunnerService {
     const run = await this.runs.create({
       conversationId: conv.id,
       trigger: 'user_message',
-      triggeredByUserId: principal.id,
+      triggeredByUserId: userIdOrNull(principal),
       status: 'running',
       agentId: AGENT_ID,
       input: { message: input.message },
@@ -71,14 +80,20 @@ export class AgentRunnerService {
     const startedAt = Date.now();
     try {
       const agent = this.mastra.getAgent(AGENT_ID);
-      const result = await agent.generate(input.message, {
-        memory: { resource: conv.resourceId, thread: { id: conv.id } },
-        requestContext: buildRequestContext({
-          principal,
-          runId: run.id,
-          conversationId: conv.id,
-        }),
-      } as never);
+      // Bounded. Without a deadline a slow or hung provider call held an HTTP
+      // request open for as long as it liked, and MASTRA_MAX_RETRIES multiplied
+      // it. The run is still ledgered as failed by the catch below.
+      const result = await withTimeout(
+        agent.generate(input.message, {
+          memory: { resource: conv.resourceId, thread: { id: conv.id } },
+          requestContext: buildRequestContext({
+            principal,
+            runId: run.id,
+            conversationId: conv.id,
+          }),
+        } as never),
+        this.runTimeoutMs,
+      );
 
       const pending = toPendingApprovals(result);
       const usage = readUsage(result);
@@ -92,6 +107,10 @@ export class AgentRunnerService {
           title: p.title,
           payload: p.payload,
           status: 'pending',
+          // Without this the `expired` status is unreachable and a pending
+          // approval — a suspended run holding a workflow snapshot — lives
+          // forever and stays approvable.
+          expiresAt: new Date(Date.now() + this.approvalTtlMs),
         } as never);
       }
       await this.runs.finish(run.id, {

@@ -15,7 +15,7 @@ import {
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
-import type { Principal } from '../../common/principal';
+import { userIdOrNull, type Principal } from '../../common/principal';
 import { CreateSmtpDto } from './dto/create-smtp.dto';
 import { ListQueryDto } from './dto/list-query.dto';
 import { UpdateSmtpDto } from './dto/update-smtp.dto';
@@ -29,7 +29,7 @@ export class SmtpConfigController {
   constructor(private readonly smtp: SmtpConfigService) {}
 
   private ctx(user: Principal, ip: string, ua?: string): AuditContext {
-    return { actorId: user.id, ip, userAgent: ua ?? null };
+    return { actorId: userIdOrNull(user), ip, userAgent: ua ?? null };
   }
 
   @ApiOperation({ summary: 'Create SMTP config' })

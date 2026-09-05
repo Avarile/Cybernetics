@@ -1,5 +1,5 @@
 import { InjectQueue, Processor, WorkerHost } from '@nestjs/bullmq';
-import { Inject, Logger } from '@nestjs/common';
+import { Inject, Logger, type OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Queue, type Job } from 'bullmq';
 import { createHash } from 'node:crypto';
@@ -18,6 +18,7 @@ import {
 } from '../file.constants';
 import { FileRepository } from '../file.repository';
 import { isDeclaredMimeMismatch } from '../file.util';
+import { haltWorkerIfApiOnly } from '../../../infrastructure/queue/worker-role';
 
 /**
  * Consumes the `file-processing` queue:
@@ -26,9 +27,13 @@ import { isDeclaredMimeMismatch } from '../file.util';
  *  - reconcile-files: expire stale PENDING rows; purge unreferenced objects.
  */
 @Processor(FILE_PROCESSING_QUEUE)
-export class FileProcessingProcessor extends WorkerHost {
+export class FileProcessingProcessor
+  extends WorkerHost
+  implements OnModuleInit
+{
   private readonly logger = new Logger(FileProcessingProcessor.name);
   private readonly pendingTtlMs: number;
+  private readonly purgeAfterMs: number;
 
   constructor(
     private readonly repo: FileRepository,
@@ -37,8 +42,13 @@ export class FileProcessingProcessor extends WorkerHost {
     @InjectQueue(INGEST_DOCUMENT_QUEUE) private readonly ingestQueue: Queue,
   ) {
     super();
-    this.pendingTtlMs =
-      config.getOrThrow<StorageConfig>('storage').pendingTtlSeconds * 1000;
+    const cfg = config.getOrThrow<StorageConfig>('storage');
+    this.pendingTtlMs = cfg.pendingTtlSeconds * 1000;
+    this.purgeAfterMs = cfg.purgeAfterDays * 24 * 60 * 60 * 1000;
+  }
+
+  onModuleInit(): void {
+    haltWorkerIfApiOnly(this.worker, (m) => this.logger.log(m));
   }
 
   async process(job: Job): Promise<void> {
@@ -63,11 +73,14 @@ export class FileProcessingProcessor extends WorkerHost {
     // Single streaming pass: compute SHA-256 and capture the header bytes.
     const stream = await this.storage.getObjectStream(row.objectKey);
     const hash = createHash('sha256');
+    // 64, not 16: the markup signatures ('<!doctype html', a leading BOM plus
+    // whitespace, …) need more than sixteen bytes to match reliably.
+    const HEAD_BYTES = 64;
     let head: Buffer = Buffer.alloc(0);
     for await (const chunk of stream) {
       const buf = chunk as Buffer;
-      if (head.length < 16) {
-        head = Buffer.concat([head, buf.subarray(0, 16 - head.length)]);
+      if (head.length < HEAD_BYTES) {
+        head = Buffer.concat([head, buf.subarray(0, HEAD_BYTES - head.length)]);
       }
       hash.update(buf);
     }
@@ -105,6 +118,10 @@ export class FileProcessingProcessor extends WorkerHost {
         INGEST_DOCUMENT_JOB,
         { fileId, ownerId: row.ownerId },
         {
+          // Deduplicated by file id. Without it, re-processing the same file —
+          // a retry, a reconcile, a second upload of identical bytes — enqueued
+          // another full parse of a document that can be tens of megabytes.
+          jobId: `ingest:${fileId}`,
           removeOnComplete: true,
           removeOnFail: 100,
           attempts: 3,
@@ -121,18 +138,31 @@ export class FileProcessingProcessor extends WorkerHost {
       await this.repo.softDelete(row.id);
     }
 
-    const purgeable = await this.repo.findPurgeable();
+    // Only rows past the retention window. Without the cutoff this swept every
+    // soft-deleted row on the next hourly pass, making "soft delete" an
+    // irrecoverable delete within the hour — and taking the row that would have
+    // explained it along too.
+    const purgeCutoff = new Date(Date.now() - this.purgeAfterMs);
+    const purgeable = await this.repo.findPurgeable(purgeCutoff);
     for (const row of purgeable) {
-      if ((await this.repo.countLiveReferences(row.objectKey)) === 0) {
-        try {
-          await this.storage.removeObject(row.objectKey);
-        } catch (error) {
-          this.logger.warn(
-            `Failed to remove object ${row.objectKey}: ${(error as Error).message}`,
-          );
-        }
+      // Row delete and reference count in one transaction, so a `tryDedup`
+      // cannot claim the object between the check and the removal and end up
+      // with a live file row whose bytes are gone.
+      const { objectOrphaned } = await this.repo.purgeAndCheckOrphan(
+        row.id,
+        row.objectKey,
+      );
+      if (!objectOrphaned) continue;
+      try {
+        await this.storage.removeObject(row.objectKey);
+      } catch (error) {
+        // The row is already gone; a failed object delete leaks bytes rather
+        // than breaking anything, and the next sweep will not retry it. Logged
+        // loudly so it is visible rather than silent.
+        this.logger.warn(
+          `Orphaned object ${row.objectKey} could not be removed: ${(error as Error).message}`,
+        );
       }
-      await this.repo.hardDelete(row.id);
     }
 
     this.logger.log(

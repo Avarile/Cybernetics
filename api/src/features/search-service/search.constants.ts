@@ -1,5 +1,17 @@
+import { QUEUE_NAMES } from '../../infrastructure/queue/queue-names';
+
+/**
+ * The document field that identifies a record in the search engine.
+ *
+ * `toMeiliDocument` always emits it, `fieldSpecToIndexDefinition` declares it,
+ * and every document write passes it. It must be stated explicitly on writes:
+ * a document also carries `externalId`, so leaving the engine to infer which
+ * `*id` field is the key is ambiguous and fails the write permanently.
+ */
+export const RECORD_PRIMARY_KEY = 'id';
+
 /** BullMQ queue that applies index mutations off the request path. */
-export const SEARCH_INDEXING_QUEUE = 'search-indexing';
+export const SEARCH_INDEXING_QUEUE = QUEUE_NAMES.searchIndexing;
 
 /**
  * Job: sync a batch of records (by id) to Meili. Live rows are added/replaced

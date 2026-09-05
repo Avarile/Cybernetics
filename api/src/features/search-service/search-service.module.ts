@@ -1,4 +1,5 @@
 import { BullModule } from '@nestjs/bullmq';
+import { QueueModule } from '../../infrastructure/queue/queue.module';
 import { Module } from '@nestjs/common';
 import { CollectionController } from './collection.controller';
 import { CollectionRepository } from './collection.repository';
@@ -28,7 +29,10 @@ import { SearchStatusService } from './search-status.service';
  * QueueModule.
  */
 @Module({
-  imports: [BullModule.registerQueue({ name: SEARCH_INDEXING_QUEUE })],
+  imports: [
+    QueueModule,
+    BullModule.registerQueue({ name: SEARCH_INDEXING_QUEUE }),
+  ],
   controllers: [
     CollectionController,
     RecordController,

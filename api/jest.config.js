@@ -13,7 +13,15 @@ module.exports = {
   transform: {
     '^.+\\.(t|j)s$': ['@swc/jest', swcConfig],
   },
-  collectCoverageFrom: ['**/*.(t|j)s'],
+  // Exclude specs and pure type/constant modules: counting `*.spec.ts` as
+  // source inflated coverage with files that are, by definition, fully covered.
+  collectCoverageFrom: [
+    '**/*.(t|j)s',
+    '!**/*.spec.ts',
+    '!**/*.d.ts',
+    '!main.ts',
+    '!instrument.ts',
+  ],
   coverageDirectory: '../coverage',
   testEnvironment: 'node',
 };

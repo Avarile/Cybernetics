@@ -38,6 +38,22 @@ export class EmailConfigRepository {
     };
   }
 
+  /**
+   * A specific IMAP profile by id, regardless of whether it is the active one.
+   *
+   * Needed because `accountId` is now the `imap_configs.id` rather than an
+   * unrelated free-form UUID, so the mailbox feature can resolve the connection
+   * its partition key names.
+   */
+  async imapById(id: string): Promise<ImapConn | null> {
+    const rows = await this.db
+      .select()
+      .from(imapConfigs)
+      .where(and(eq(imapConfigs.id, id), eq(imapConfigs.isDeleted, false)))
+      .limit(1);
+    return rows[0] ? this.toImapConn(rows[0]) : null;
+  }
+
   async activeImap(): Promise<ImapConn | null> {
     const rows = await this.db
       .select()
@@ -47,7 +63,16 @@ export class EmailConfigRepository {
       )
       .limit(1);
     const row = rows[0];
-    if (!row) return null;
+    return row ? this.toImapConn(row) : null;
+  }
+
+  private toImapConn(row: {
+    host: string;
+    port: number;
+    secure: boolean;
+    username: string | null;
+    secretEnc: string | null;
+  }): ImapConn {
     return {
       host: row.host,
       port: row.port,

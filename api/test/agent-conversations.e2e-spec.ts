@@ -67,7 +67,7 @@ describe('Agent conversations API (e2e)', () => {
   });
 
   beforeEach(() => {
-    principal = { id: 'user-9', role: 'user' };
+    principal = { kind: 'user', userId: 'user-9', role: 'user' };
     listByOwner.mockReset();
     listByOwner.mockResolvedValue({ rows: [], total: 0 });
   });
@@ -158,7 +158,7 @@ describe('Agent conversations API (e2e)', () => {
   });
 
   it('returns an empty envelope for an anonymous principal', async () => {
-    principal = { id: null, role: 'guest' };
+    principal = { kind: 'anonymous' };
     const { body } = await request(app.getHttpServer())
       .get('/agent/conversations')
       .expect(200);

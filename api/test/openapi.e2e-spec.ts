@@ -123,7 +123,9 @@ describe('OpenAPI / Scalar (e2e)', () => {
       expect(listResponses['401'].content['application/json'].schema.$ref).toBe(
         '#/components/schemas/ErrorEnvelope',
       );
-      expect(res.body.paths['/samples/ping']?.get?.responses['401']).toBeUndefined();
+      expect(
+        res.body.paths['/samples/ping']?.get?.responses['401'],
+      ).toBeUndefined();
 
       // op with a request body gets a 400
       expect(res.body.paths['/samples']?.post?.responses['400']).toBeDefined();

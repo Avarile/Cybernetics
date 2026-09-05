@@ -7,7 +7,7 @@ import { PasswordResetRepository } from './password-reset.repository';
 import { PasswordService } from './password.service';
 import { ResetCodeHasher } from './reset-code-hasher';
 import { ResetMailer } from './reset-mailer';
-import { SessionRepository } from './session.repository';
+import { SessionRevocationService } from './session-revocation.service';
 
 /** A syntactically valid but unmatchable hash, for timing equalization. */
 const DECOY_CODE_HASH = '0'.repeat(64);
@@ -21,7 +21,7 @@ export class PasswordResetService {
   constructor(
     private readonly users: UserRepository,
     private readonly codes: PasswordResetRepository,
-    private readonly sessions: SessionRepository,
+    private readonly revocation: SessionRevocationService,
     private readonly passwords: PasswordService,
     private readonly hasher: ResetCodeHasher,
     private readonly mailer: ResetMailer,
@@ -98,7 +98,7 @@ export class PasswordResetService {
       passwordHash: await this.passwords.hash(newPassword),
     });
     await this.codes.consume(row.id);
-    await this.sessions.revokeAllForUser(user.id);
+    await this.revocation.revokeAllForUser(user.id);
     this.logger.log(`reset_succeeded userId=${user.id}`);
     try {
       await this.mailer.sendChangedConfirmation(user.email);

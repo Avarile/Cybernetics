@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 import type { ServiceCredentialRow } from '../../infrastructure/database/schema/identity.schema';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { ServiceCredentialRepository } from './service-credential.repository';
+import { SessionRevocationService } from './session-revocation.service';
 import { TokenService } from './token.service';
 
 /** Returned once, on creation — the only time the plaintext key is available. */
@@ -29,6 +30,7 @@ export class ServiceCredentialService {
   constructor(
     private readonly repo: ServiceCredentialRepository,
     private readonly tokens: TokenService,
+    private readonly revocation: SessionRevocationService,
     private readonly errors: ExceptionService,
   ) {}
 
@@ -85,6 +87,9 @@ export class ServiceCredentialService {
   }
 
   async revoke(id: string): Promise<void> {
-    await this.repo.revoke(id);
+    // Through the revocation service so the cached verdict is dropped too —
+    // otherwise the credential is revoked in Postgres while its outstanding
+    // access token keeps working.
+    await this.revocation.revokeCredential(id);
   }
 }

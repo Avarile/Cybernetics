@@ -89,3 +89,84 @@ describe('file.util', () => {
     });
   });
 });
+
+describe('detectMimeFromMagic — broadened coverage', () => {
+  const buf = (s: string) => Buffer.from(s, 'utf8');
+
+  it.each([
+    ['%PDF-1.7', 'application/pdf'],
+    ['<?xml version="1.0"?>', 'application/xml'],
+    ['<svg xmlns="...">', 'image/svg+xml'],
+    ['<!DOCTYPE html><html>', 'text/html'],
+    ['<html><body>', 'text/html'],
+    ['<script>alert(1)</script>', 'text/html'],
+    ['#!/bin/sh', 'text/x-shellscript'],
+  ])('detects %s', (content, expected) => {
+    expect(detectMimeFromMagic(buf(content))).toBe(expected);
+  });
+
+  it('tolerates a BOM and leading whitespace before markup', () => {
+    expect(detectMimeFromMagic(buf('﻿\n  <!DOCTYPE html>'))).toBe('text/html');
+  });
+
+  it('returns null for genuinely unrecognised bytes', () => {
+    expect(
+      detectMimeFromMagic(Buffer.from([0x01, 0x02, 0x03, 0x04])),
+    ).toBeNull();
+  });
+
+  it('prefers a binary signature over markup sniffing', () => {
+    // A PNG whose bytes happen to contain '<' later must not read as markup.
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+      buf('<html>'),
+    ]);
+    expect(detectMimeFromMagic(png)).toBe('image/png');
+  });
+});
+
+describe('isDeclaredMimeMismatch — broadened coverage', () => {
+  const buf = (s: string) => Buffer.from(s, 'utf8');
+
+  // The gap that mattered: text-ish payloads declared as text/plain went
+  // through unquarantined, and document-ingest then parses those bytes.
+  it('flags HTML declared as text/plain', () => {
+    expect(isDeclaredMimeMismatch('text/plain', buf('<!DOCTYPE html>'))).toBe(
+      true,
+    );
+  });
+
+  it('flags a shell script declared as text/markdown', () => {
+    expect(isDeclaredMimeMismatch('text/markdown', buf('#!/bin/sh'))).toBe(
+      true,
+    );
+  });
+
+  it('accepts SVG declared as image/svg+xml', () => {
+    expect(isDeclaredMimeMismatch('image/svg+xml', buf('<svg>'))).toBe(false);
+  });
+
+  it('accepts an XML payload declared as a +xml type', () => {
+    expect(
+      isDeclaredMimeMismatch(
+        'application/rss+xml',
+        buf('<?xml version="1.0"?>'),
+      ),
+    ).toBe(false);
+  });
+
+  it('still accepts DOCX declared as its OOXML type', () => {
+    expect(
+      isDeclaredMimeMismatch(
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+      ),
+    ).toBe(false);
+  });
+
+  it('does not flag plain prose declared as text/plain', () => {
+    expect(isDeclaredMimeMismatch('text/plain', buf('Just some notes.'))).toBe(
+      false,
+    );
+  });
+});

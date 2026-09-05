@@ -15,7 +15,7 @@ import {
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
-import type { Principal } from '../../common/principal';
+import { userIdOrNull, type Principal } from '../../common/principal';
 import { CreateImapDto } from './dto/create-imap.dto';
 import { ListQueryDto } from './dto/list-query.dto';
 import { UpdateImapDto } from './dto/update-imap.dto';
@@ -29,7 +29,7 @@ export class ImapConfigController {
   constructor(private readonly imap: ImapConfigService) {}
 
   private ctx(user: Principal, ip: string, ua?: string): AuditContext {
-    return { actorId: user.id, ip, userAgent: ua ?? null };
+    return { actorId: userIdOrNull(user), ip, userAgent: ua ?? null };
   }
 
   @ApiOperation({ summary: 'Create IMAP config' })

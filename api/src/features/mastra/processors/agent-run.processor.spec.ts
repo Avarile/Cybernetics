@@ -46,12 +46,14 @@ function make(startResult: unknown) {
     }),
   };
   const mastra = { getWorkflow: jest.fn(() => workflow) };
+  const approvals = { expireOverdue: jest.fn(async () => 0) };
   const processor = new AgentRunProcessor(
     schedules as never,
     runs as never,
+    approvals as never,
     mastra as never,
   );
-  return { processor, schedules, runs, mastra, schedule };
+  return { processor, schedules, runs, approvals, mastra, schedule };
 }
 
 const job = { name: 'run-schedule', data: { scheduleId: 'sched-1' } } as never;
@@ -136,6 +138,7 @@ describe('AgentRunProcessor.process', () => {
     const processor = new AgentRunProcessor(
       schedules as never,
       runs as never,
+      { expireOverdue: jest.fn(async () => 0) } as never,
       mastra as never,
     );
 

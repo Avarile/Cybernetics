@@ -1,4 +1,5 @@
 import { createTool } from '@mastra/core/tools';
+import { userIdOrNull } from '../../../common/principal';
 import { z } from 'zod';
 import type { ToolRuntime, ToolServices } from '../mastra.types';
 import { readRuntime } from './tool-context';
@@ -24,7 +25,7 @@ export async function dbWriteExecute(
   await deps.recordAction({
     runId: rt.runId,
     conversationId: rt.conversationId,
-    actorUserId: rt.principal.id,
+    actorUserId: userIdOrNull(rt.principal),
     actionType: 'db_write',
     toolId: 'db-write',
     status: 'success',

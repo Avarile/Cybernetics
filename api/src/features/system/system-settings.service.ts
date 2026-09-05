@@ -1,5 +1,7 @@
 import { CACHE_MANAGER } from '@nestjs/cache-manager';
 import { Inject, Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import type { SystemConfig } from '../../config/configurations/system.config';
 import type { Cache } from 'cache-manager';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import type {
@@ -22,14 +24,18 @@ export interface PublicSetting {
 
 @Injectable()
 export class SystemSettingsService {
-  private readonly ttlMs = 300_000; // 5 minutes (cache-manager ttl is in ms)
+  /** Cache lifetime for a setting. Every other comparable knob is env-driven. */
+  private readonly ttlMs: number;
 
   constructor(
     private readonly repo: SystemSettingsRepository,
     @Inject(CACHE_MANAGER) private readonly cache: Cache,
     private readonly audit: SystemAuditService,
     private readonly errors: ExceptionService,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.ttlMs = config.getOrThrow<SystemConfig>('system').settingsCacheTtlMs;
+  }
 
   private cacheKey(key: string): string {
     return `system:setting:${key}`;

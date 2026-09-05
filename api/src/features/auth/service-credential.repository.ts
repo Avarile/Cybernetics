@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { desc, eq } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import {
   DRIZZLE,
   type DrizzleDB,
@@ -22,6 +22,28 @@ export class ServiceCredentialRepository {
     return rows[0];
   }
 
+  /**
+   * A credential that is still usable: exists, live, not revoked.
+   *
+   * The service-token counterpart of `SessionRepository.findLiveById` — a
+   * service credential has no session, so its own row is the revocation record.
+   * Expiry is checked by the caller, which owns the clock.
+   */
+  async findLiveById(id: string): Promise<ServiceCredentialRow | null> {
+    const rows = await this.db
+      .select()
+      .from(serviceCredentials)
+      .where(
+        and(
+          eq(serviceCredentials.id, id),
+          eq(serviceCredentials.isDeleted, false),
+          isNull(serviceCredentials.revokedAt),
+        ),
+      )
+      .limit(1);
+    return rows[0] ?? null;
+  }
+
   async findByKeyHash(keyHash: string): Promise<ServiceCredentialRow | null> {
     const rows = await this.db
       .select()
@@ -35,6 +57,7 @@ export class ServiceCredentialRepository {
     return this.db
       .select()
       .from(serviceCredentials)
+      .where(eq(serviceCredentials.isDeleted, false))
       .orderBy(desc(serviceCredentials.createdAt));
   }
 

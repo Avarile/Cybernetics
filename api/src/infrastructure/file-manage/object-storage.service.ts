@@ -14,6 +14,24 @@ import type {
 } from './object-storage.interface';
 
 /**
+ * Build an RFC 6266 / RFC 5987 `Content-Disposition` value.
+ *
+ * The previous version stripped `"` and nothing else, which read like a
+ * sanitiser without being one: CR, LF, `;` and every non-ASCII byte passed
+ * straight through into a response header. Not exploitable today — the MinIO
+ * SDK URL-encodes this into the presigned query string — but the safety of the
+ * whole thing rested on that incidental encoding rather than on this function.
+ *
+ * An ASCII-only `filename` covers old clients; `filename*` carries the real name.
+ */
+function contentDisposition(filename: string): string {
+  const collapsed = filename.replace(/[\r\n]+/g, ' ').trim() || 'download';
+  // Anything outside a conservative ASCII set becomes `_` in the fallback.
+  const ascii = collapsed.replace(/[^\x20-\x7E]/g, '_').replace(/["\\]/g, '_');
+  return `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(collapsed)}`;
+}
+
+/**
  * MinIO-backed implementation of {@link ObjectStorage}. Translates the generic,
  * store-agnostic interface into `minio` SDK calls against the configured bucket.
  */
@@ -82,9 +100,9 @@ export class ObjectStorageService implements ObjectStorage {
     const expiresIn = opts.expiresIn || this.defaultExpiry;
     const respHeaders: Record<string, string> = {};
     if (opts.downloadFilename) {
-      const safe = opts.downloadFilename.replace(/"/g, '');
-      respHeaders['response-content-disposition'] =
-        `attachment; filename="${safe}"`;
+      respHeaders['response-content-disposition'] = contentDisposition(
+        opts.downloadFilename,
+      );
     }
     const url = await this.client.presignedGetObject(
       this.bucket,

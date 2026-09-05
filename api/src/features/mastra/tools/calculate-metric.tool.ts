@@ -1,6 +1,6 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import type { CuratedMetric, ToolServices } from '../mastra.types';
+import type { CuratedMetric } from '../mastra.types';
 
 export const calculateMetricInput = z.object({
   metric: z.string().min(1),
@@ -16,7 +16,6 @@ export type CalculateMetricInput = z.infer<typeof calculateMetricInput>;
  */
 export async function calculateMetricExecute(
   input: CalculateMetricInput,
-  _deps: ToolServices,
 ): Promise<CuratedMetric> {
   return {
     metric: input.metric,
@@ -27,7 +26,7 @@ export async function calculateMetricExecute(
   };
 }
 
-export function makeCalculateMetricTool(services: ToolServices) {
+export function makeCalculateMetricTool() {
   return createTool({
     id: 'calculate-metric',
     description:
@@ -41,6 +40,6 @@ export function makeCalculateMetricTool(services: ToolServices) {
       breakdown: z.array(z.object({ key: z.string(), value: z.number() })),
     }),
     execute: async (input: CalculateMetricInput) =>
-      calculateMetricExecute(input, services),
+      calculateMetricExecute(input),
   });
 }

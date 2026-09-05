@@ -1,4 +1,5 @@
 import { BullModule } from '@nestjs/bullmq';
+import { QueueModule } from '../../infrastructure/queue/queue.module';
 import { Module } from '@nestjs/common';
 import { FileProcessorModule } from '../file-processor/file-processor.module';
 import { SearchServiceModule } from '../search-service/search-service.module';
@@ -19,6 +20,7 @@ import { INGEST_DOCUMENT_QUEUE } from './document-ingest.constants';
   imports: [
     FileProcessorModule,
     SearchServiceModule,
+    QueueModule,
     BullModule.registerQueue({ name: INGEST_DOCUMENT_QUEUE }),
   ],
   providers: [

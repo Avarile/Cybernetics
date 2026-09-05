@@ -19,6 +19,15 @@ export class ImapConfigRepository {
     return rows[0];
   }
 
+  /** Ids of every live IMAP account, for schedulers that fan out per account. */
+  async listLiveIds(): Promise<string[]> {
+    const rows = await this.db
+      .select({ id: imapConfigs.id })
+      .from(imapConfigs)
+      .where(eq(imapConfigs.isDeleted, false));
+    return rows.map((r) => r.id);
+  }
+
   async findActiveById(id: string): Promise<ImapConfigRow | null> {
     const rows = await this.db
       .select()

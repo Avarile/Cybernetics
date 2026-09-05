@@ -12,6 +12,7 @@ import {
   RECONCILE_SCHEDULER_ID,
   SEARCH_INDEXING_QUEUE,
 } from '../search.constants';
+import { workersEnabled } from '../../../infrastructure/queue/worker-role';
 
 /**
  * Registers the repeatable drift-repair sweep on startup. This is the component
@@ -38,6 +39,8 @@ export class SearchReconciliationScheduler implements OnApplicationBootstrap {
   }
 
   async onApplicationBootstrap(): Promise<void> {
+    // API-only replicas serve HTTP and leave the queues alone.
+    if (!workersEnabled()) return;
     await this.scheduleReconciliation(this.cfg.reconcileEveryMs);
   }
 

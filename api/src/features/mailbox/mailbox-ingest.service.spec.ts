@@ -1,9 +1,10 @@
 import { MailboxIngestService } from './mailbox-ingest.service';
 
 function deps(over: any = {}) {
-  const inbox = {
-    mailboxState: jest.fn(async () => ({ uidValidity: 10, uidNext: 5 })),
+  const session = {
+    state: jest.fn(async () => ({ uidValidity: 10, uidNext: 5 })),
     listUidsSince: jest.fn(async () => [3, 4]),
+    setSeen: jest.fn(async () => undefined),
     fetchForIngest: jest.fn(async (uid: number) => ({
       uid,
       raw: Buffer.from(`raw${uid}`),
@@ -19,9 +20,18 @@ function deps(over: any = {}) {
       html: null,
       seen: false,
       sizeBytes: 10,
+      receivedAt: new Date('2021-06-01'),
       attachments: [],
     })),
-    ...over.inbox,
+    ...over.session,
+  };
+  // One connection + mailbox lock for the whole batch, rather than a login per
+  // message. The double asserts that shape as much as the behaviour.
+  const inbox = {
+    withSession: jest.fn(
+      async (_accountId: string, _mailbox: string, fn: any) => fn(session),
+    ),
+    ...over.session,
   };
   const repo = {
     getSyncState: jest.fn(async () => null),
@@ -36,6 +46,7 @@ function deps(over: any = {}) {
   };
   const files = {
     putFromStream: jest.fn(async () => ({ id: 'file-x' })),
+    softDelete: jest.fn(async () => undefined),
     ...over.files,
   };
   const search = { persist: jest.fn(async () => []), ...over.search };
@@ -54,7 +65,7 @@ function deps(over: any = {}) {
     search as any,
     config as any,
   );
-  return { svc, inbox, repo, files, search };
+  return { svc, inbox, session, repo, files, search };
 }
 
 describe('MailboxIngestService.sync', () => {
@@ -81,7 +92,7 @@ describe('MailboxIngestService.sync', () => {
   });
 
   it('resets the cursor when server UIDVALIDITY changed', async () => {
-    const { svc, inbox } = deps({
+    const { svc, session } = deps({
       repo: {
         getSyncState: jest.fn(async () => ({
           id: 's',
@@ -91,11 +102,9 @@ describe('MailboxIngestService.sync', () => {
       },
     });
     await svc.sync('acc', 'INBOX');
-    // listUidsSince called with 0 because stored uidValidity (9) != server (10)
-    expect(inbox.listUidsSince).toHaveBeenCalledWith(
-      0,
-      expect.objectContaining({ mailbox: 'INBOX' }),
-    );
+    // Restarts at 0 because the stored uidValidity (9) no longer matches the
+    // server's (10), which invalidates every UID recorded for this mailbox.
+    expect(session.listUidsSince).toHaveBeenCalledWith(0, 200);
   });
 
   it('marks error and rethrows on failure', async () => {
@@ -126,7 +135,7 @@ describe('MailboxIngestService.sync', () => {
       .mockResolvedValueOnce({ id: 'raw-file' }) // raw .eml succeeds
       .mockRejectedValueOnce(new Error('upload failed')); // attachment fails
     const { svc, repo } = deps({
-      inbox: {
+      session: {
         listUidsSince: jest.fn(async () => [3]),
         fetchForIngest: jest.fn(async (uid: number) => ({
           uid,
@@ -165,10 +174,14 @@ describe('MailboxIngestService.sync', () => {
     expect(attachments).toEqual([]);
   });
 
-  it('builds the payload with the fallback threadId and receivedAt from sentAt', async () => {
+  it('builds the payload with the fallback threadId and receivedAt from the server INTERNALDATE', async () => {
+    // Deliberately different: `sentAt` is the sender-controlled `Date:` header,
+    // `receivedAt` is the server's INTERNALDATE. Ordering and the reconcile
+    // window both key off the latter, so a forged header must not move them.
     const sentAt = new Date('2021-06-01T00:00:00Z');
+    const internalDate = new Date('2021-06-02T12:00:00Z');
     const { svc, repo } = deps({
-      inbox: {
+      session: {
         listUidsSince: jest.fn(async () => [3]),
         fetchForIngest: jest.fn(async (uid: number) => ({
           uid,
@@ -181,6 +194,7 @@ describe('MailboxIngestService.sync', () => {
           cc: [],
           subject: `s${uid}`,
           sentAt,
+          receivedAt: internalDate,
           text: 'body',
           html: null,
           seen: false,
@@ -193,7 +207,8 @@ describe('MailboxIngestService.sync', () => {
     const [message] = repo.insertMessageWithAttachments.mock.calls[0];
     expect(message.hasAttachments).toBe(false);
     expect(message.threadId).toBe('acc:INBOX:10:3');
-    expect(message.receivedAt).toBe(sentAt);
+    expect(message.receivedAt).toBe(internalDate);
+    expect(message.sentAt).toBe(sentAt);
   });
 
   it('is best-effort: sync still resolves and marks ok when search indexing rejects', async () => {

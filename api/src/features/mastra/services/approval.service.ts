@@ -5,6 +5,7 @@ import {
   ExceptionService,
 } from '../../../infrastructure/exceptions';
 import { AGENT_ID } from '../mastra.constants';
+import { isAdmin, roleOf, userIdOrNull } from '../../../common/principal';
 import type { PrincipalRef } from '../mastra.types';
 import { AgentRunRepository } from '../repositories/agent-run.repository';
 import { ApprovalRepository } from '../repositories/approval.repository';
@@ -36,7 +37,10 @@ export class ApprovalService {
   ) {}
 
   async listForOwner(principal: PrincipalRef) {
-    return this.approvals.findPendingForOwner(principal.id, principal.role);
+    return this.approvals.findPendingForOwner(
+      userIdOrNull(principal),
+      roleOf(principal),
+    );
   }
 
   async decide(principal: PrincipalRef, id: string, decision: DecisionInput) {
@@ -45,12 +49,20 @@ export class ApprovalService {
     if (appr.status !== 'pending') {
       throw this.errors.create(ErrorCode.AGENT_APPROVAL_CONFLICT);
     }
+    // Checked here as well as by the sweep: the sweep runs on a cron, and a
+    // lapsed approval resumes a real side-effect (send-email / db-write). It
+    // must not fire merely because the relabelling job has not run yet.
+    if (appr.expiresAt && appr.expiresAt.getTime() <= Date.now()) {
+      throw this.errors.create(ErrorCode.AGENT_APPROVAL_CONFLICT, {
+        message: 'This approval has expired; ask the agent to propose it again',
+      });
+    }
 
     // Ownership gate: the GET path (`findPendingForOwner`) already scopes by
     // owner, but this mutation resumes a real side-effect (send-email/db-write),
     // so it must not be resolvable by an arbitrary authenticated caller.
     // Admins bypass; everyone else must own the approval's conversation.
-    if (principal.role !== 'admin') {
+    if (!isAdmin(principal)) {
       if (!appr.conversationId) {
         throw this.errors.create(ErrorCode.AGENT_APPROVAL_FORBIDDEN);
       }
@@ -68,7 +80,7 @@ export class ApprovalService {
       // Resume itself failed: no side-effect happened, safe to mark failed.
       await this.approvals.decide(id, {
         status: 'failed',
-        decidedByUserId: principal.id,
+        decidedByUserId: userIdOrNull(principal),
         decidedAt: new Date(),
         result: { error: err instanceof Error ? err.message : String(err) },
       });
@@ -83,7 +95,7 @@ export class ApprovalService {
     try {
       await this.approvals.decide(id, {
         status: decision.approved ? 'executed' : 'rejected',
-        decidedByUserId: principal.id,
+        decidedByUserId: userIdOrNull(principal),
         decidedAt: new Date(),
         decisionNote: decision.note ?? null,
       });

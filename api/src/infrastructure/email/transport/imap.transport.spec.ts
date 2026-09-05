@@ -88,12 +88,20 @@ describe('imap.transport', () => {
       iter([
         {
           uid: 41,
-          envelope: { subject: 'one', date: d1, from: [{ address: 'a@x.com' }] },
+          envelope: {
+            subject: 'one',
+            date: d1,
+            from: [{ address: 'a@x.com' }],
+          },
           flags: new Set(['\\Seen']),
         },
         {
           uid: 42,
-          envelope: { subject: 'two', date: d2, from: [{ address: 'b@x.com' }] },
+          envelope: {
+            subject: 'two',
+            date: d2,
+            from: [{ address: 'b@x.com' }],
+          },
           flags: new Set(),
         },
       ]),

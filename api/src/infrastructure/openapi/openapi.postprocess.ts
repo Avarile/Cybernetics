@@ -1,6 +1,10 @@
 import type { INestApplication } from '@nestjs/common';
-import { ModulesContainer, Reflector } from '@nestjs/core';
+import { Reflector } from '@nestjs/core';
 import type { OpenAPIObject } from '@nestjs/swagger';
+import {
+  forEachControllerHandler,
+  hasMetadata,
+} from '../../common/controller-scan';
 import { IS_PUBLIC_KEY } from '../../common/decorators/public.decorator';
 import { BEARER_SCHEME_NAME } from './openapi.constants';
 
@@ -35,42 +39,18 @@ export function applyGlobalSecurity(doc: OpenAPIObject): OpenAPIObject {
  * same metadata the JwtAuthGuard reads) and returns the set of operationIds
  * that require no authentication.
  */
-export function collectPublicOperationIds(
-  app: INestApplication,
-): Set<string> {
-  const modules = app.get(ModulesContainer);
+export function collectPublicOperationIds(app: INestApplication): Set<string> {
   const reflector = app.get(Reflector);
   const ids = new Set<string>();
 
-  for (const module of modules.values()) {
-    for (const wrapper of module.controllers.values()) {
-      const { instance, metatype } = wrapper;
-      if (!instance || typeof metatype !== 'function') {
-        continue;
-      }
-      const prototype = Object.getPrototypeOf(instance) as Record<
-        string,
-        unknown
-      >;
-      const classPublic =
-        reflector.get<boolean>(IS_PUBLIC_KEY, metatype) === true;
-
-      for (const methodName of Object.getOwnPropertyNames(prototype)) {
-        if (methodName === 'constructor') {
-          continue;
-        }
-        const handler = prototype[methodName];
-        if (typeof handler !== 'function') {
-          continue;
-        }
-        const methodPublic =
-          reflector.get<boolean>(IS_PUBLIC_KEY, handler) === true;
-        if (classPublic || methodPublic) {
-          ids.add(operationId(metatype.name, methodName));
-        }
-      }
+  // Shares `forEachControllerHandler` with the boot-time route-policy audit, so
+  // the document's idea of "which routes are public" cannot drift from the
+  // check that enforces every route declares a policy in the first place.
+  forEachControllerHandler(app, (entry) => {
+    if (hasMetadata(reflector, IS_PUBLIC_KEY, entry)) {
+      ids.add(operationId(entry.controllerName, entry.methodName));
     }
-  }
+  });
 
   return ids;
 }
@@ -82,9 +62,12 @@ export function stripSecurityForPublic(
 ): OpenAPIObject {
   for (const pathItem of Object.values(doc.paths ?? {})) {
     for (const method of HTTP_METHODS) {
-      const op = (pathItem as Record<string, { operationId?: string; security?: unknown[] }>)[
-        method
-      ];
+      const op = (
+        pathItem as Record<
+          string,
+          { operationId?: string; security?: unknown[] }
+        >
+      )[method];
       if (op?.operationId && publicIds.has(op.operationId)) {
         op.security = [];
       }

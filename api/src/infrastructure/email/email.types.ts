@@ -93,7 +93,17 @@ export interface IngestMessage {
   to: { address: string; name: string | null }[];
   cc: { address: string; name: string | null }[];
   subject: string;
+  /** The sender's `Date:` header. Sender-controlled; not an arrival time. */
   sentAt: Date | null;
+  /**
+   * IMAP INTERNALDATE — when the server took delivery.
+   *
+   * Distinct from `sentAt` on purpose. `receivedAt` used to be derived from the
+   * `Date:` header, which is written by the sender: a back-dated or forged
+   * header sorted the message to the bottom of an inbox ordered by
+   * `receivedAt`, and could push it outside the reconcile sweep's lookback.
+   */
+  receivedAt: Date;
   text: string;
   html: string | null;
   seen: boolean;

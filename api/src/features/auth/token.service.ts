@@ -22,6 +22,7 @@ export class TokenService {
     return this.jwt.sign(claims, {
       secret: cfg.jwtAccessSecret,
       issuer: cfg.issuer,
+      audience: cfg.audience,
       expiresIn: ttlSeconds ?? cfg.accessTtl,
     });
   }

@@ -77,13 +77,11 @@ export function toChatMessages(dbMessages: DbMessageLike[]): ChatMessageDto[] {
           parts.push({
             type: 'source',
             sourceId: (src.id ?? src.sourceId ?? part.sourceId) as
-              | string
-              | undefined,
+              string | undefined,
             title: (src.title ?? part.title) as string | undefined,
             url: (src.url ?? part.url) as string | undefined,
             mediaType: (src.mediaType ?? src.sourceType ?? part.mediaType) as
-              | string
-              | undefined,
+              string | undefined,
           });
           break;
         }

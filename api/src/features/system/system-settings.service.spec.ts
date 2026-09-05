@@ -45,6 +45,7 @@ describe('SystemSettingsService', () => {
       cache,
       audit,
       new ExceptionService(),
+      { getOrThrow: () => ({ settingsCacheTtlMs: 300_000 }) } as never,
     );
   });
 

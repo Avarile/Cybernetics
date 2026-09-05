@@ -49,7 +49,7 @@ describe('FileProcessingProcessor', () => {
   let proc: FileProcessingProcessor;
 
   const config = {
-    getOrThrow: () => ({ pendingTtlSeconds: 3600 }),
+    getOrThrow: () => ({ pendingTtlSeconds: 3600, purgeAfterDays: 30 }),
   } as unknown as ConfigService;
 
   beforeEach(() => {
@@ -61,6 +61,9 @@ describe('FileProcessingProcessor', () => {
       findPurgeable: jest.fn().mockResolvedValue([]),
       countLiveReferences: jest.fn().mockResolvedValue(0),
       hardDelete: jest.fn().mockResolvedValue(undefined),
+      purgeAndCheckOrphan: jest
+        .fn()
+        .mockResolvedValue({ objectOrphaned: true }),
     };
     storage = {
       getObjectStream: jest.fn(),
@@ -89,8 +92,33 @@ describe('FileProcessingProcessor', () => {
       ]);
       await proc.process({ name: FILE_RECONCILE_JOB, data: {} } as never);
       expect(repo.softDelete).toHaveBeenCalledWith('stale-1');
+      // Row delete + reference count happen in one transaction now, so the
+      // object cannot be removed out from under a concurrent dedup.
+      expect(repo.purgeAndCheckOrphan).toHaveBeenCalledWith(
+        'purge-1',
+        'uploads/dead',
+      );
       expect(storage.removeObject).toHaveBeenCalledWith('uploads/dead');
-      expect(repo.hardDelete).toHaveBeenCalledWith('purge-1');
+    });
+
+    it('only purges rows past the retention window', async () => {
+      repo.findStalePending.mockResolvedValueOnce([]);
+      repo.findPurgeable.mockResolvedValueOnce([]);
+      await proc.process({ name: FILE_RECONCILE_JOB, data: {} } as never);
+      // 30 days back, not "everything soft-deleted".
+      const cutoff = repo.findPurgeable.mock.calls[0][0] as Date;
+      const daysAgo = (Date.now() - cutoff.getTime()) / 86_400_000;
+      expect(daysAgo).toBeCloseTo(30, 0);
+    });
+
+    it('leaves the object alone when another live row still references it', async () => {
+      repo.findStalePending.mockResolvedValueOnce([]);
+      repo.findPurgeable.mockResolvedValueOnce([
+        { id: 'purge-2', objectKey: 'sha256/ab/cd/shared' },
+      ]);
+      repo.purgeAndCheckOrphan.mockResolvedValueOnce({ objectOrphaned: false });
+      await proc.process({ name: FILE_RECONCILE_JOB, data: {} } as never);
+      expect(storage.removeObject).not.toHaveBeenCalled();
     });
   });
 

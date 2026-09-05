@@ -15,7 +15,7 @@ import {
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
-import type { Principal } from '../../common/principal';
+import { userIdOrNull, type Principal } from '../../common/principal';
 import { CreateIntegrationDto } from './dto/create-integration.dto';
 import {
   IntegrationQueryDto,
@@ -31,7 +31,7 @@ export class IntegrationCredentialController {
   constructor(private readonly integrations: IntegrationCredentialService) {}
 
   private ctx(user: Principal, ip: string, ua?: string): AuditContext {
-    return { actorId: user.id, ip, userAgent: ua ?? null };
+    return { actorId: userIdOrNull(user), ip, userAgent: ua ?? null };
   }
 
   @ApiOperation({ summary: 'Create integration credential' })

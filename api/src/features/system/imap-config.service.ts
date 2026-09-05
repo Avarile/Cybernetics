@@ -151,6 +151,15 @@ export class ImapConfigService {
     return this.toPublic(row);
   }
 
+  /**
+   * Connect to the configured server and report whether it worked.
+   *
+   * Note for the threat model: this is an authenticated, admin-only primitive
+   * that makes the server open a connection to an admin-supplied host:port and
+   * reports the outcome — i.e. an internal-network probe with a response
+   * oracle. Acceptable because it is admin-only and the host is the very thing
+   * being configured, but it is a capability, not just a convenience.
+   */
   async test(
     id: string,
     ctx: AuditContext,

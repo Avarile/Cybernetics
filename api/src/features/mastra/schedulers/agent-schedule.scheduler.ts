@@ -5,7 +5,18 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { MastraConfig } from '../../../config/configurations/mastra.config';
+import { InjectQueue } from '@nestjs/bullmq';
+import { Queue } from 'bullmq';
+import {
+  AGENT_RUN_QUEUE,
+  EXPIRE_APPROVALS_JOB,
+  EXPIRE_APPROVALS_SCHEDULER_ID,
+} from '../mastra.constants';
 import { ScheduleService } from '../services/schedule.service';
+import { workersEnabled } from '../../../infrastructure/queue/worker-role';
+
+/** How often lapsed approvals are relabelled. */
+const APPROVAL_EXPIRY_EVERY_MS = 15 * 60 * 1000;
 
 /**
  * Bootstrap hook (NOT auto-run at import — mirrors `SearchReconciliationScheduler`,
@@ -20,9 +31,30 @@ export class AgentScheduleScheduler implements OnApplicationBootstrap {
   constructor(
     private readonly schedules: ScheduleService,
     private readonly config: ConfigService,
+    @InjectQueue(AGENT_RUN_QUEUE) private readonly queue: Queue,
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
+    // API-only replicas serve HTTP and leave the queues alone.
+    if (!workersEnabled()) return;
+    // Approval expiry is independent of MASTRA_SCHEDULES_ENABLED: it is
+    // housekeeping for the chat flow, not a scheduled agent run.
+    try {
+      await this.queue.upsertJobScheduler(
+        EXPIRE_APPROVALS_SCHEDULER_ID,
+        { every: APPROVAL_EXPIRY_EVERY_MS },
+        {
+          name: EXPIRE_APPROVALS_JOB,
+          data: {},
+          opts: { removeOnComplete: true, removeOnFail: true },
+        },
+      );
+    } catch (err) {
+      this.logger.warn(
+        `Approval expiry registration skipped: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     const cfg = this.config.getOrThrow<MastraConfig>('mastra');
     if (!cfg.schedulesEnabled) {
       this.logger.log(

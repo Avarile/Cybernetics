@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { CacheModule } from '../../infrastructure/cache/cache.module';
 import { CryptoModule } from '../../infrastructure/crypto/crypto.module';
 import { EmailModule } from '../../infrastructure/email/email.module';
+import { SystemAuditModule } from './system-audit.module';
 import { ImapConfigController } from './imap-config.controller';
 import { ImapConfigRepository } from './imap-config.repository';
 import { ImapConfigService } from './imap-config.service';
@@ -12,8 +13,6 @@ import { SmtpConfigController } from './smtp-config.controller';
 import { SmtpConfigRepository } from './smtp-config.repository';
 import { SmtpConfigService } from './smtp-config.service';
 import { SystemAuditController } from './system-audit.controller';
-import { SystemAuditRepository } from './system-audit.repository';
-import { SystemAuditService } from './system-audit.service';
 import { SystemSettingsController } from './system-settings.controller';
 import { SystemSettingsRepository } from './system-settings.repository';
 import { SystemSettingsService } from './system-settings.service';
@@ -27,7 +26,7 @@ import { SystemSettingsService } from './system-settings.service';
  * this module imports CacheModule directly to stay self-sufficient.
  */
 @Module({
-  imports: [CryptoModule, CacheModule, EmailModule],
+  imports: [CryptoModule, CacheModule, EmailModule, SystemAuditModule],
   controllers: [
     SystemAuditController,
     SmtpConfigController,
@@ -36,8 +35,6 @@ import { SystemSettingsService } from './system-settings.service';
     SystemSettingsController,
   ],
   providers: [
-    SystemAuditRepository,
-    SystemAuditService,
     SmtpConfigRepository,
     SmtpConfigService,
     ImapConfigRepository,
@@ -48,7 +45,11 @@ import { SystemSettingsService } from './system-settings.service';
     SystemSettingsService,
   ],
   exports: [
-    SystemAuditService,
+    // Re-exported as a module, not as a bare class: `SystemAuditService` is a
+    // provider of SystemAuditModule, and Nest only lets a module export a token
+    // it provides or a module it imports. Consumers of SystemModule still
+    // resolve SystemAuditService, exactly as before.
+    SystemAuditModule,
     SmtpConfigService,
     IntegrationCredentialService,
     SystemSettingsService,

@@ -5,9 +5,14 @@
 jest.mock('@mastra/core/tools', () => ({ createTool: jest.fn() }));
 
 import { sendEmailExecute } from './send-email.tool';
+import type { ToolRuntime } from '../mastra.types';
 
 describe('sendEmailExecute', () => {
-  const rt = { principal: { id: 'u1' }, runId: 'r1', conversationId: 'c1' };
+  const rt: ToolRuntime = {
+    principal: { kind: 'user', userId: 'u1', role: 'user' },
+    runId: 'r1',
+    conversationId: 'c1',
+  };
 
   it('sends then records a success action', async () => {
     const d = {

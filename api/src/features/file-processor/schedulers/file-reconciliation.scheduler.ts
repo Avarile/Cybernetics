@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import { FILE_PROCESSING_QUEUE, FILE_RECONCILE_JOB } from '../file.constants';
+import { workersEnabled } from '../../../infrastructure/queue/worker-role';
 
 /** Default cadence for the file reconciliation sweep. */
 const FILE_RECONCILE_EVERY_MS = 3_600_000;
@@ -30,6 +31,8 @@ export class FileReconciliationScheduler implements OnApplicationBootstrap {
   ) {}
 
   async onApplicationBootstrap(): Promise<void> {
+    // API-only replicas serve HTTP and leave the queues alone.
+    if (!workersEnabled()) return;
     await this.scheduleReconciliation();
   }
 

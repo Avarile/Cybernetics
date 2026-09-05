@@ -64,7 +64,9 @@ describe('ApprovalService.decide', () => {
 
   it('approves: resumes the tool call and marks executed', async () => {
     const { service, approvals, agent } = make(appr);
-    await service.decide({ id: 'u1', role: 'admin' }, 'a1', { approved: true });
+    await service.decide({ kind: 'user', userId: 'u1', role: 'admin' }, 'a1', {
+      approved: true,
+    });
     expect(agent.approveToolCallGenerate).toHaveBeenCalledWith(
       expect.objectContaining({ runId: 'mr1', toolCallId: 'tc1' }),
     );
@@ -76,7 +78,7 @@ describe('ApprovalService.decide', () => {
 
   it('rejects: declines and marks rejected', async () => {
     const { service, agent, approvals } = make(appr);
-    await service.decide({ id: 'u1', role: 'admin' }, 'a1', {
+    await service.decide({ kind: 'user', userId: 'u1', role: 'admin' }, 'a1', {
       approved: false,
       note: 'no',
     });
@@ -92,7 +94,9 @@ describe('ApprovalService.decide', () => {
   it('409s when the approval is not pending', async () => {
     const { service } = make({ ...appr, status: 'executed' });
     await expect(
-      service.decide({ id: 'u1', role: 'admin' }, 'a1', { approved: true }),
+      service.decide({ kind: 'user', userId: 'u1', role: 'admin' }, 'a1', {
+        approved: true,
+      }),
     ).rejects.toMatchObject({
       code: ErrorCode.AGENT_APPROVAL_CONFLICT,
       message: 'Approval already decided',
@@ -111,14 +115,16 @@ describe('ApprovalService.decide', () => {
     );
 
     await expect(
-      service.decide({ id: 'u2', role: 'user' }, 'a1', { approved: true }),
+      service.decide({ kind: 'user', userId: 'u2', role: 'user' }, 'a1', {
+        approved: true,
+      }),
     ).rejects.toMatchObject({
       code: ErrorCode.FORBIDDEN,
       message: 'Not your conversation',
     });
 
     expect(conversations.getOwned).toHaveBeenCalledWith(
-      { id: 'u2', role: 'user' },
+      { kind: 'user', userId: 'u2', role: 'user' },
       'conv-1',
     );
     expect(agent.approveToolCallGenerate).not.toHaveBeenCalled();
@@ -132,7 +138,9 @@ describe('ApprovalService.decide', () => {
     });
 
     await expect(
-      service.decide({ id: 'u2', role: 'user' }, 'a1', { approved: true }),
+      service.decide({ kind: 'user', userId: 'u2', role: 'user' }, 'a1', {
+        approved: true,
+      }),
     ).rejects.toMatchObject({
       code: ErrorCode.AGENT_APPROVAL_FORBIDDEN,
       message: 'Not your approval',

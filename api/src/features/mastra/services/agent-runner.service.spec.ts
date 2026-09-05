@@ -52,7 +52,10 @@ describe('AgentRunnerService.runChat', () => {
       response: { modelId: 'gpt-4o' },
       runId: 'mastra-run-1',
     });
-    const res = await service.runChat({ id: 'u1' }, { message: 'hi' });
+    const res = await service.runChat(
+      { kind: 'user', userId: 'u1', role: 'user' },
+      { message: 'hi' },
+    );
     expect(res.text).toBe('Answer');
     expect(res.pendingApprovals).toHaveLength(0);
     expect(runs.finish).toHaveBeenCalledWith(
@@ -78,7 +81,10 @@ describe('AgentRunnerService.runChat', () => {
       steps: [{ response: { modelId: '' } }],
       runId: 'mastra-run-1b',
     });
-    await service.runChat({ id: 'u1' }, { message: 'hi' });
+    await service.runChat(
+      { kind: 'user', userId: 'u1', role: 'user' },
+      { message: 'hi' },
+    );
     expect(runs.finish).toHaveBeenCalledWith(
       'run-1',
       expect.objectContaining({ model: 'anthropic/claude-sonnet-4.6' }),
@@ -97,7 +103,7 @@ describe('AgentRunnerService.runChat', () => {
       runId: 'mastra-run-2',
     });
     const res = await service.runChat(
-      { id: 'u1' },
+      { kind: 'user', userId: 'u1', role: 'user' },
       { message: 'email a@b.com' },
     );
     expect(res.pendingApprovals).toHaveLength(1);
@@ -120,7 +126,10 @@ describe('AgentRunnerService.runChat', () => {
       throw new Error('model down');
     });
     await expect(
-      service.runChat({ id: 'u1' }, { message: 'hi' }),
+      service.runChat(
+        { kind: 'user', userId: 'u1', role: 'user' },
+        { message: 'hi' },
+      ),
     ).rejects.toThrow('model down');
     expect(runs.finish).toHaveBeenCalledWith(
       'run-1',

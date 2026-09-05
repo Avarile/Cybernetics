@@ -23,6 +23,8 @@
     "start:prod": "node dist/main",
     "lint": "eslint \"{src,test}/**/*.ts\" --fix",
     "typecheck": "tsc --noEmit",
+    "check:graph": "ts-node -r tsconfig-paths/register src/scripts/check-module-graph.ts",
+    "verify": "pnpm typecheck && pnpm lint && pnpm test && pnpm check:graph",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",

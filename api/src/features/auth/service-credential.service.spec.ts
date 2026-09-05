@@ -4,6 +4,7 @@ import { ServiceCredentialService } from './service-credential.service';
 describe('ServiceCredentialService', () => {
   let repo: any;
   let tokens: any;
+  let revocation: any;
   let service: ServiceCredentialService;
 
   beforeEach(() => {
@@ -19,9 +20,11 @@ describe('ServiceCredentialService', () => {
       signAccessToken: jest.fn(() => 'agent.jwt'),
       agentTtl: jest.fn(() => 300),
     };
+    revocation = { revokeCredential: jest.fn(async () => undefined) };
     service = new ServiceCredentialService(
       repo,
       tokens,
+      revocation,
       new ExceptionService(),
     );
   });

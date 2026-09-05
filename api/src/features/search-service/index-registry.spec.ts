@@ -129,8 +129,20 @@ describe('IndexRegistry', () => {
       () => new Promise(() => undefined),
     );
     await expect(reg.onModuleInit()).resolves.toBeUndefined();
-    expect(redis.duplicate).toHaveBeenCalledWith({ enableOfflineQueue: false });
+    expect(redis.duplicate).toHaveBeenCalled();
   }, 10_000);
+
+  // Disabling ioredis's offline queue rejects the subscribe whenever the socket
+  // has not finished connecting — the common case at startup — so invalidation
+  // would silently never be wired up. Queuing plus the timeout is the safe pair.
+  it('keeps the offline queue so a startup connect race still subscribes', async () => {
+    const { reg, redis, subscriber } = make([row('articles')]);
+    await reg.onModuleInit();
+    expect(redis.duplicate).toHaveBeenCalledWith();
+    expect(subscriber.subscribe).toHaveBeenCalledWith(
+      REGISTRY_INVALIDATE_CHANNEL,
+    );
+  });
 
   it('works with no Redis client at all, on the TTL alone', async () => {
     const repo = makeRepo([row('articles')]);

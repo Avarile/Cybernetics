@@ -1,6 +1,6 @@
 import { INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_PIPE } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import request from 'supertest';
@@ -15,6 +15,7 @@ import { UsersService } from '../src/features/users/users.service';
 import { DatabaseModule } from '../src/infrastructure/database/database.module';
 import { ExceptionsModule } from '../src/infrastructure/exceptions';
 import { LoggerModule } from '../src/infrastructure/logger/logger.module';
+import { ZodValidationPipe } from '../src/common/pipes/zod-validation.pipe';
 
 /**
  * System-records HTTP contract e2e. Requires Postgres (migrated) + Redis.
@@ -52,6 +53,7 @@ describe('System Records API (e2e)', () => {
         SystemModule,
       ],
       providers: [
+        { provide: APP_PIPE, useClass: ZodValidationPipe },
         { provide: APP_GUARD, useClass: ThrottlerGuard },
         { provide: APP_GUARD, useClass: JwtAuthGuard },
         { provide: APP_GUARD, useClass: RolesGuard },

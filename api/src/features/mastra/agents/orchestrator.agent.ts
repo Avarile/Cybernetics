@@ -5,8 +5,6 @@ import { AGENT_ID } from '../mastra.constants';
 import type { ToolServices } from '../mastra.types';
 import { buildMemory } from '../memory/memory.factory';
 import { buildModel } from '../memory/model.factory';
-import { makeCalculateMetricTool } from '../tools/calculate-metric.tool';
-import { makeDbWriteTool } from '../tools/db-write.tool';
 import { makeSearchDocumentsTool } from '../tools/search-documents.tool';
 import { makeSearchQueryTool } from '../tools/search-query.tool';
 import { makeSendEmailTool } from '../tools/send-email.tool';
@@ -26,12 +24,23 @@ export function buildOrchestratorAgent(params: BuildAgentParams): Agent {
     name: 'Orchestrator',
     instructions: ORCHESTRATOR_INSTRUCTIONS,
     model: (params.modelOverride ?? buildModel(params.cfg)) as never,
+    /**
+     * `calculate-metric` and `db-write` are deliberately NOT registered.
+     *
+     * Both were stubs presented to the model as working tools.
+     * `calculate-metric` always returned `{ value: 0, unit: 'unknown' }` while
+     * its description told the model it computed real business metrics, so the
+     * agent would state a fabricated zero as fact. `db-write` recorded an audit
+     * entry, returned `{ accepted: true }` and wrote nothing — after spending a
+     * human approval. A model handed a tool will call it, so relabelling the
+     * descriptions was not enough; the fix is not to offer them until they do
+     * something. Their pure `*Execute` functions and tests remain for when a
+     * domain exists to implement them against.
+     */
     tools: {
       'search-query': makeSearchQueryTool(params.services),
       'search-documents': makeSearchDocumentsTool(params.services),
-      'calculate-metric': makeCalculateMetricTool(params.services),
       'send-email': makeSendEmailTool(params.services),
-      'db-write': makeDbWriteTool(params.services),
     },
     memory: buildMemory(params.pool, params.cfg),
     maxRetries: params.cfg.maxRetries,

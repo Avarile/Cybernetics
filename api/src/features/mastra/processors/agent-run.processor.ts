@@ -1,16 +1,19 @@
 import { Processor, WorkerHost } from '@nestjs/bullmq';
-import { Logger } from '@nestjs/common';
+import { Logger, type OnModuleInit } from '@nestjs/common';
 import { MastraService } from '@mastra/nestjs';
 import type { Job } from 'bullmq';
 import { SYSTEM_PRINCIPAL } from '../../../common/principal';
 import {
   AGENT_RUN_QUEUE,
+  EXPIRE_APPROVALS_JOB,
   RUN_SCHEDULE_JOB,
   SCHEDULED_REPORT_WORKFLOW_ID,
 } from '../mastra.constants';
 import { ScheduleRepository } from '../repositories/schedule.repository';
 import { AgentRunRepository } from '../repositories/agent-run.repository';
+import { ApprovalRepository } from '../repositories/approval.repository';
 import { buildRequestContext } from '../services/mastra-adapters';
+import { haltWorkerIfApiOnly } from '../../../infrastructure/queue/worker-role';
 
 /**
  * Consumes `run-schedule` jobs off `AGENT_RUN_QUEUE`: loads the live schedule,
@@ -39,18 +42,30 @@ import { buildRequestContext } from '../services/mastra-adapters';
  * null-runId guard in `ActionLogRepository.record`, see it instead of nothing).
  */
 @Processor(AGENT_RUN_QUEUE)
-export class AgentRunProcessor extends WorkerHost {
+export class AgentRunProcessor extends WorkerHost implements OnModuleInit {
   private readonly logger = new Logger(AgentRunProcessor.name);
 
   constructor(
     private readonly schedules: ScheduleRepository,
     private readonly runs: AgentRunRepository,
+    private readonly approvals: ApprovalRepository,
     private readonly mastra: MastraService,
   ) {
     super();
   }
 
+  onModuleInit(): void {
+    haltWorkerIfApiOnly(this.worker, (m) => this.logger.log(m));
+  }
+
   async process(job: Job): Promise<void> {
+    if (job.name === EXPIRE_APPROVALS_JOB) {
+      const expired = await this.approvals.expireOverdue();
+      if (expired > 0) {
+        this.logger.log(`Expired ${expired} overdue approval(s)`);
+      }
+      return;
+    }
     if (job.name !== RUN_SCHEDULE_JOB) return;
     const schedule = await this.schedules.findLiveById(
       job.data.scheduleId as string,

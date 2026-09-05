@@ -22,6 +22,7 @@ export const searchConfig = registerAs('search', () => {
     // Indexing pipeline: Postgres is the source of truth, Meili converges async.
     reconcileEveryMs: env.SEARCH_RECONCILE_EVERY_MS,
     reconcileStaleMs: env.SEARCH_RECONCILE_STALE_MS,
+    reconcileMaxBackoffMs: env.SEARCH_RECONCILE_MAX_BACKOFF_MS,
     reconcileBatch: env.SEARCH_RECONCILE_BATCH,
     indexConcurrency: env.SEARCH_INDEX_CONCURRENCY,
     indexBatchSize: env.SEARCH_INDEX_BATCH_SIZE,

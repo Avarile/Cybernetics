@@ -37,6 +37,31 @@ export const searchIndexState = pgEnum('search_index_state', [
 ]);
 
 /**
+ * Who may READ a collection's records. Write access is unrelated and stays
+ * admin-only (`RecordController`).
+ *
+ * The default is `private` on purpose. The search-service is a generic store
+ * that other features write per-user data into (`documents`, `inbound_email`),
+ * and a permissive default is how those became world-readable: a collection
+ * that never declared a policy was served to every authenticated caller. A
+ * collection that forgets to declare one is now admin-only instead.
+ *
+ *  - `private`      — admin only.
+ *  - `owner_scoped` — a non-admin sees only records whose `ownerField` holds
+ *                     their own `users.id`. Requires `ownerField`.
+ *  - `shared`       — any authenticated principal may read. Opt-in.
+ */
+export const collectionVisibility = pgEnum('collection_visibility', [
+  'private',
+  'owner_scoped',
+  'shared',
+]);
+
+/** TS mirror of the {@link collectionVisibility} enum. */
+export type CollectionVisibility =
+  (typeof collectionVisibility.enumValues)[number];
+
+/**
  * A dynamic, admin-managed collection (logical Meili index). `name` is the
  * immutable identity used in URLs and as the Meili index name (the engine adds
  * the configured prefix). `fields` is the field-spec that governs validation
@@ -50,6 +75,14 @@ export const collections = pgTable(
     displayName: varchar('display_name', { length: 255 }).notNull(),
     description: varchar('description', { length: 500 }),
     fields: jsonb('fields').$type<FieldSpec[]>().notNull().default([]),
+    visibility: collectionVisibility('visibility').notNull().default('private'),
+    /**
+     * For `owner_scoped` collections: the document field holding the owning
+     * `users.id`. Validated against `fields` (must exist, be `string`, and be
+     * `filterable`) so the read filter the policy emits can never reference an
+     * attribute Meili cannot filter on.
+     */
+    ownerField: varchar('owner_field', { length: 100 }),
   },
   (t) => [
     uniqueIndex('collections_name_idx')

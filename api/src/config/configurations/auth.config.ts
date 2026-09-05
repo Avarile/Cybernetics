@@ -13,6 +13,7 @@ export const authConfig = registerAs('auth', () => {
     refreshTtl: env.JWT_REFRESH_TTL,
     agentTokenTtl: env.AGENT_TOKEN_TTL,
     issuer: env.JWT_ISSUER,
+    audience: env.JWT_AUDIENCE,
     corsOrigins: env.CORS_ORIGINS.split(',')
       .map((s) => s.trim())
       .filter(Boolean),
@@ -22,8 +23,8 @@ export const authConfig = registerAs('auth', () => {
     seedAdminPassword: env.SEED_ADMIN_PASSWORD,
     passwordReset: {
       pepper: env.PASSWORD_RESET_PEPPER,
-      codeTtlSeconds: 900, // 15 minutes
-      maxAttempts: 5,
+      codeTtlSeconds: env.PASSWORD_RESET_CODE_TTL,
+      maxAttempts: env.PASSWORD_RESET_MAX_ATTEMPTS,
       codeLength: 6,
     },
   };

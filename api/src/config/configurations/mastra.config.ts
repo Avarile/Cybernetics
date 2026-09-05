@@ -11,6 +11,7 @@ export const mastraConfig = registerAs('mastra', () => {
     memoryLastMessages: env.MASTRA_MEMORY_LAST_MESSAGES,
     approvalTtlMs: env.MASTRA_APPROVAL_TTL_MS,
     schedulesEnabled: env.MASTRA_SCHEDULES_ENABLED,
+    runTimeoutMs: env.MASTRA_RUN_TIMEOUT_MS,
   };
 });
 

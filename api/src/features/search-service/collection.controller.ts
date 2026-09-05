@@ -15,8 +15,12 @@ import { CreateCollectionDto } from './dto/create-collection.dto';
 import { UpdateCollectionDto } from './dto/update-collection.dto';
 
 /**
- * Collection management. Mutations are admin-only; reads are open to any
- * authenticated principal so callers can discover what is queryable.
+ * Collection management — admin-only throughout.
+ *
+ * Reads used to be open to any authenticated principal 'so callers can discover
+ * what is queryable'. A collection's field spec names its filterable and
+ * searchable attributes, which is the reconnaissance step for querying it, so
+ * discovery is now an admin capability too.
  */
 @ApiTags('Search')
 @Controller('search/collections')
@@ -32,12 +36,14 @@ export class CollectionController {
 
   @ApiOperation({ summary: 'List all collections' })
   @Get()
+  @Roles('admin')
   list() {
     return this.collections.list();
   }
 
   @ApiOperation({ summary: 'Get a collection by name' })
   @Get(':name')
+  @Roles('admin')
   get(@Param('name') name: string) {
     return this.collections.get(name);
   }

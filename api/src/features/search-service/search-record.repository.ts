@@ -146,7 +146,19 @@ export class SearchRecordRepository extends BaseRepository<
     await this.markIndexStateMany([id], state, patch);
   }
 
-  /** Stamp sync state for a whole batch in one UPDATE. */
+  /**
+   * Stamp sync state for a whole batch in one UPDATE.
+   *
+   * `indexAttempts` counts *failures*, not stamps. It used to increment on every
+   * call including successes, so a record was charged an attempt each time it
+   * was re-indexed — by a reload, by `reconcileCollection`, by the reload-racer
+   * re-drive. Two things then broke for records that had never actually failed:
+   * the sweep's backoff is `staleMs × 2^attempts`, so after ~10 reloads a single
+   * later failure parked the record at the hour-long ceiling instead of retrying
+   * in minutes; and `reconcile()` reported it as "needs operator attention" past
+   * `SEARCH_MAX_INDEX_ATTEMPTS`. Converging resets the counter, so the budget
+   * measures consecutive failures.
+   */
   async markIndexStateMany(
     ids: string[],
     state: IndexState,
@@ -158,7 +170,8 @@ export class SearchRecordRepository extends BaseRepository<
       .set({
         indexState: state,
         indexAttemptedAt: new Date(),
-        indexAttempts: sql`${searchRecords.indexAttempts} + 1`,
+        indexAttempts:
+          state === 'INDEXED' ? 0 : sql`${searchRecords.indexAttempts} + 1`,
         ...(patch.indexError !== undefined
           ? { indexError: patch.indexError }
           : {}),
@@ -283,15 +296,29 @@ export class SearchRecordRepository extends BaseRepository<
   }
 
   /**
-   * Records that never converged and are stale enough to retry, oldest attempt
-   * first. The `indexState <> 'INDEXED'` shape matches
-   * `search_records_unsynced_idx` exactly so this stays an index scan; the NULL
-   * branch catches rows written by a path that never stamped a handoff time.
+   * Records that never converged and are due for a retry, oldest attempt first.
+   *
+   * The wait before a retry doubles with each failed attempt — `staleMs`,
+   * `2 × staleMs`, `4 × staleMs`… capped at `maxBackoffMs` — so a record that
+   * can never succeed (a malformed document, a misconfigured index) stops
+   * consuming a retry every few minutes and stops repeating its error in the
+   * log. It is never abandoned, only slowed down.
+   *
+   * The `indexState <> 'INDEXED'` shape matches `search_records_unsynced_idx`
+   * exactly, so the per-row backoff expression is only ever evaluated over
+   * unconverged rows. The NULL branch catches rows written by a path that never
+   * stamped a handoff time.
    */
   async findUnsynced(
-    olderThan: Date,
     limit: number,
+    backoff: { staleMs: number; maxBackoffMs: number },
   ): Promise<SearchRecordRow[]> {
+    // `least(indexAttempts, 20)` bounds the exponent before `power` is
+    // evaluated, so a long-stuck row cannot overflow the double.
+    const dueAt = sql`now() - interval '1 millisecond' * least(
+      ${backoff.staleMs}::double precision * power(2, least(${searchRecords.indexAttempts}, 20)),
+      ${backoff.maxBackoffMs}::double precision
+    )`;
     return this.db
       .select()
       .from(searchRecords)
@@ -300,7 +327,7 @@ export class SearchRecordRepository extends BaseRepository<
           ne(searchRecords.indexState, 'INDEXED'),
           or(
             isNull(searchRecords.indexAttemptedAt),
-            lt(searchRecords.indexAttemptedAt, olderThan),
+            sql`${searchRecords.indexAttemptedAt} < ${dueAt}`,
           ),
         ),
       )
@@ -334,7 +361,7 @@ export class SearchRecordRepository extends BaseRepository<
     };
   }
 
-  /** Most-recently-attempted unconverged records, for the admin status view. */
+  /** Worst offenders first (most index attempts), for the admin status view. */
   async findUnsyncedByCollection(
     collection: string,
     limit: number,

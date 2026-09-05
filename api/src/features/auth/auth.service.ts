@@ -1,11 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import type { Principal } from '../../common/principal';
+import { roleOf, type Principal } from '../../common/principal';
 import type { UserRow } from '../../infrastructure/database/schema/identity.schema';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { UserRepository } from '../users/user.repository';
 import type { TokenPair, UserProfile } from './auth.types';
 import { PasswordService } from './password.service';
 import { SessionRepository } from './session.repository';
+import { SessionRevocationService } from './session-revocation.service';
 import { TokenService } from './token.service';
 
 export interface RequestContext {
@@ -28,6 +29,7 @@ export class AuthService {
   constructor(
     private readonly users: UserRepository,
     private readonly sessions: SessionRepository,
+    private readonly revocation: SessionRevocationService,
     private readonly tokens: TokenService,
     private readonly passwords: PasswordService,
     private readonly errors: ExceptionService,
@@ -39,11 +41,26 @@ export class AuthService {
    * have no users row, so they get the bare principal back.
    */
   async getProfile(principal: Principal): Promise<UserProfile> {
-    if (!principal.id) return principal;
-    const user = await this.users.findActiveById(principal.id);
-    if (!user) return principal;
+    // The subject id as the caller knows it — a `users.id` for a human, a
+    // `service_credentials.id` for a machine. Deliberately NOT `userIdOrNull`,
+    // which exists to keep credential ids out of `users` foreign keys; this is
+    // a display value, not a key.
+    const subjectId =
+      principal.kind === 'user'
+        ? principal.userId
+        : principal.kind === 'service'
+          ? principal.credentialId
+          : null;
+    const base: UserProfile = {
+      id: subjectId,
+      kind: principal.kind,
+      role: roleOf(principal),
+    };
+    if (principal.kind !== 'user') return base;
+    const user = await this.users.findActiveById(principal.userId);
+    if (!user) return base;
     return {
-      id: user.id,
+      ...base,
       role: user.role,
       email: user.email,
       displayName: user.displayName,
@@ -56,11 +73,14 @@ export class AuthService {
       throw this.errors.create(ErrorCode.AUTH_INVALID_CREDENTIALS);
     }
     const user = await this.users.findByEmail(email.toLowerCase());
-    const ok = user
-      ? await this.passwords.verify(user.passwordHash, password)
-      : false;
-    if (!user || !ok)
+    if (!user) {
+      // Spend the same argon2 work as a real verification before failing, so
+      // response time does not reveal whether the account exists.
+      await this.passwords.verifyDecoy(password);
       throw this.errors.create(ErrorCode.AUTH_INVALID_CREDENTIALS);
+    }
+    const ok = await this.passwords.verify(user.passwordHash, password);
+    if (!ok) throw this.errors.create(ErrorCode.AUTH_INVALID_CREDENTIALS);
     return user;
   }
 
@@ -78,7 +98,7 @@ export class AuthService {
 
     if (session.revokedAt) {
       // Replay of a rotated/revoked token → assume theft; revoke the family.
-      await this.sessions.revokeFamily(session.familyId);
+      await this.revocation.revokeFamily(session.familyId);
       throw this.errors.create(ErrorCode.AUTH_TOKEN_REUSE);
     }
     if (session.expiresAt.getTime() <= Date.now()) {
@@ -88,7 +108,13 @@ export class AuthService {
     const user = await this.users.findActiveById(session.userId);
     if (!user) throw this.errors.create(ErrorCode.AUTH_TOKEN_INVALID);
 
-    await this.sessions.revokeById(session.id);
+    // Compare-and-set, not read-then-write. Two concurrent refreshes with the
+    // same token both used to pass the `revokedAt` check above and both minted a
+    // pair, splitting the family into two live lineages — which is precisely the
+    // state the reuse detection exists to catch.
+    if (!(await this.revocation.claimForRotation(session.id))) {
+      throw this.errors.create(ErrorCode.AUTH_TOKEN_INVALID);
+    }
     return this.issuePair(user, session.familyId, ctx);
   }
 
@@ -97,12 +123,12 @@ export class AuthService {
       this.tokens.hashToken(refreshToken),
     );
     if (session && !session.revokedAt) {
-      await this.sessions.revokeById(session.id);
+      await this.revocation.revokeSession(session.id);
     }
   }
 
   async logoutAll(userId: string): Promise<void> {
-    await this.sessions.revokeAllForUser(userId);
+    await this.revocation.revokeAllForUser(userId);
   }
 
   async changePassword(
@@ -119,7 +145,7 @@ export class AuthService {
     await this.users.update(userId, {
       passwordHash: await this.passwords.hash(next),
     });
-    await this.sessions.revokeAllForUser(userId); // force re-login everywhere
+    await this.revocation.revokeAllForUser(userId); // force re-login everywhere
   }
 
   async listSessions(userId: string): Promise<SessionSummary[]> {
@@ -139,20 +165,24 @@ export class AuthService {
     familyId: string,
     ctx: RequestContext,
   ): Promise<TokenPair> {
-    const accessToken = this.tokens.signAccessToken({
-      sub: user.id,
-      role: user.role,
-      email: user.email,
-      kind: 'user',
-    });
+    // Session first, token second: the access token carries the session id, so
+    // the row has to exist before there is anything to sign. (The reverse order
+    // is why the two were never linked.)
     const refresh = this.tokens.generateRefreshToken();
-    await this.sessions.create({
+    const session = await this.sessions.create({
       userId: user.id,
       tokenHash: refresh.tokenHash,
       familyId,
       expiresAt: this.tokens.refreshExpiry(),
       userAgent: ctx.userAgent,
       ip: ctx.ip,
+    });
+    const accessToken = this.tokens.signAccessToken({
+      sub: user.id,
+      role: user.role,
+      email: user.email,
+      kind: 'user',
+      sid: session.id,
     });
     return {
       accessToken,

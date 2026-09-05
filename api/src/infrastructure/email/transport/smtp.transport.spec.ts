@@ -7,7 +7,7 @@
 jest.mock('nodemailer', () => ({ createTransport: jest.fn() }));
 
 import { createTransport } from 'nodemailer';
-import { sendMail, verifySmtp } from './smtp.transport';
+import { closeSmtpPool, sendMail, verifySmtp } from './smtp.transport';
 import type { SmtpConn } from '../email.types';
 
 const mockCreateTransport = createTransport as jest.Mock;
@@ -45,6 +45,9 @@ describe('smtp.transport', () => {
       }),
     );
     expect(verify).toHaveBeenCalled();
+    // Pooled now: the transport is reused across sends rather than torn down
+    // verifySmtp deliberately does NOT use the pool: an admin testing a
+    // config may be testing a broken one, and it should not be cached.
     expect(close).toHaveBeenCalled();
   });
 
@@ -73,7 +76,10 @@ describe('smtp.transport', () => {
         html: '<p>body</p>',
       }),
     );
-    expect(close).toHaveBeenCalled();
+    // Pooled now: the transport is reused across sends rather than torn down
+    // after each one, so `close()` is NOT expected here. `verifySmtp` still
+    // builds and closes its own, since a config being tested may be wrong.
+    expect(close).not.toHaveBeenCalled();
   });
 
   it('sendMail uses a bare from address when fromName is null', async () => {
@@ -105,6 +111,45 @@ describe('smtp.transport', () => {
     });
     expect(sendMailFn).toHaveBeenCalledWith(
       expect.objectContaining({ attachments }),
+    );
+  });
+});
+
+describe('smtp.transport connection pooling', () => {
+  beforeEach(() => {
+    closeSmtpPool();
+    mockCreateTransport.mockClear();
+  });
+
+  const conn = {
+    host: 'smtp.test',
+    port: 587,
+    secure: false,
+    username: 'u',
+    password: 'p',
+    fromAddress: 'from@test',
+    fromName: null,
+  };
+  const msg = { to: 'to@test', subject: 's', text: 't' };
+
+  // Every send used to build, connect, send and tear down — a full TCP+TLS+AUTH
+  // round trip per message, including on every forgot-password request.
+  it('reuses one transport across sends to the same server', async () => {
+    await sendMail(conn as never, msg as never);
+    await sendMail(conn as never, msg as never);
+    expect(mockCreateTransport).toHaveBeenCalledTimes(1);
+  });
+
+  it('builds a separate transport when the config changes', async () => {
+    await sendMail(conn as never, msg as never);
+    await sendMail({ ...conn, host: 'other.test' } as never, msg as never);
+    expect(mockCreateTransport).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks nodemailer to pool', async () => {
+    await sendMail(conn as never, msg as never);
+    expect(mockCreateTransport).toHaveBeenCalledWith(
+      expect.objectContaining({ pool: true }),
     );
   });
 });

@@ -1,8 +1,4 @@
-import {
-  collections,
-  searchIndexState,
-  searchRecords,
-} from './search.schema';
+import { collections, searchIndexState, searchRecords } from './search.schema';
 
 describe('search schema', () => {
   it('defines the search_index_state enum', () => {

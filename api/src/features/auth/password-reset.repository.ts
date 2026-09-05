@@ -69,9 +69,18 @@ export class PasswordResetRepository {
       .where(eq(passwordResetCodes.id, id));
   }
 
-  async deleteExpired(now = new Date()): Promise<void> {
-    await this.db
+  /**
+   * Drop codes that can no longer be used. Returns how many rows went.
+   *
+   * This method existed and was unit-tested but had no production caller, so
+   * every reset code ever issued stayed in the table. `AuthCleanupProcessor`
+   * now runs it.
+   */
+  async deleteExpired(now = new Date()): Promise<number> {
+    const rows = await this.db
       .delete(passwordResetCodes)
-      .where(lt(passwordResetCodes.expiresAt, now));
+      .where(lt(passwordResetCodes.expiresAt, now))
+      .returning({ id: passwordResetCodes.id });
+    return rows.length;
   }
 }

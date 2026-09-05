@@ -12,7 +12,15 @@ export class SystemAuditService {
 
   constructor(private readonly repo: SystemAuditRepository) {}
 
-  /** Best-effort: audit failures are logged, never bubbled to the caller. */
+  /**
+   * Record an audit event.
+   *
+   * Failures are logged rather than thrown, because losing the trail must not
+   * fail a mutation that already succeeded — but the log line is `error` level
+   * and names the action, so a silently vanishing audit trail is visible in
+   * monitoring rather than invisible. Callers that need the stronger guarantee
+   * (write-or-fail) should record inside their own transaction instead.
+   */
   async record(input: RecordAuditInput): Promise<void> {
     try {
       await this.repo.insert({
@@ -26,7 +34,9 @@ export class SystemAuditService {
       });
     } catch (err) {
       this.logger.error(
-        `Failed to write audit row for ${input.action}`,
+        `AUDIT WRITE LOST for ${input.action} on ${input.entityType}` +
+          `${input.entityId ? ` (${input.entityId})` : ''} by ${input.ctx.actorId ?? 'unknown'}` +
+          ` — the mutation succeeded but is unrecorded`,
         err instanceof Error ? err.stack : String(err),
       );
     }

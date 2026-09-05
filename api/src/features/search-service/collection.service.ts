@@ -9,9 +9,15 @@ import { Queue } from 'bullmq';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { SEARCH_ENGINE } from '../../infrastructure/search-engine/meili.constants';
 import type { SearchEngine } from '../../infrastructure/search-engine/search-engine.interface';
-import type { FieldSpec } from '../../infrastructure/database/schema/search.schema';
+import type {
+  CollectionVisibility,
+  FieldSpec,
+} from '../../infrastructure/database/schema/search.schema';
 import { CollectionRepository } from './collection.repository';
-import { fieldSpecToIndexDefinition } from './document-validator';
+import {
+  fieldSpecToIndexDefinition,
+  validateVisibility,
+} from './document-validator';
 import { IndexRegistry } from './index-registry';
 import { SearchRecordRepository } from './search-record.repository';
 import {
@@ -27,6 +33,9 @@ export interface CollectionView {
   displayName: string;
   description: string | null;
   fields: FieldSpec[];
+  /** Read policy, surfaced so an admin can see who can read a collection. */
+  visibility: CollectionVisibility;
+  ownerField: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -36,12 +45,27 @@ export interface CreateCollectionInput {
   displayName: string;
   description?: string;
   fields: FieldSpec[];
+  /** Read policy. Omitted means `private` — the safe default, not the open one. */
+  visibility?: CollectionVisibility;
+  ownerField?: string | null;
 }
 
 export interface UpdateCollectionInput {
   displayName?: string;
   description?: string | null;
   fields?: FieldSpec[];
+  visibility?: CollectionVisibility;
+  ownerField?: string | null;
+}
+
+/** A collection this application owns and keeps converged at boot. */
+export interface SystemCollectionSpec {
+  name: string;
+  displayName: string;
+  description?: string;
+  fields: FieldSpec[];
+  visibility: CollectionVisibility;
+  ownerField?: string | null;
 }
 
 /**
@@ -61,6 +85,50 @@ export class CollectionService implements OnApplicationBootstrap {
     @InjectQueue(SEARCH_INDEXING_QUEUE) private readonly queue: Queue,
     private readonly errors: ExceptionService,
   ) {}
+
+  /** Reject a policy that its own field spec cannot support. */
+  private assertVisibility(
+    visibility: CollectionVisibility,
+    ownerField: string | null | undefined,
+    fields: FieldSpec[],
+  ): void {
+    const errors = validateVisibility(visibility, ownerField, fields);
+    if (errors.length) {
+      throw this.errors.validation(
+        errors.map((message) => ({ path: 'ownerField', message })),
+      );
+    }
+  }
+
+  /**
+   * Create or converge a collection this application owns.
+   *
+   * Reconciling matters as much as creating: every database that predates the
+   * `visibility` column already has these rows, and the migration defaults them
+   * to `private`. A plain create-if-missing would therefore leave `documents`
+   * admin-only and silently break the agent's `search-documents` tool for every
+   * ordinary user.
+   */
+  async ensureSystemCollection(spec: SystemCollectionSpec): Promise<void> {
+    const existing = await this.collections.findByName(spec.name);
+    if (!existing) {
+      await this.create(spec);
+      this.logger.log(`Created "${spec.name}" collection`);
+      return;
+    }
+    const ownerField = spec.ownerField ?? null;
+    if (
+      existing.visibility === spec.visibility &&
+      existing.ownerField === ownerField
+    ) {
+      return;
+    }
+    await this.update(spec.name, { visibility: spec.visibility, ownerField });
+    this.logger.log(
+      `Converged "${spec.name}" read policy to ${spec.visibility}` +
+        (ownerField ? ` (owner field "${ownerField}")` : ''),
+    );
+  }
 
   /** Warm the registry and converge Meili settings at boot (best-effort). */
   async onApplicationBootstrap(): Promise<void> {
@@ -96,11 +164,15 @@ export class CollectionService implements OnApplicationBootstrap {
         message: `Collection "${input.name}" already exists`,
       });
     }
+    const visibility = input.visibility ?? 'private';
+    this.assertVisibility(visibility, input.ownerField, input.fields);
     const row = await this.collections.create({
       name: input.name,
       displayName: input.displayName,
       description: input.description ?? null,
       fields: input.fields,
+      visibility,
+      ownerField: input.ownerField ?? null,
     });
     await this.registry.invalidate(input.name);
 
@@ -148,6 +220,16 @@ export class CollectionService implements OnApplicationBootstrap {
       });
     }
 
+    // Re-validate the policy against the MERGED state: a PATCH may change the
+    // field spec, the visibility, or the owner field independently, and any of
+    // the three can invalidate the combination. The DTO can only check a
+    // request that happens to carry all of them.
+    const visibility = input.visibility ?? existing.visibility;
+    const ownerField =
+      input.ownerField !== undefined ? input.ownerField : existing.ownerField;
+    const fields = input.fields ?? existing.fields;
+    this.assertVisibility(visibility, ownerField, fields);
+
     if (input.fields) {
       await this.engine.ensureIndex(
         fieldSpecToIndexDefinition(name, input.fields),
@@ -161,6 +243,12 @@ export class CollectionService implements OnApplicationBootstrap {
         ? { description: input.description }
         : {}),
       ...(input.fields !== undefined ? { fields: input.fields } : {}),
+      ...(input.visibility !== undefined
+        ? { visibility: input.visibility }
+        : {}),
+      ...(input.ownerField !== undefined
+        ? { ownerField: input.ownerField }
+        : {}),
     });
     if (!row) {
       throw this.errors.create(ErrorCode.SEARCH_COLLECTION_NOT_FOUND, {
@@ -221,6 +309,8 @@ function toView(row: {
   displayName: string;
   description: string | null;
   fields: FieldSpec[];
+  visibility: CollectionVisibility;
+  ownerField: string | null;
   createdAt: Date;
   updatedAt: Date;
 }): CollectionView {
@@ -229,6 +319,8 @@ function toView(row: {
     displayName: row.displayName,
     description: row.description,
     fields: row.fields,
+    visibility: row.visibility,
+    ownerField: row.ownerField,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };

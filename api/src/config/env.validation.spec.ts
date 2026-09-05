@@ -93,6 +93,8 @@ describe('system encryption key', () => {
     MINIO_ROOT_PASSWORD: 'not-minioadmin',
     AI_GATEWAY_API_KEY: 'a-real-gateway-api-key',
     PASSWORD_RESET_PEPPER: 'a-real-reset-pepper-value',
+    CORS_ORIGINS: 'https://app.example.com',
+    FILE_ALLOWED_MIME: 'application/pdf,text/plain',
   };
 
   it('rejects the all-zero dev default key in production', () => {
@@ -119,5 +121,45 @@ describe('system encryption key', () => {
       SYSTEM_ENCRYPTION_KEY: realKey,
     });
     expect(env.SYSTEM_ENCRYPTION_KEY).toBe(realKey);
+  });
+});
+
+describe('production CORS guard', () => {
+  const prod = {
+    NODE_ENV: 'production',
+    MEILISEARCH_MASTER_KEY: 'a-real-master-key',
+    JWT_ACCESS_SECRET: 'a-real-jwt-secret-that-is-long-enough-32',
+    SEED_ADMIN_PASSWORD: 'a-real-admin-password',
+    MINIO_ROOT_USER: 'not-minioadmin',
+    MINIO_ROOT_PASSWORD: 'not-minioadmin',
+    AI_GATEWAY_API_KEY: 'a-real-gateway-api-key',
+    PASSWORD_RESET_PEPPER: 'a-real-reset-pepper-value',
+    SYSTEM_ENCRYPTION_KEY: Buffer.from('a'.repeat(32)).toString('base64'),
+    CORS_ORIGINS: 'https://app.example.com',
+    FILE_ALLOWED_MIME: 'application/pdf',
+  };
+
+  // An empty allowlist makes main.ts reflect whatever Origin arrives. Fine for
+  // local development; in production it should be a stated list.
+  it('rejects an empty CORS_ORIGINS in production', () => {
+    expect(() => validateEnv({ ...prod, CORS_ORIGINS: '' })).toThrow(
+      /CORS_ORIGINS/,
+    );
+  });
+
+  it('rejects a whitespace-only CORS_ORIGINS in production', () => {
+    expect(() => validateEnv({ ...prod, CORS_ORIGINS: '   ' })).toThrow(
+      /CORS_ORIGINS/,
+    );
+  });
+
+  it('accepts an explicit origin list', () => {
+    expect(() =>
+      validateEnv({ ...prod, CORS_ORIGINS: 'https://app.example.com' }),
+    ).not.toThrow();
+  });
+
+  it('leaves development alone', () => {
+    expect(() => validateEnv({ NODE_ENV: 'development' })).not.toThrow();
   });
 });

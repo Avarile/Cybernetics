@@ -1,11 +1,18 @@
 import { Injectable } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
+import { ConfigService } from '@nestjs/config';
+import type { MastraConfig } from '../../../config/configurations/mastra.config';
+import {
+  ErrorCode,
+  ExceptionService,
+} from '../../../infrastructure/exceptions';
 import type { Queue } from 'bullmq';
 import {
   AGENT_RUN_JOB_OPTS,
   AGENT_RUN_QUEUE,
   RUN_SCHEDULE_JOB,
 } from '../mastra.constants';
+import { isValidCron } from '../cron.util';
 import { ScheduleRepository } from '../repositories/schedule.repository';
 
 export interface CreateScheduleInput {
@@ -52,10 +59,17 @@ export interface CreateScheduleInput {
  */
 @Injectable()
 export class ScheduleService {
+  private readonly schedulesEnabled: boolean;
+
   constructor(
     private readonly repo: ScheduleRepository,
     @InjectQueue(AGENT_RUN_QUEUE) private readonly queue: Queue,
-  ) {}
+    config: ConfigService,
+    private readonly errors: ExceptionService,
+  ) {
+    this.schedulesEnabled =
+      config.getOrThrow<MastraConfig>('mastra').schedulesEnabled;
+  }
 
   private async register(s: { id: string; cron: string; timezone?: string }) {
     await this.queue.upsertJobScheduler(
@@ -69,13 +83,34 @@ export class ScheduleService {
     );
   }
 
+  /**
+   * Validate the cron expression BEFORE persisting.
+   *
+   * `upsertJobScheduler` parses the pattern and throws on a bad one — but it ran
+   * after the row was inserted, so a typo left a persisted schedule that failed
+   * registration here and then failed again in `syncRepeatableJobs()` on every
+   * subsequent boot. Parsing first keeps the row and the scheduler consistent.
+   */
+  private assertValidCron(cron: string): void {
+    if (!isValidCron(cron)) {
+      throw this.errors.create(ErrorCode.VALIDATION_FAILED, {
+        message: `Invalid cron expression "${cron}" (expected 5 or 6 fields, e.g. "0 9 * * *")`,
+      });
+    }
+  }
+
   async create(dto: CreateScheduleInput) {
+    this.assertValidCron(dto.cron);
     const row = await this.repo.create(dto as never);
-    if (row.enabled) await this.register(row);
+    // The kill-switch used to guard only the boot-time sync, so creating a
+    // schedule registered a live repeatable even with MASTRA_SCHEDULES_ENABLED
+    // false — the switch survived exactly until the first admin used the API.
+    if (row.enabled && this.schedulesEnabled) await this.register(row);
     return row;
   }
 
   async syncRepeatableJobs() {
+    if (!this.schedulesEnabled) return;
     const rows = await this.repo.listEnabled();
     for (const r of rows) await this.register(r);
   }

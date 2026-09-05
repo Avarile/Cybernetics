@@ -13,7 +13,7 @@ import {
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
-import type { Principal } from '../../common/principal';
+import { userIdOrNull, type Principal } from '../../common/principal';
 import { SettingsQueryDto, UpsertSettingDto } from './dto/upsert-setting.dto';
 import { SystemSettingsService } from './system-settings.service';
 import type { AuditContext } from './system-audit.types';
@@ -25,7 +25,7 @@ export class SystemSettingsController {
   constructor(private readonly settings: SystemSettingsService) {}
 
   private ctx(user: Principal, ip: string, ua?: string): AuditContext {
-    return { actorId: user.id, ip, userAgent: ua ?? null };
+    return { actorId: userIdOrNull(user), ip, userAgent: ua ?? null };
   }
 
   @ApiOperation({ summary: 'List system settings' })

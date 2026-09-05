@@ -27,6 +27,8 @@ export const storageConfig = registerAs('storage', () => {
     maxFileSize: env.FILE_MAX_SIZE,
     allowedMimeTypes, // empty array = allow any MIME type
     pendingTtlSeconds: env.FILE_PENDING_TTL,
+    /** Retention for soft-deleted files before the bytes are purged. */
+    purgeAfterDays: env.FILE_PURGE_AFTER_DAYS,
   };
 });
 

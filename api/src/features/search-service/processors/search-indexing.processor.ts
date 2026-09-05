@@ -6,6 +6,7 @@ import type { SearchConfig } from '../../../config/configurations/search.config'
 import { SEARCH_ENGINE } from '../../../infrastructure/search-engine/meili.constants';
 import type { SearchEngine } from '../../../infrastructure/search-engine/search-engine.interface';
 import type { SearchRecordRow } from '../../../infrastructure/database/schema/search.schema';
+import { haltWorkerIfApiOnly } from '../../../infrastructure/queue/worker-role';
 import { IndexRegistry } from '../index-registry';
 import { SearchMetrics } from '../search.metrics';
 import { SearchRecordRepository } from '../search-record.repository';
@@ -16,6 +17,7 @@ import {
   INDEX_RECORDS_JOB,
   PURGE_RECORDS_JOB,
   RECONCILE_JOB,
+  RECORD_PRIMARY_KEY,
   REINDEX_COLLECTION_JOB,
   SEARCH_INDEXING_QUEUE,
 } from '../search.constants';
@@ -62,6 +64,7 @@ export class SearchIndexingProcessor
    * keeps it on the validated-config path like every other tunable.
    */
   onModuleInit(): void {
+    if (haltWorkerIfApiOnly(this.worker, (m) => this.logger.log(m))) return;
     if (this.worker) this.worker.concurrency = this.cfg.indexConcurrency;
   }
 
@@ -115,6 +118,7 @@ export class SearchIndexingProcessor
         const { taskUid } = await this.engine.addOrReplace(
           collection,
           live.map(toMeiliDocument),
+          { primaryKey: RECORD_PRIMARY_KEY },
         );
         await this.engine.waitForTask(taskUid);
       }
@@ -155,22 +159,37 @@ export class SearchIndexingProcessor
    *
    * A per-process memo alone is not sufficient, and this is not theoretical —
    * the e2e test for exactly this scenario failed with "Attribute `status` is
-   * not filterable" while the memo was the only check. An index can vanish
-   * *after* it has been ensured, so existence is verified every time (one cheap
-   * GET, no async task) while applying settings — the expensive part — stays
-   * memoised.
+   * not filterable" while the memo was the only check. An index can lose its
+   * configuration *after* it has been ensured, so the configuration is verified
+   * every time (one cheap read, no async task) while applying settings — the
+   * expensive part — stays memoised.
    */
   private async ensureIndexReady(collection: string): Promise<void> {
-    const alreadyEnsured = this.ensured.has(collection);
-    if (alreadyEnsured && (await this.engine.indexExists(collection))) return;
     const def = await this.registry.resolve(collection);
     if (!def) return; // collection deleted mid-flight; nothing to configure
+    const alreadyEnsured = this.ensured.has(collection);
+    if (alreadyEnsured && !(await this.engine.needsEnsure(def.definition))) {
+      return;
+    }
     await this.engine.ensureIndex(def.definition);
     this.ensured.add(collection);
     if (alreadyEnsured) this.metrics.increment('indexRecreated');
   }
 
-  /** Clear a collection's index and reload every live record from Postgres. */
+  /**
+   * Clear a collection's index and reload every live record from Postgres.
+   *
+   * KNOWN AVAILABILITY COST: between the `clearIndex` below and the last page
+   * being written, queries against this collection return nothing. For a large
+   * collection that is a visible outage window, not a blip.
+   *
+   * Not fixed here on purpose. The fix is to build into a second index and
+   * `swapIndexes`, which changes what `redriveReloadRacers` has to reason about
+   * (writers race the *shadow* index, not the live one) and needs its own
+   * design pass. Reload is an admin-triggered repair, so the exposure is
+   * bounded and deliberate rather than routine — but it is real, and this note
+   * is here so the next person does not discover it from a graph.
+   */
   private async reindexCollection(collection: string): Promise<void> {
     // Settings first, so a reload is a complete repair and not documents-only.
     const def = await this.registry.resolve(collection);
@@ -197,6 +216,7 @@ export class SearchIndexingProcessor
       const added = await this.engine.addOrReplace(
         collection,
         page.map(toMeiliDocument),
+        { primaryKey: RECORD_PRIMARY_KEY },
       );
       await this.engine.waitForTask(added.taskUid);
       // Stamp only what this pass actually wrote. Marking the whole collection
@@ -258,11 +278,10 @@ export class SearchIndexingProcessor
    * that outlasted the job's retries all land here.
    */
   private async reconcile(): Promise<void> {
-    const cutoff = new Date(Date.now() - this.cfg.reconcileStaleMs);
-    const rows = await this.records.findUnsynced(
-      cutoff,
-      this.cfg.reconcileBatch,
-    );
+    const rows = await this.records.findUnsynced(this.cfg.reconcileBatch, {
+      staleMs: this.cfg.reconcileStaleMs,
+      maxBackoffMs: this.cfg.reconcileMaxBackoffMs,
+    });
     if (rows.length === 0) return;
 
     const byCollection = new Map<string, string[]>();

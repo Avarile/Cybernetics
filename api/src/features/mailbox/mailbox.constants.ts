@@ -1,5 +1,7 @@
+import { QUEUE_NAMES } from '../../infrastructure/queue/queue-names';
+
 /** BullMQ queue that runs inbound-mail sync off the request path. */
-export const MAILBOX_SYNC_QUEUE = 'mailbox-sync';
+export const MAILBOX_SYNC_QUEUE = QUEUE_NAMES.mailboxSync;
 
 /** Job: pull new messages for one (accountId, mailbox) into the store. */
 export const SYNC_MAILBOX_JOB = 'sync-mailbox';

@@ -32,7 +32,9 @@ function baseDoc(): OpenAPIObject {
 describe('openapi.postprocess', () => {
   describe('operationId', () => {
     it('joins controller and method keys', () => {
-      expect(operationId('AuthController', 'login')).toBe('AuthController_login');
+      expect(operationId('AuthController', 'login')).toBe(
+        'AuthController_login',
+      );
     });
   });
 
@@ -81,8 +83,11 @@ describe('openapi.postprocess', () => {
       expect(get.responses['403']).toBeDefined();
       expect(get.responses['429']).toBeDefined();
       expect(get.responses['500']).toBeDefined();
-      const ref = (get.responses['401'] as { content: Record<string, { schema: { $ref: string } }> })
-        .content['application/json'].schema.$ref;
+      const ref = (
+        get.responses['401'] as {
+          content: Record<string, { schema: { $ref: string } }>;
+        }
+      ).content['application/json'].schema.$ref;
       expect(ref).toBe('#/components/schemas/ErrorEnvelope');
     });
 

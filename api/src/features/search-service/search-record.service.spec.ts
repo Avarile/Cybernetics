@@ -1,6 +1,7 @@
 import type { ConfigService } from '@nestjs/config';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { SearchEngineError } from '../../infrastructure/search-engine/search-engine.interface';
+import type { Principal } from '../../common/principal';
 import type { CompiledCollection } from './index-registry';
 import { SearchMetrics } from './search.metrics';
 import { SearchRecordService } from './search-record.service';
@@ -20,7 +21,14 @@ const compiled: CompiledCollection = {
     filterableAttributes: ['status', 'createdAt', 'updatedAt', 'externalId'],
     sortableAttributes: ['createdAt', 'updatedAt'],
   },
+  // The existing suite is about filters/paging/plumbing, not policy — declare
+  // it shared so those assertions keep testing what they were written to test.
+  // Policy itself has its own exhaustive truth table in read-scope.spec.ts.
+  visibility: 'shared',
+  ownerField: null,
 };
+
+const READER: Principal = { kind: 'user', userId: 'u-1', role: 'user' };
 
 const CONFIG = {
   defaultPageSize: 20,
@@ -301,7 +309,7 @@ describe('SearchRecordService.search', () => {
   it('404s on an unknown collection', async () => {
     const { service } = make();
     await expect(
-      service.search('nope', { q: '', page: 1 }),
+      service.search('nope', { q: '', page: 1 }, READER),
     ).rejects.toMatchObject({
       code: ErrorCode.SEARCH_COLLECTION_NOT_FOUND,
       message: 'Unknown collection "nope"',
@@ -310,18 +318,26 @@ describe('SearchRecordService.search', () => {
 
   it('builds an allowlisted filter clause', async () => {
     const { service, engine } = make();
-    await service.search('articles', {
-      q: '',
-      page: 1,
-      filters: { status: 'live' },
-    });
+    await service.search(
+      'articles',
+      {
+        q: '',
+        page: 1,
+        filters: { status: 'live' },
+      },
+      READER,
+    );
     expect(searchArg(engine).filter).toEqual(['status = "live"']);
   });
 
   it('rejects a non-allowlisted filter field', async () => {
     const { service } = make();
     await expect(
-      service.search('articles', { q: '', page: 1, filters: { secret: 'x' } }),
+      service.search(
+        'articles',
+        { q: '', page: 1, filters: { secret: 'x' } },
+        READER,
+      ),
     ).rejects.toMatchObject({
       code: ErrorCode.SEARCH_QUERY_INVALID,
       message: 'Unknown filter field "secret"',
@@ -330,7 +346,7 @@ describe('SearchRecordService.search', () => {
 
   it('caps limit at maxPageSize', async () => {
     const { service, engine } = make();
-    await service.search('articles', { q: '', page: 1, limit: 9999 });
+    await service.search('articles', { q: '', page: 1, limit: 9999 }, READER);
     expect(searchArg(engine).hitsPerPage).toBe(100);
   });
 
@@ -344,7 +360,7 @@ describe('SearchRecordService.search', () => {
       },
     );
     await expect(
-      service.search('articles', { q: '', page: 1 }),
+      service.search('articles', { q: '', page: 1 }, READER),
     ).rejects.toMatchObject({
       code: ErrorCode.SEARCH_UNAVAILABLE,
       status: 503,
@@ -411,7 +427,7 @@ describe('SearchRecordService.get', () => {
 
   it('404s on an unknown collection', async () => {
     const { service } = make();
-    await expect(service.get('nope', 'rec-1')).rejects.toMatchObject({
+    await expect(service.get('nope', 'rec-1', READER)).rejects.toMatchObject({
       code: ErrorCode.SEARCH_COLLECTION_NOT_FOUND,
     });
   });
@@ -427,7 +443,7 @@ describe('SearchRecordService.get', () => {
         document: { title: 'Hi' },
       })),
     });
-    const view = await service.get('articles', uuid);
+    const view = await service.get('articles', uuid, READER);
     expect(records.findLiveById).toHaveBeenCalledWith(uuid);
     expect(view).toMatchObject({
       id: uuid,
@@ -447,7 +463,7 @@ describe('SearchRecordService.get', () => {
         indexState: 'PENDING',
       })),
     });
-    const view = await service.get('articles', 'ext-9');
+    const view = await service.get('articles', 'ext-9', READER);
     expect(records.findLiveByExternalId).toHaveBeenCalledWith(
       'articles',
       'ext-9',
@@ -467,7 +483,7 @@ describe('SearchRecordService.get', () => {
         indexAttempts: 3,
       })),
     });
-    const view = await service.get('articles', 'ext-9');
+    const view = await service.get('articles', 'ext-9', READER);
     expect(view).toMatchObject({
       indexState: 'FAILED',
       indexError: 'meili down',
@@ -484,8 +500,174 @@ describe('SearchRecordService.get', () => {
         externalId: 'e',
       })),
     });
-    await expect(service.get('articles', 'e')).rejects.toMatchObject({
+    await expect(service.get('articles', 'e', READER)).rejects.toMatchObject({
       code: ErrorCode.SEARCH_RECORD_NOT_FOUND,
+    });
+  });
+});
+
+describe('SearchRecordService read policy', () => {
+  const ADMIN: Principal = { kind: 'user', userId: 'a-1', role: 'admin' };
+  const OTHER: Principal = { kind: 'user', userId: 'u-2', role: 'user' };
+
+  const ownerScoped: CompiledCollection = {
+    ...compiled,
+    name: 'documents',
+    fields: [
+      { name: 'title', type: 'string', searchable: true },
+      { name: 'ownerUserId', type: 'string', filterable: true },
+    ],
+    definition: {
+      ...compiled.definition,
+      name: 'documents',
+      filterableAttributes: [
+        'ownerUserId',
+        'createdAt',
+        'updatedAt',
+        'externalId',
+      ],
+    },
+    visibility: 'owner_scoped',
+    ownerField: 'ownerUserId',
+  };
+
+  const privateCollection: CompiledCollection = {
+    ...compiled,
+    name: 'inbound_email',
+    visibility: 'private',
+    ownerField: null,
+  };
+
+  const withCollection = (def: CompiledCollection, overrides = {}) => {
+    const ctx = make(overrides);
+    (ctx.registry.resolve as jest.Mock).mockImplementation(async (n: string) =>
+      n === def.name ? def : null,
+    );
+    return ctx;
+  };
+
+  describe('search', () => {
+    it('appends a non-negotiable owner filter for an owner-scoped collection', async () => {
+      const { service, engine } = withCollection(ownerScoped);
+      await service.search('documents', { q: '', page: 1 }, READER);
+      expect(engine.search).toHaveBeenCalledWith(
+        'documents',
+        expect.objectContaining({ filter: ['ownerUserId = "u-1"'] }),
+      );
+    });
+
+    // A caller supplying their own owner filter cannot widen the scope: Meili
+    // ANDs the array, so `ownerUserId = "u-2" AND ownerUserId = "u-1"` matches
+    // nothing rather than returning u-2's records.
+    it('keeps the injected filter alongside a caller-supplied one', async () => {
+      const { service, engine } = withCollection(ownerScoped);
+      await service.search(
+        'documents',
+        { q: '', page: 1, filters: { ownerUserId: 'u-2' } },
+        READER,
+      );
+      const [, req] = (engine.search as jest.Mock).mock.calls[0];
+      expect(req.filter).toEqual([
+        'ownerUserId = "u-2"',
+        'ownerUserId = "u-1"',
+      ]);
+    });
+
+    it('does not filter for an admin', async () => {
+      const { service, engine } = withCollection(ownerScoped);
+      await service.search('documents', { q: '', page: 1 }, ADMIN);
+      const [, req] = (engine.search as jest.Mock).mock.calls[0];
+      expect(req.filter).toBeUndefined();
+    });
+
+    // The headline regression: any authenticated user could read every inbound
+    // email body through the generic query endpoint.
+    it('refuses a private collection to a non-admin and never reaches the engine', async () => {
+      const { service, engine } = withCollection(privateCollection);
+      await expect(
+        service.search('inbound_email', { q: '', page: 1 }, READER),
+      ).rejects.toMatchObject({ code: ErrorCode.FORBIDDEN });
+      expect(engine.search).not.toHaveBeenCalled();
+    });
+
+    it('allows an admin to read a private collection', async () => {
+      const { service, engine } = withCollection(privateCollection);
+      await service.search('inbound_email', { q: '', page: 1 }, ADMIN);
+      expect(engine.search).toHaveBeenCalled();
+    });
+  });
+
+  describe('get', () => {
+    const row = (ownerUserId: string) => ({
+      id: '11111111-1111-4111-8111-111111111111',
+      collection: 'documents',
+      externalId: 'file-1',
+      document: { title: 'T', ownerUserId },
+      indexState: 'INDEXED',
+      indexError: null,
+      indexAttempts: 1,
+      indexedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      isDeleted: false,
+    });
+
+    it('returns the record to its owner', async () => {
+      const { service } = withCollection(ownerScoped, {
+        findLiveByExternalId: jest.fn(async () => row('u-1')),
+      });
+      await expect(
+        service.get('documents', 'file-1', READER),
+      ).resolves.toMatchObject({ externalId: 'file-1' });
+    });
+
+    // `externalId` for a document IS the fileId, so an unscoped read here leaks
+    // another user's extracted text just as effectively as an unscoped query.
+    it('404s another user’s record rather than revealing it exists', async () => {
+      const { service } = withCollection(ownerScoped, {
+        findLiveByExternalId: jest.fn(async () => row('u-1')),
+      });
+      await expect(
+        service.get('documents', 'file-1', OTHER),
+      ).rejects.toMatchObject({ code: ErrorCode.SEARCH_RECORD_NOT_FOUND });
+    });
+
+    it('lets an admin read any record', async () => {
+      const { service } = withCollection(ownerScoped, {
+        findLiveByExternalId: jest.fn(async () => row('u-1')),
+      });
+      await expect(
+        service.get('documents', 'file-1', ADMIN),
+      ).resolves.toMatchObject({ externalId: 'file-1' });
+    });
+
+    it('refuses a private collection before touching the database', async () => {
+      const findLiveByExternalId = jest.fn();
+      const { service } = withCollection(privateCollection, {
+        findLiveByExternalId,
+      });
+      await expect(
+        service.get('inbound_email', 'x', READER),
+      ).rejects.toMatchObject({ code: ErrorCode.FORBIDDEN });
+      expect(findLiveByExternalId).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('persist', () => {
+    it('rejects an owner-scoped document with no owner field', async () => {
+      const { service } = withCollection(ownerScoped);
+      await expect(
+        service.persist('documents', [{ document: { title: 'T' } }]),
+      ).rejects.toMatchObject({ code: ErrorCode.VALIDATION_FAILED });
+    });
+
+    it('rejects an owner-scoped document whose owner field is empty', async () => {
+      const { service } = withCollection(ownerScoped);
+      await expect(
+        service.persist('documents', [
+          { document: { title: 'T', ownerUserId: '' } },
+        ]),
+      ).rejects.toMatchObject({ code: ErrorCode.VALIDATION_FAILED });
     });
   });
 });

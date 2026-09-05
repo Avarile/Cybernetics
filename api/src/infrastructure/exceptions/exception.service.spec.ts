@@ -1,7 +1,6 @@
 import {
   BadRequestException,
   NotFoundException,
-  HttpException,
   PayloadTooLargeException,
   UnprocessableEntityException,
   BadGatewayException,
@@ -49,7 +48,9 @@ describe('ExceptionService', () => {
     });
 
     it('preserves other unmapped 4xx statuses (e.g. 422)', () => {
-      expect(svc.from(new UnprocessableEntityException()).getStatus()).toBe(422);
+      expect(svc.from(new UnprocessableEntityException()).getStatus()).toBe(
+        422,
+      );
     });
 
     it('treats an unmapped 5xx HttpException as INTERNAL_ERROR', () => {

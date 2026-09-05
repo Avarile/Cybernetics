@@ -21,6 +21,8 @@ export type ConversationListRow = AgentConversationRow & {
 export class ConversationRepository extends BaseRepository<
   typeof agentConversations
 > {
+  private threadsExist = false;
+
   constructor(@Inject(DRIZZLE) db: DrizzleDB) {
     super(db, agentConversations);
   }
@@ -44,6 +46,24 @@ export class ConversationRepository extends BaseRepository<
    * A page of live conversations owned by a user, newest activity first, each
    * carrying the title Mastra generated for its backing thread.
    */
+  /**
+   * Whether Mastra's own thread table exists yet.
+   *
+   * `mastra.mastra_threads` is created by `@mastra/pg` on first use, not by any
+   * Drizzle migration (deliberately — see `mastra-threads.table.ts`). On a
+   * freshly migrated database, before any agent has run, joining it threw
+   * `relation does not exist` and turned GET /agent/conversations into a 500.
+   * Cached after the first positive answer: the table is never dropped.
+   */
+  private async threadsTableExists(): Promise<boolean> {
+    if (this.threadsExist) return true;
+    const result = await this.db.execute<{ present: boolean }>(
+      sql`select to_regclass('mastra.mastra_threads') is not null as present`,
+    );
+    this.threadsExist = Boolean(result.rows[0]?.present);
+    return this.threadsExist;
+  }
+
   async listByOwner(
     ownerUserId: string,
     page: number,
@@ -53,6 +73,31 @@ export class ConversationRepository extends BaseRepository<
       eq(agentConversations.ownerUserId, ownerUserId),
       eq(agentConversations.isDeleted, false),
     );
+    // Without the generated title when Mastra has not created its table yet —
+    // the conversation list is still perfectly useful, it just falls back to
+    // the explicit title (or null).
+    if (!(await this.threadsTableExists())) {
+      const bare = await this.db
+        .select(getTableColumns(agentConversations))
+        .from(agentConversations)
+        .where(where)
+        .orderBy(
+          desc(
+            sql`coalesce(${agentConversations.lastMessageAt}, ${agentConversations.createdAt})`,
+          ),
+        )
+        .limit(limit)
+        .offset((page - 1) * limit);
+      const bareTotals = await this.db
+        .select({ value: count() })
+        .from(agentConversations)
+        .where(where);
+      return {
+        rows: bare.map((row) => ({ ...row, generatedTitle: null })),
+        total: Number(bareTotals[0]?.value ?? 0),
+      };
+    }
+
     const rows = await this.db
       .select({
         ...getTableColumns(agentConversations),

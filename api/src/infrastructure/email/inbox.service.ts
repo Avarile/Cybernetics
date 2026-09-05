@@ -15,17 +15,48 @@ import {
   mailboxState,
   setSeen,
   verifyImap,
+  withSession,
+  type ImapSession,
 } from './transport/imap.transport';
 
-/** Inbound IMAP operations over the active IMAP config. Infra only (no HTTP). */
+/** Inbound IMAP operations. Infra only (no HTTP). */
 @Injectable()
 export class InboxService {
   constructor(private readonly config: EmailConfigRepository) {}
+
+  /**
+   * Resolve the connection for a specific `imap_configs` row.
+   *
+   * `accountId` used to be ignored entirely — every call resolved the single
+   * active config — so syncing as account A and account B pulled the SAME
+   * mailbox into two partitions with independent cursors. It is now the
+   * `imap_configs.id`, so the partition key names a real account.
+   */
+  private async connFor(accountId: string) {
+    const conn = await this.config.imapById(accountId);
+    if (!conn) throw new NoActiveEmailConfigError('IMAP');
+    return conn;
+  }
 
   private async conn() {
     const conn = await this.config.activeImap();
     if (!conn) throw new NoActiveEmailConfigError('IMAP');
     return conn;
+  }
+
+  /**
+   * Run a batch of operations over ONE connection and mailbox lock.
+   *
+   * The per-operation helpers below each open their own connection, so ingesting
+   * N messages cost N logins. Use this for anything that touches more than one
+   * message.
+   */
+  async withSession<T>(
+    accountId: string,
+    mailbox: string,
+    fn: (session: ImapSession) => Promise<T>,
+  ): Promise<T> {
+    return withSession(await this.connFor(accountId), mailbox, fn);
   }
 
   async verifyActive(): Promise<void> {

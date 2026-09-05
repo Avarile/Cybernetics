@@ -72,16 +72,28 @@ export function buildScheduledReportWorkflow() {
     id: 'deliver',
     inputSchema: analyze.outputSchema,
     outputSchema: z.object({ delivered: z.boolean() }),
-    resumeSchema: z.object({ approved: z.boolean() }),
-    suspendSchema: z.object({ reason: z.string() }),
-    execute: async ({ inputData, resumeData, suspend }) => {
-      const external = inputData.deliveryChannel === 'email';
-      if (external && !resumeData?.approved) {
-        // External email from a SYSTEM run requires approval (design decision #7).
-        return await suspend({ reason: 'external email requires approval' });
-      }
-      // Internal delivery auto-proceeds; the processor persists the report into the conversation.
-      return { delivered: true };
+    /**
+     * Delivery is NOT implemented, and this step says so rather than lying.
+     *
+     * `conversation` used to return `{ delivered: true }` while nothing wrote
+     * the report anywhere — the comment claimed "the processor persists the
+     * report into the conversation", and `AgentRunProcessor` never touched a
+     * conversation. `email` suspended for an approval that nothing could ever
+     * resume. Both paths reported the run as succeeded.
+     *
+     * Reporting a delivery that did not happen is worse than failing, so an
+     * undeliverable channel now fails loudly. `none` is the one honest option
+     * and still succeeds: the report lands in `agent_run.output`, which is
+     * where a caller can actually read it today.
+     */
+    execute: async ({ inputData }) => {
+      if (inputData.deliveryChannel === 'none') return { delivered: false };
+      throw new Error(
+        `Delivery channel "${inputData.deliveryChannel}" is not implemented. ` +
+          `The report is available on the agent_run row; set deliveryChannel ` +
+          `to "none" to acknowledge that, or implement delivery before using ` +
+          `this schedule.`,
+      );
     },
   });
 

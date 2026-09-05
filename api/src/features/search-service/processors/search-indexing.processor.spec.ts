@@ -25,6 +25,7 @@ function liveRow(over: Partial<SearchRecordRow> = {}): SearchRecordRow {
 
 const CONFIG = {
   reconcileStaleMs: 300_000,
+  reconcileMaxBackoffMs: 3_600_000,
   reconcileBatch: 500,
   indexBatchSize: 500,
   indexConcurrency: 4,
@@ -40,7 +41,7 @@ function make(
 ) {
   const engine = {
     ensureIndex: jest.fn(async () => undefined),
-    indexExists: jest.fn<Promise<boolean>, [string]>(async () => true),
+    needsEnsure: jest.fn<Promise<boolean>, [unknown]>(async () => false),
     addOrReplace: jest.fn(async () => ({ taskUid: 1 })),
     deleteDocuments: jest.fn(async () => ({ taskUid: 2 })),
     clearIndex: jest.fn(async () => ({ taskUid: 3 })),
@@ -60,9 +61,10 @@ function make(
     >(async () => undefined),
     markCollectionPurged: jest.fn(async () => undefined),
     pageLiveByCollection: jest.fn(async () => [] as SearchRecordRow[]),
-    findUnsynced: jest.fn<Promise<SearchRecordRow[]>, [Date, number]>(
-      async () => [],
-    ),
+    findUnsynced: jest.fn<
+      Promise<SearchRecordRow[]>,
+      [number, { staleMs: number; maxBackoffMs: number }]
+    >(async () => []),
     findConvergedAfter: jest.fn<
       Promise<SearchRecordRow[]>,
       [string, Date, number]
@@ -98,9 +100,11 @@ describe('SearchIndexingProcessor: index-records', () => {
   it('adds live rows to Meili and marks the batch INDEXED', async () => {
     const { processor, engine, records } = make();
     await processor.process(indexJob('articles', ['rec-1']));
-    expect(engine.addOrReplace).toHaveBeenCalledWith('articles', [
-      expect.objectContaining({ id: 'rec-1', title: 'Hi' }),
-    ]);
+    expect(engine.addOrReplace).toHaveBeenCalledWith(
+      'articles',
+      [expect.objectContaining({ id: 'rec-1', title: 'Hi' })],
+      { primaryKey: 'id' },
+    );
     expect(engine.waitForTask).toHaveBeenCalledWith(1);
     expect(records.markIndexStateMany).toHaveBeenCalledWith(
       ['rec-1'],
@@ -120,10 +124,14 @@ describe('SearchIndexingProcessor: index-records', () => {
     });
     await processor.process(indexJob('articles', ['a', 'b', 'c']));
     expect(engine.addOrReplace).toHaveBeenCalledTimes(1);
-    expect(engine.addOrReplace).toHaveBeenCalledWith('articles', [
-      expect.objectContaining({ id: 'a' }),
-      expect.objectContaining({ id: 'c' }),
-    ]);
+    expect(engine.addOrReplace).toHaveBeenCalledWith(
+      'articles',
+      [
+        expect.objectContaining({ id: 'a' }),
+        expect.objectContaining({ id: 'c' }),
+      ],
+      { primaryKey: 'id' },
+    );
     expect(engine.deleteDocuments).toHaveBeenCalledWith('articles', ['b']);
     expect(records.markIndexStateMany).toHaveBeenCalledWith(
       ['a', 'b', 'c'],
@@ -188,9 +196,11 @@ describe('SearchIndexingProcessor: index-records', () => {
       name: 'index-record',
       data: { id: 'rec-1' },
     } as Job);
-    expect(engine.addOrReplace).toHaveBeenCalledWith('articles', [
-      expect.objectContaining({ id: 'rec-1' }),
-    ]);
+    expect(engine.addOrReplace).toHaveBeenCalledWith(
+      'articles',
+      [expect.objectContaining({ id: 'rec-1' })],
+      { primaryKey: 'id' },
+    );
   });
 
   it('still consumes legacy delete-record jobs during a rolling deploy', async () => {
@@ -221,19 +231,19 @@ describe('SearchIndexingProcessor: index existence', () => {
     await processor.process(indexJob('articles', ['rec-1']));
     // Settings are the expensive part, so they stay memoised...
     expect(engine.ensureIndex).toHaveBeenCalledTimes(1);
-    // ...but every batch after the first rechecks existence, because an index
-    // can vanish after it was ensured. The first batch skips the check: it is
-    // about to apply settings unconditionally anyway.
-    expect(engine.indexExists).toHaveBeenCalledTimes(1);
+    // ...but every batch after the first rechecks the configuration, because an
+    // index can lose it after being ensured. The first batch skips the check:
+    // it is about to apply settings unconditionally anyway.
+    expect(engine.needsEnsure).toHaveBeenCalledTimes(1);
     expect(engine.addOrReplace).toHaveBeenCalledTimes(2);
   });
 
   // Regression: a memo-only guard let a mid-process index wipe through, and the
   // recreated index served every filter as "not filterable".
-  it('reapplies settings when the index vanished after being ensured', async () => {
+  it('reapplies settings when the index lost its configuration', async () => {
     const { processor, engine, metrics } = make();
     await processor.process(indexJob('articles', ['rec-1']));
-    engine.indexExists.mockResolvedValueOnce(false);
+    engine.needsEnsure.mockResolvedValueOnce(true);
     await processor.process(indexJob('articles', ['rec-1']));
     expect(engine.ensureIndex).toHaveBeenCalledTimes(2);
     expect(metrics.snapshot().indexRecreated).toBe(1);
@@ -270,10 +280,14 @@ describe('SearchIndexingProcessor: reindex-collection', () => {
     } as Job);
     expect(engine.ensureIndex).toHaveBeenCalled();
     expect(engine.clearIndex).toHaveBeenCalledWith('articles');
-    expect(engine.addOrReplace).toHaveBeenCalledWith('articles', [
-      expect.objectContaining({ id: 'a' }),
-      expect.objectContaining({ id: 'b' }),
-    ]);
+    expect(engine.addOrReplace).toHaveBeenCalledWith(
+      'articles',
+      [
+        expect.objectContaining({ id: 'a' }),
+        expect.objectContaining({ id: 'b' }),
+      ],
+      { primaryKey: 'id' },
+    );
     // Only the ids this pass actually wrote are stamped.
     expect(records.markIndexStateMany).toHaveBeenCalledWith(
       ['a', 'b'],
@@ -373,13 +387,17 @@ describe('SearchIndexingProcessor: reconcile', () => {
     expect(queue.add).not.toHaveBeenCalled();
   });
 
-  it('queries with the configured stale cutoff', async () => {
-    const { processor, records } = make({}, {}, { reconcileStaleMs: 1000 });
-    const before = Date.now();
+  it('passes the configured batch size and backoff bounds', async () => {
+    const { processor, records } = make(
+      {},
+      {},
+      { reconcileStaleMs: 1000, reconcileMaxBackoffMs: 60_000 },
+    );
     await processor.process({ name: 'reconcile', data: {} } as Job);
-    const [cutoff, limit] = records.findUnsynced.mock.calls[0];
-    expect(limit).toBe(500);
-    expect((cutoff as Date).getTime()).toBeLessThanOrEqual(before - 1000 + 5);
+    expect(records.findUnsynced).toHaveBeenCalledWith(500, {
+      staleMs: 1000,
+      maxBackoffMs: 60_000,
+    });
   });
 });
 

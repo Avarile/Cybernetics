@@ -9,6 +9,14 @@ function make(over: any = {}) {
     setSeen: jest.fn(async () => null),
     ...over.repo,
   };
+  const session = { setSeen: jest.fn(async () => undefined) };
+  // One connection + mailbox lock per operation batch.
+  const inbox = {
+    withSession: jest.fn(async (_a: string, _m: string, fn: any) =>
+      fn(session),
+    ),
+    ...over.inbox,
+  };
   const files = { getDownloadUrl: jest.fn(async () => ({ url: 'https://x' })) };
   const search = { persist: jest.fn(async () => []) };
   const collections = {
@@ -17,10 +25,15 @@ function make(over: any = {}) {
   };
   const scheduler = { enqueueSync: jest.fn(async () => undefined) };
   const config = {
-    getOrThrow: () => ({ defaultAccountId: 'acc-default', mailbox: 'INBOX' }),
+    getOrThrow: () => ({
+      defaultAccountId: 'acc-default',
+      mailbox: 'INBOX',
+      pushFlags: over.pushFlags ?? false,
+    }),
   };
   const svc = new MailboxService(
     repo as any,
+    inbox as any,
     files as any,
     search as any,
     collections as any,
@@ -28,7 +41,16 @@ function make(over: any = {}) {
     config as any,
     new ExceptionService(),
   );
-  return { svc, repo, files, search, collections, scheduler };
+  return {
+    svc,
+    repo,
+    inbox,
+    session,
+    files,
+    search,
+    collections,
+    scheduler,
+  };
 }
 
 describe('MailboxService', () => {
@@ -93,5 +115,56 @@ describe('MailboxService', () => {
     const { svc } = make();
     expect(svc.resolveAccountId('explicit')).toBe('explicit');
     expect(svc.resolveAccountId()).toBe('acc-default');
+  });
+});
+
+describe('MailboxService.markSeen flag push', () => {
+  const row = {
+    id: 'm1',
+    accountId: 'acc-1',
+    mailbox: 'INBOX',
+    uid: 42,
+    seen: true,
+  };
+
+  // MAILBOX_PUSH_FLAGS existed for this and was referenced by nothing: markSeen
+  // only ever wrote the local row, so read state diverged from the real mailbox
+  // immediately and permanently.
+  it('pushes the flag to the server when enabled', async () => {
+    const { svc, session, inbox } = make({
+      pushFlags: true,
+      repo: { setSeen: jest.fn(async () => row) },
+    });
+    await svc.markSeen('m1', true);
+    expect(inbox.withSession).toHaveBeenCalledWith(
+      'acc-1',
+      'INBOX',
+      expect.any(Function),
+    );
+    expect(session.setSeen).toHaveBeenCalledWith(42, true);
+  });
+
+  it('does not touch the server when the flag is off', async () => {
+    const { svc, inbox } = make({
+      pushFlags: false,
+      repo: { setSeen: jest.fn(async () => row) },
+    });
+    await svc.markSeen('m1', true);
+    expect(inbox.withSession).not.toHaveBeenCalled();
+  });
+
+  // The local row is already updated and drives the UI; a server that is
+  // unreachable should not fail the call.
+  it('still succeeds when the push fails', async () => {
+    const { svc } = make({
+      pushFlags: true,
+      repo: { setSeen: jest.fn(async () => row) },
+      inbox: {
+        withSession: jest.fn(async () => {
+          throw new Error('imap down');
+        }),
+      },
+    });
+    await expect(svc.markSeen('m1', true)).resolves.toBeUndefined();
   });
 });

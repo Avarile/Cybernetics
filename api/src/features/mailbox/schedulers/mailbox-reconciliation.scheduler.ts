@@ -12,6 +12,8 @@ import {
   RECONCILE_EVERY_MS,
   RECONCILE_MAILBOX_JOB,
 } from '../mailbox.constants';
+import { ImapConfigRepository } from '../../system/imap-config.repository';
+import { workersEnabled } from '../../../infrastructure/queue/worker-role';
 
 /**
  * Registers the repeatable reconciliation sweep on startup (best-effort so
@@ -29,32 +31,39 @@ export class MailboxReconciliationScheduler implements OnApplicationBootstrap {
 
   constructor(
     @InjectQueue(MAILBOX_SYNC_QUEUE) private readonly queue: Queue,
+    private readonly accounts: ImapConfigRepository,
     config: ConfigService,
   ) {
     this.cfg = config.getOrThrow<MailboxConfig>('mailbox');
   }
 
   async onApplicationBootstrap(): Promise<void> {
-    if (!this.cfg.defaultAccountId) {
-      this.logger.log(
-        'Mailbox reconciliation disabled (MAILBOX_DEFAULT_ACCOUNT_ID unset)',
-      );
+    // API-only replicas serve HTTP and leave the queues alone.
+    if (!workersEnabled()) return;
+    // Every live IMAP account, not just the configured default. `accountId` is
+    // now the `imap_configs.id`, so enumerating the configs enumerates the
+    // mailboxes that actually exist — previously a second account could be
+    // synced through the API but was never reconciled.
+    const accounts = await this.accounts.listLiveIds();
+    if (accounts.length === 0) {
+      this.logger.log('Mailbox reconciliation skipped (no IMAP accounts)');
       return;
     }
     try {
-      await this.queue.upsertJobScheduler(
-        `mailbox-reconcile:${this.cfg.defaultAccountId}:${this.cfg.mailbox}`,
-        { every: RECONCILE_EVERY_MS },
-        {
-          name: RECONCILE_MAILBOX_JOB,
-          data: {
-            accountId: this.cfg.defaultAccountId,
-            mailbox: this.cfg.mailbox,
+      for (const accountId of accounts) {
+        await this.queue.upsertJobScheduler(
+          `mailbox-reconcile:${accountId}:${this.cfg.mailbox}`,
+          { every: RECONCILE_EVERY_MS },
+          {
+            name: RECONCILE_MAILBOX_JOB,
+            data: { accountId, mailbox: this.cfg.mailbox },
+            opts: { removeOnComplete: true, removeOnFail: true },
           },
-          opts: { removeOnComplete: true, removeOnFail: true },
-        },
+        );
+      }
+      this.logger.log(
+        `Registered mailbox reconciliation for ${accounts.length} account(s)`,
       );
-      this.logger.log('Registered mailbox reconciliation sweep');
     } catch (err) {
       this.logger.warn(
         `Mailbox reconciliation registration skipped: ${err instanceof Error ? err.message : String(err)}`,

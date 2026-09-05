@@ -13,7 +13,9 @@ describe('createCollectionSchema', () => {
   });
 
   it('rejects an invalid name', () => {
-    expect(createCollectionSchema.safeParse({ ...base, name: 'Bad Name' }).success).toBe(false);
+    expect(
+      createCollectionSchema.safeParse({ ...base, name: 'Bad Name' }).success,
+    ).toBe(false);
   });
 
   it('rejects a spec with no searchable field (via validateFieldSpec)', () => {
@@ -36,7 +38,10 @@ describe('createCollectionSchema', () => {
 describe('persistRecordsSchema', () => {
   it('accepts a batch of records', () => {
     const res = persistRecordsSchema.safeParse({
-      records: [{ externalId: 'a', document: { title: 'x' } }, { document: { title: 'y' } }],
+      records: [
+        { externalId: 'a', document: { title: 'x' } },
+        { document: { title: 'y' } },
+      ],
     });
     expect(res.success).toBe(true);
   });

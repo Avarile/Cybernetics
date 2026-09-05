@@ -1,6 +1,6 @@
 import { INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_PIPE } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import type { Pool } from 'pg';
@@ -16,6 +16,7 @@ import { DatabaseModule } from '../src/infrastructure/database/database.module';
 import { PG_POOL } from '../src/infrastructure/database/drizzle.constants';
 import { ExceptionsModule } from '../src/infrastructure/exceptions';
 import { LoggerModule } from '../src/infrastructure/logger/logger.module';
+import { ZodValidationPipe } from '../src/common/pipes/zod-validation.pipe';
 
 /**
  * Mock-account validation harness. Provisions several distinct accounts and
@@ -36,6 +37,7 @@ const STRONG = 'Sup3r-Secret-Pass!'; // >= 12 chars, satisfies all DTOs
 /** Boots the same module subset as auth.e2e, optionally with the throttler. */
 async function boot(withThrottler: boolean): Promise<INestApplication> {
   const providers = [
+    { provide: APP_PIPE, useClass: ZodValidationPipe },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
   ];
@@ -330,13 +332,23 @@ describe('Auth mock-account validation (e2e)', () => {
       .send({ refreshToken: s2.body.refreshToken })
       .expect(401);
 
-    // ...and no active sessions remain. (The access token still resolves —
-    // stateless JWT revocation bites at refresh time, not mid-TTL.)
-    const after = await request(server())
+    // ...and so is the access token. This assertion used to read the other way,
+    // with a comment explaining that "stateless JWT revocation bites at refresh
+    // time, not mid-TTL" — which was A-2 exactly: `logout-all` was advisory for
+    // the remaining access TTL. Access tokens are now bound to their session,
+    // so revoking the session kills the token with it.
+    await request(server())
       .get('/auth/sessions')
       .set('Authorization', `Bearer ${s1.body.accessToken}`)
+      .expect(401);
+
+    // A fresh login is the only way back in, and it starts from a clean slate.
+    const revived = await login(erin, STRONG).expect(200);
+    const after = await request(server())
+      .get('/auth/sessions')
+      .set('Authorization', `Bearer ${revived.body.accessToken}`)
       .expect(200);
-    expect(after.body.length).toBe(0);
+    expect(after.body.length).toBe(1);
   });
 
   // ── Service credential (agent) lifecycle ───────────────────────────────────

@@ -28,7 +28,11 @@ function makeDb() {
         })),
       })),
     })),
-    delete: jest.fn(() => ({ where: jest.fn(async () => undefined) })),
+    delete: jest.fn(() => ({
+      where: jest.fn(() => ({
+        returning: jest.fn(async () => state.deleteResult ?? []),
+      })),
+    })),
   };
   return { db, state };
 }

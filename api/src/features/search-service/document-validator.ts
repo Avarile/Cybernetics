@@ -1,8 +1,10 @@
 import type {
+  CollectionVisibility,
   FieldSpec,
   FieldType,
 } from '../../infrastructure/database/schema/search.schema';
 import type { IndexDefinition } from '../../infrastructure/search-engine/search-engine.interface';
+import { RECORD_PRIMARY_KEY } from './search.constants';
 
 /** System field names on the Meili doc; a field-spec may not reuse them. */
 export const RESERVED_FIELD_NAMES: readonly string[] = [
@@ -45,6 +47,47 @@ export function validateFieldSpec(fields: FieldSpec[]): string[] {
   return errors;
 }
 
+/**
+ * Validate a collection's read policy against its own field spec.
+ *
+ * An `owner_scoped` collection is read through a `<ownerField> = "<userId>"`
+ * filter, so the field it names has to be one Meili can actually filter on and
+ * one that holds a `users.id`. Checking that here — beside `validateFieldSpec`,
+ * and called from both the DTO and `CollectionService` — is what stops the
+ * policy and the index configuration from drifting apart, the same discipline
+ * `fieldSpecToIndexDefinition` applies to attributes.
+ */
+export function validateVisibility(
+  visibility: CollectionVisibility,
+  ownerField: string | null | undefined,
+  fields: FieldSpec[],
+): string[] {
+  if (visibility !== 'owner_scoped') {
+    return ownerField
+      ? [
+          `ownerField is only meaningful for an owner_scoped collection (visibility is ${visibility})`,
+        ]
+      : [];
+  }
+  if (!ownerField) {
+    return ['An owner_scoped collection must declare an ownerField'];
+  }
+  const spec = fields.find((f) => f.name === ownerField);
+  if (!spec) {
+    return [`ownerField "${ownerField}" is not a declared field`];
+  }
+  const errors: string[] = [];
+  if (spec.type !== 'string') {
+    errors.push(
+      `ownerField "${ownerField}" must be of type string (is ${spec.type})`,
+    );
+  }
+  if (!spec.filterable) {
+    errors.push(`ownerField "${ownerField}" must be filterable`);
+  }
+  return errors;
+}
+
 /** Validate a document payload against a field-spec. Returns errors (empty = valid). */
 export function validateDocument(
   fields: FieldSpec[],
@@ -79,7 +122,7 @@ export function fieldSpecToIndexDefinition(
 ): IndexDefinition {
   return {
     name,
-    primaryKey: 'id',
+    primaryKey: RECORD_PRIMARY_KEY,
     searchableAttributes: fields.filter((f) => f.searchable).map((f) => f.name),
     filterableAttributes: [
       ...fields.filter((f) => f.filterable).map((f) => f.name),

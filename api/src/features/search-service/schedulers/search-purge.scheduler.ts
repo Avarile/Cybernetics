@@ -12,6 +12,7 @@ import {
   PURGE_SCHEDULER_ID,
   SEARCH_INDEXING_QUEUE,
 } from '../search.constants';
+import { workersEnabled } from '../../../infrastructure/queue/worker-role';
 
 /**
  * Registers the repeatable retention sweep. Deleting a record soft-deletes the
@@ -35,6 +36,8 @@ export class SearchPurgeScheduler implements OnApplicationBootstrap {
   }
 
   async onApplicationBootstrap(): Promise<void> {
+    // API-only replicas serve HTTP and leave the queues alone.
+    if (!workersEnabled()) return;
     await this.schedulePurge(this.cfg.purgeEveryMs);
   }
 

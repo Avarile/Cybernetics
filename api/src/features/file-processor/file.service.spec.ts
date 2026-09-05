@@ -1,5 +1,6 @@
 import type { ConfigService } from '@nestjs/config';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
+import { SYSTEM_PRINCIPAL } from '../../common/principal';
 import { FileService } from './file.service';
 
 // Test doubles are intentionally loosely typed.
@@ -86,7 +87,7 @@ describe('FileService', () => {
     it('creates a PENDING row and returns a presigned upload target', async () => {
       const res = await service.initiateUpload(
         { filename: 'a.bin', mimeType: 'application/octet-stream', size: 10 },
-        { id: null },
+        SYSTEM_PRINCIPAL,
       );
       expect(res.deduplicated).toBe(false);
       expect(res.upload?.url).toBe('http://minio/post');
@@ -112,7 +113,7 @@ describe('FileService', () => {
           size: 5,
           sha256: sha,
         },
-        { id: null },
+        SYSTEM_PRINCIPAL,
       );
       expect(res.deduplicated).toBe(true);
       expect(res.upload).toBeUndefined();
@@ -123,7 +124,7 @@ describe('FileService', () => {
       await expect(
         service.initiateUpload(
           { filename: 'a', mimeType: 'text/plain', size: 1000 },
-          { id: null },
+          SYSTEM_PRINCIPAL,
         ),
       ).rejects.toMatchObject({ code: ErrorCode.FILE_TOO_LARGE });
     });
@@ -146,7 +147,7 @@ describe('FileService', () => {
       await expect(
         restricted.initiateUpload(
           { filename: 'a', mimeType: 'text/plain', size: 10 },
-          { id: null },
+          SYSTEM_PRINCIPAL,
         ),
       ).rejects.toMatchObject({ code: ErrorCode.FILE_MIME_NOT_ALLOWED });
     });
@@ -155,7 +156,7 @@ describe('FileService', () => {
   describe('completeUpload', () => {
     it('transitions PENDING → AVAILABLE and enqueues processing', async () => {
       repo.findById.mockResolvedValueOnce(makeRow({ status: 'PENDING' }));
-      const res = await service.completeUpload('id', { id: null });
+      const res = await service.completeUpload('id', SYSTEM_PRINCIPAL);
       expect(repo.markStatus).toHaveBeenCalledWith(
         'id',
         'AVAILABLE',
@@ -168,7 +169,7 @@ describe('FileService', () => {
     it('rejects when the file is not PENDING', async () => {
       repo.findById.mockResolvedValueOnce(makeRow({ status: 'AVAILABLE' }));
       await expect(
-        service.completeUpload('id', { id: null }),
+        service.completeUpload('id', SYSTEM_PRINCIPAL),
       ).rejects.toMatchObject({
         code: ErrorCode.FILE_INVALID_STATE,
         message: 'File is not awaiting upload (status=AVAILABLE)',
@@ -179,7 +180,7 @@ describe('FileService', () => {
       repo.findById.mockResolvedValueOnce(makeRow({ status: 'PENDING' }));
       storage.objectExists.mockResolvedValueOnce(false);
       await expect(
-        service.completeUpload('id', { id: null }),
+        service.completeUpload('id', SYSTEM_PRINCIPAL),
       ).rejects.toMatchObject({ code: ErrorCode.FILE_UPLOAD_MISSING });
     });
   });
@@ -190,7 +191,7 @@ describe('FileService', () => {
         makeRow({ ownerId: 'someone-else', status: 'AVAILABLE' }),
       );
       await expect(
-        service.getMetadata('id', { id: 'me' }),
+        service.getMetadata('id', { kind: 'user', userId: 'me', role: 'user' }),
       ).rejects.toMatchObject({ code: ErrorCode.FILE_NOT_FOUND });
     });
   });
@@ -198,14 +199,14 @@ describe('FileService', () => {
   describe('getDownloadUrl', () => {
     it('returns a presigned GET url for an available file', async () => {
       repo.findById.mockResolvedValueOnce(makeRow({ status: 'AVAILABLE' }));
-      const res = await service.getDownloadUrl('id', { id: null });
+      const res = await service.getDownloadUrl('id', SYSTEM_PRINCIPAL);
       expect(res.url).toBe('http://minio/get');
     });
 
     it('rejects when the file is not available', async () => {
       repo.findById.mockResolvedValueOnce(makeRow({ status: 'PENDING' }));
       await expect(
-        service.getDownloadUrl('id', { id: null }),
+        service.getDownloadUrl('id', SYSTEM_PRINCIPAL),
       ).rejects.toMatchObject({
         code: ErrorCode.FILE_INVALID_STATE,
         message: 'File is not available (status=PENDING)',
@@ -216,7 +217,7 @@ describe('FileService', () => {
   describe('softDelete', () => {
     it('soft-deletes an owned file', async () => {
       repo.findById.mockResolvedValueOnce(makeRow({ status: 'AVAILABLE' }));
-      await service.softDelete('id', { id: null });
+      await service.softDelete('id', SYSTEM_PRINCIPAL);
       expect(repo.softDelete).toHaveBeenCalledWith('id');
     });
   });
@@ -244,7 +245,7 @@ describe('FileService', () => {
         restricted.putFromStream(
           Buffer.from('x'),
           { filename: 'a.bin', mimeType: 'application/zip', size: 4 },
-          { id: null },
+          SYSTEM_PRINCIPAL,
         ),
       ).rejects.toMatchObject({
         code: ErrorCode.FILE_MIME_NOT_ALLOWED,
@@ -268,7 +269,7 @@ describe('FileService', () => {
           size: 4,
           allowAnyMime: true,
         },
-        { id: null },
+        SYSTEM_PRINCIPAL,
       );
       expect(res.id).toBeDefined();
       expect(repo.create).toHaveBeenCalled();
@@ -291,12 +292,109 @@ describe('FileService', () => {
             size: 9999,
             allowAnyMime: true,
           },
-          { id: null },
+          SYSTEM_PRINCIPAL,
         ),
       ).rejects.toMatchObject({
         code: ErrorCode.FILE_TOO_LARGE,
         message: expect.stringMatching(/exceeds the maximum/),
       });
+    });
+  });
+
+  describe('FileService dedup scoping', () => {
+    const owner = { kind: 'user', userId: 'u-1', role: 'user' } as const;
+
+    // Dedup used to match on checksum alone. Knowing another user's SHA-256 was
+    // therefore enough to be handed a fully-owned row pointing at their object,
+    // and `{ deduplicated: true }` made the hash space probe-able without
+    // uploading anything.
+    it('scopes the dedup lookup to the calling user', async () => {
+      await service.initiateUpload(
+        {
+          filename: 'a.bin',
+          mimeType: 'application/octet-stream',
+          size: 10,
+          sha256: 'A'.repeat(64),
+        },
+        owner,
+      );
+      expect(repo.findAvailableByChecksum).toHaveBeenCalledWith(
+        'a'.repeat(64),
+        'u-1',
+      );
+    });
+
+    it('scopes to the ownerless bucket for the system principal', async () => {
+      await service.initiateUpload(
+        {
+          filename: 'a.eml',
+          mimeType: 'message/rfc822',
+          size: 10,
+          sha256: 'b'.repeat(64),
+        },
+        SYSTEM_PRINCIPAL,
+      );
+      expect(repo.findAvailableByChecksum).toHaveBeenCalledWith(
+        'b'.repeat(64),
+        null,
+      );
+    });
+  });
+
+  describe('FileService read vs mutate authorization', () => {
+    const owner = { kind: 'user', userId: 'u-1', role: 'user' } as const;
+    const other = { kind: 'user', userId: 'u-2', role: 'user' } as const;
+    const admin = { kind: 'user', userId: 'a-1', role: 'admin' } as const;
+    const ownedRow = () => makeRow({ ownerId: 'u-1', status: 'AVAILABLE' });
+
+    it('lets the owner read their file', async () => {
+      repo.findById.mockResolvedValueOnce(ownedRow());
+      await expect(service.getMetadata('id', owner)).resolves.toMatchObject({
+        ownerId: 'u-1',
+      });
+    });
+
+    it('404s another user', async () => {
+      repo.findById.mockResolvedValueOnce(ownedRow());
+      await expect(service.getMetadata('id', other)).rejects.toMatchObject({
+        code: ErrorCode.FILE_NOT_FOUND,
+      });
+    });
+
+    it('lets an admin read another user’s file', async () => {
+      repo.findById.mockResolvedValueOnce(ownedRow());
+      await expect(service.getMetadata('id', admin)).resolves.toMatchObject({
+        ownerId: 'u-1',
+      });
+    });
+
+    // Reading for support is one thing; deleting someone's file is another.
+    it('does NOT let an admin delete another user’s file', async () => {
+      repo.findById.mockResolvedValueOnce(ownedRow());
+      await expect(service.softDelete('id', admin)).rejects.toMatchObject({
+        code: ErrorCode.FILE_NOT_FOUND,
+      });
+    });
+
+    // Under the old `{ id: null }` principal, "system" and "anonymous guest" were
+    // the same value, so an ownership check comparing ids handed every ownerless
+    // file — every mailbox raw .eml and attachment — to an anonymous caller.
+    it('does not give an anonymous caller access to an ownerless file', async () => {
+      repo.findById.mockResolvedValueOnce(
+        makeRow({ ownerId: null, status: 'AVAILABLE' }),
+      );
+      await expect(
+        service.getMetadata('id', { kind: 'anonymous' }),
+      ).rejects.toMatchObject({ code: ErrorCode.FILE_NOT_FOUND });
+    });
+
+    it('still gives the system pipeline access to an ownerless file', async () => {
+      repo.findById.mockResolvedValueOnce(
+        makeRow({ ownerId: null, status: 'AVAILABLE' }),
+      );
+      await expect(
+        service.getMetadata('id', SYSTEM_PRINCIPAL),
+      ).resolves.toMatchObject({ ownerId: null });
     });
   });
 });

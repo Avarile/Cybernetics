@@ -32,6 +32,20 @@ export interface EngineResult<T> {
   processingTimeMs: number;
 }
 
+/**
+ * Options for a document write.
+ *
+ * `primaryKey` must be supplied on every write. Without it the engine has to
+ * *infer* which field identifies a document, and a payload carrying more than
+ * one `*id` field (ours has `id` and `externalId`) makes that ambiguous — the
+ * write then fails permanently, and an index auto-created by that write is left
+ * without a primary key that nothing can repair afterwards. Passing it also
+ * sets the key on an index that does not have one yet, so a broken index heals.
+ */
+export interface DocumentWriteOptions {
+  primaryKey?: string;
+}
+
 /** Reference to an async engine task (Meili applies mutations asynchronously). */
 export interface TaskRef {
   taskUid: number;
@@ -51,13 +65,22 @@ export class SearchEngineError extends Error {
 /** Index-agnostic search capability. Knows nothing about any domain. */
 export interface SearchEngine {
   ensureIndex(def: IndexDefinition): Promise<void>;
-  /** Whether the index currently exists. One cheap read, no async task. */
-  indexExists(index: string): Promise<boolean>;
+  /**
+   * Whether {@link ensureIndex} still has work to do — the index is missing, or
+   * its attribute configuration no longer matches the definition. One cheap
+   * read, no async task.
+   */
+  needsEnsure(def: IndexDefinition): Promise<boolean>;
   addOrReplace(
     index: string,
     docs: Array<Record<string, unknown>>,
+    options?: DocumentWriteOptions,
   ): Promise<TaskRef>;
-  update(index: string, docs: Array<Record<string, unknown>>): Promise<TaskRef>;
+  update(
+    index: string,
+    docs: Array<Record<string, unknown>>,
+    options?: DocumentWriteOptions,
+  ): Promise<TaskRef>;
   deleteDocuments(index: string, ids: string[]): Promise<TaskRef>;
   deleteByFilter(index: string, filter: string | string[]): Promise<TaskRef>;
   clearIndex(index: string): Promise<TaskRef>;

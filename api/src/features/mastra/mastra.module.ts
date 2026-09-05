@@ -1,4 +1,5 @@
 import { BullModule } from '@nestjs/bullmq';
+import { QueueModule } from '../../infrastructure/queue/queue.module';
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MastraModule as MastraCoreModule } from '@mastra/nestjs';
@@ -15,6 +16,7 @@ import type { ToolServices } from './mastra.types';
 import { ChatController } from './controllers/chat.controller';
 import { ApprovalController } from './controllers/approval.controller';
 import { ScheduleController } from './controllers/schedule.controller';
+import { SystemAuditModule } from '../system/system-audit.module';
 import { MastraRepositoriesModule } from './mastra-repositories.module';
 import { ActionLogRepository } from './repositories/action-log.repository';
 import { ConversationMessagesService } from './services/conversation-messages.service';
@@ -49,6 +51,8 @@ import { AgentScheduleScheduler } from './schedulers/agent-schedule.scheduler';
     SearchServiceModule,
     EmailModule,
     MastraRepositoriesModule,
+    SystemAuditModule,
+    QueueModule,
     BullModule.registerQueue({ name: AGENT_RUN_QUEUE }),
     MastraCoreModule.registerAsync({
       imports: [SearchServiceModule, EmailModule, MastraRepositoriesModule],

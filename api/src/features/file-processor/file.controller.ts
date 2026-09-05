@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
+import { Roles } from '../../common/decorators/roles.decorator';
 import { CompleteUploadDto } from './dto/complete-upload.dto';
 import { InitiateUploadDto } from './dto/initiate-upload.dto';
 import { QueryFilesDto } from './dto/query-files.dto';
@@ -22,10 +23,13 @@ import type { FilePrincipal } from './file.types';
  * uploads directly to MinIO) → complete; downloads are short-lived presigned
  * GET URLs. Ownership is enforced in FileService via the resolved principal.
  *
- * A real auth guard binds here later (`@UseGuards(AuthGuard)`); today the
- * principal comes from the CurrentUser placeholder decorator.
+ * Restricted to human accounts. A file's owner is a `users.id`, and a service
+ * credential has none — an `agent`-role caller's uploads would land in the
+ * ownerless bucket shared with internal pipelines, and it could not read them
+ * back. Machine file access needs an owner model of its own first.
  */
 @ApiTags('Files')
+@Roles('user', 'admin')
 @Controller('files')
 export class FileController {
   constructor(private readonly files: FileService) {}

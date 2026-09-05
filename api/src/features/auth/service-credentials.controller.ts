@@ -11,7 +11,7 @@ import {
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
-import type { Principal } from '../../common/principal';
+import { userIdOrNull, type Principal } from '../../common/principal';
 import { CreateServiceCredentialDto } from './dto/create-service-credential.dto';
 import { ServiceCredentialService } from './service-credential.service';
 
@@ -28,7 +28,7 @@ export class ServiceCredentialsController {
     @Body() dto: CreateServiceCredentialDto,
     @CurrentUser() admin: Principal,
   ) {
-    return this.credentials.issue(dto.name, admin.id);
+    return this.credentials.issue(dto.name, userIdOrNull(admin));
   }
 
   @ApiOperation({ summary: 'List service credentials' })

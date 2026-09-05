@@ -11,6 +11,7 @@ import {
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { CurrentUser } from '../../../common/decorators/current-user.decorator';
+import { Roles } from '../../../common/decorators/roles.decorator';
 import type { Principal } from '../../../common/principal';
 import { ChatDto } from '../dto/chat.dto';
 import { ChatStreamDto } from '../dto/chat-stream.dto';
@@ -21,6 +22,11 @@ import { ConversationMessagesService } from '../services/conversation-messages.s
 import { ConversationService } from '../services/conversation.service';
 
 @ApiTags('Agent')
+// Service credentials (role 'agent') are deliberately excluded: their token's
+// `sub` is a service_credentials.id, and agent_conversation.owner_user_id has a
+// foreign key to users.id, so a machine caller here is an FK violation, not a
+// feature. Add an owner_credential_id column first if machine chat is needed.
+@Roles('user', 'admin')
 @Controller('agent')
 export class ChatController {
   constructor(

@@ -1,4 +1,4 @@
-import { ArgumentsHost } from '@nestjs/common';
+import { ArgumentsHost, NotFoundException } from '@nestjs/common';
 import * as Sentry from '@sentry/nestjs';
 import { ExceptionService } from './exception.service';
 import { ErrorCode } from './error-codes';
@@ -25,7 +25,7 @@ describe('GlobalExceptionFilter', () => {
 
   it('writes the envelope with the mapped status for a CLIENT error (no Sentry)', () => {
     const { host, status, json } = hostFor('/users/1');
-    filter.catch(new (require('@nestjs/common').NotFoundException)('nf'), host);
+    filter.catch(new NotFoundException('nf'), host);
     expect(status).toHaveBeenCalledWith(404);
     expect(json).toHaveBeenCalledWith(
       expect.objectContaining({

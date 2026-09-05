@@ -18,16 +18,24 @@ describe('RolesGuard', () => {
   }
 
   it('allows when no roles are required', () => {
-    expect(guardWith(undefined).canActivate(ctx({ role: 'user' }))).toBe(true);
+    expect(
+      guardWith(undefined).canActivate(
+        ctx({ kind: 'user', userId: 'u', role: 'user' }),
+      ),
+    ).toBe(true);
   });
   it('allows when the role matches', () => {
     expect(
-      guardWith(['admin']).canActivate(ctx({ id: 'a', role: 'admin' })),
+      guardWith(['admin']).canActivate(
+        ctx({ kind: 'user', userId: 'a', role: 'admin' }),
+      ),
     ).toBe(true);
   });
   it('denies when the role does not match', () => {
     expect(
-      guardWith(['admin']).canActivate(ctx({ id: 'u', role: 'user' })),
+      guardWith(['admin']).canActivate(
+        ctx({ kind: 'user', userId: 'u', role: 'user' }),
+      ),
     ).toBe(false);
   });
   it('treats an absent user as guest', () => {

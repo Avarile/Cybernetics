@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { PasswordService } from '../auth/password.service';
+import { TokenRevocationModule } from '../auth/token-revocation.module';
 import { UserRepository } from './user.repository';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
@@ -10,6 +11,7 @@ import { UsersService } from './users.service';
  * Users has no dependency on Auth, so no circular import).
  */
 @Module({
+  imports: [TokenRevocationModule],
   controllers: [UsersController],
   providers: [UserRepository, UsersService, PasswordService],
   exports: [UserRepository, UsersService, PasswordService],

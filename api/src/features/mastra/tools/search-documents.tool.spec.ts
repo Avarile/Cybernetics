@@ -5,21 +5,32 @@ import { searchDocumentsExecute } from './search-documents.tool';
 import { DOCUMENTS_COLLECTION } from '../../document-ingest/document-ingest.constants';
 
 describe('searchDocumentsExecute', () => {
-  it('scopes the search to the caller and the documents collection', async () => {
+  // The tool no longer builds the owner filter itself — `documents` is declared
+  // `owner_scoped` and SearchRecordService injects it from the principal. What
+  // this asserts now is that the principal is HANDED OVER, which is what makes
+  // the scoping happen at all.
+  it('targets the documents collection and forwards the caller principal', async () => {
     const search = jest.fn().mockResolvedValue({
       totalHits: 1,
       hits: [{ title: 'a' }],
       facetDistribution: undefined,
     });
+    const principal = {
+      kind: 'user',
+      userId: 'user-1',
+      role: 'user',
+    } as const;
     const res = await searchDocumentsExecute(
       { query: 'invoice', topK: 5 },
       { searchRecords: { search } },
-      { principal: { id: 'user-1' }, conversationId: 'c1', runId: 'r1' },
+      { principal, conversationId: 'c1', runId: 'r1' },
     );
-    const [collection, req] = search.mock.calls[0];
+    const [collection, req, passedPrincipal] = search.mock.calls[0];
     expect(collection).toBe(DOCUMENTS_COLLECTION);
-    expect(req.filters).toEqual({ ownerUserId: 'user-1' });
     expect(req.q).toBe('invoice');
+    expect(passedPrincipal).toEqual(principal);
+    // No hand-rolled owner filter any more; the service owns that decision.
+    expect(req.filters).toBeUndefined();
     expect(res.totalHits).toBe(1);
   });
 
@@ -28,7 +39,7 @@ describe('searchDocumentsExecute', () => {
     const res = await searchDocumentsExecute(
       { query: '', topK: 5 },
       { searchRecords: { search } },
-      { principal: { id: null }, conversationId: null, runId: null },
+      { principal: { kind: 'anonymous' }, conversationId: null, runId: null },
     );
     expect(search).not.toHaveBeenCalled();
     expect(res.totalHits).toBe(0);

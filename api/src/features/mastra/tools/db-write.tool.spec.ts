@@ -2,11 +2,16 @@
 jest.mock('@mastra/core/tools', () => ({ createTool: jest.fn() }));
 
 import { dbWriteExecute } from './db-write.tool';
+import type { ToolRuntime } from '../mastra.types';
 
 describe('dbWriteExecute', () => {
   it('records the intended write as a db_write action (v1 pattern)', async () => {
     const deps = { recordAction: jest.fn(async () => undefined) } as never;
-    const rt = { principal: { id: 'u1' }, runId: 'r1', conversationId: 'c1' };
+    const rt: ToolRuntime = {
+      principal: { kind: 'user', userId: 'u1', role: 'user' },
+      runId: 'r1',
+      conversationId: 'c1',
+    };
     const out = await dbWriteExecute(
       { entity: 'note', operation: 'create', data: { text: 'x' } },
       deps,

@@ -1,3 +1,4 @@
+import { GUEST_PRINCIPAL } from '../../../common/principal';
 import { REQUEST_CTX } from '../mastra.constants';
 import type { ToolRuntime } from '../mastra.types';
 
@@ -12,9 +13,11 @@ import type { ToolRuntime } from '../mastra.types';
 export function readRuntime(context: unknown): ToolRuntime {
   const rc = (context as { requestContext?: { get(k: string): unknown } })
     ?.requestContext;
-  const principal = (rc?.get(
-    REQUEST_CTX.principal,
-  ) as ToolRuntime['principal']) ?? { id: null };
+  // Fail closed: a tool invoked without a request context gets the anonymous
+  // principal, not a privileged one.
+  const principal =
+    (rc?.get(REQUEST_CTX.principal) as ToolRuntime['principal']) ??
+    GUEST_PRINCIPAL;
   return {
     principal,
     runId: (rc?.get(REQUEST_CTX.runId) as string) ?? null,

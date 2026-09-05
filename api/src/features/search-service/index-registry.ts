@@ -9,9 +9,11 @@ import {
 import { ConfigService } from '@nestjs/config';
 import type { Redis } from 'ioredis';
 import type { SearchConfig } from '../../config/configurations/search.config';
+import { withTimeout } from '../../common/with-timeout';
 import { REDIS_CLIENT } from '../../infrastructure/cache/redis.provider';
 import type {
   CollectionRow,
+  CollectionVisibility,
   FieldSpec,
 } from '../../infrastructure/database/schema/search.schema';
 import type { IndexDefinition } from '../../infrastructure/search-engine/search-engine.interface';
@@ -26,6 +28,10 @@ export interface CompiledCollection {
   description: string | null;
   fields: FieldSpec[];
   definition: IndexDefinition;
+  /** Read policy — see `collectionVisibility`. Enforced by `SearchRecordService`. */
+  visibility: CollectionVisibility;
+  /** Document field holding the owning `users.id`; set iff `owner_scoped`. */
+  ownerField: string | null;
 }
 
 interface CacheEntry {
@@ -35,24 +41,6 @@ interface CacheEntry {
 
 /** Ceiling on the subscribe handshake, so a slow Redis cannot delay boot. */
 const SUBSCRIBE_TIMEOUT_MS = 2_000;
-
-/** Reject if `promise` has not settled within `ms`. */
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      promise,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`timed out after ${ms}ms`)),
-          ms,
-        );
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
 
 /**
  * Cache of compiled collections over the `collections` table. A cache miss falls
@@ -87,11 +75,20 @@ export class IndexRegistry implements OnModuleInit, OnApplicationShutdown {
    * Subscribe on a dedicated connection: an ioredis client in subscriber mode
    * rejects ordinary commands, so the shared client cannot be reused here.
    *
-   * Best-effort and non-blocking. `enableOfflineQueue: false` plus a bounded
-   * race matter: ioredis queues commands while disconnected and retries
-   * indefinitely, so a plain `await subscribe()` against an unreachable Redis
-   * would hang startup — and boot must never hard-require Redis. A failure here
-   * leaves the TTL as the only coherence mechanism: degraded, still correct.
+   * Best-effort and non-blocking. The bounded race is what keeps boot safe:
+   * ioredis queues commands while disconnected and retries indefinitely, so a
+   * plain `await subscribe()` against an unreachable Redis would hang startup,
+   * and boot must never hard-require Redis.
+   *
+   * The offline queue is deliberately left enabled. Disabling it rejects the
+   * subscribe outright whenever the socket has not finished connecting — which
+   * is the common case at startup ("Stream isn't writeable"), so invalidation
+   * would silently never be wired up. Queuing lets a normal startup race
+   * resolve itself, and lets a subscription re-establish once Redis returns,
+   * while the timeout below still bounds how long boot waits.
+   *
+   * A failure here leaves the TTL as the only coherence mechanism: degraded,
+   * still correct.
    */
   async onModuleInit(): Promise<void> {
     if (!this.redis) {
@@ -101,7 +98,7 @@ export class IndexRegistry implements OnModuleInit, OnApplicationShutdown {
       return;
     }
     try {
-      const subscriber = this.redis.duplicate({ enableOfflineQueue: false });
+      const subscriber = this.redis.duplicate();
       this.subscriber = subscriber;
       subscriber.on('error', (error: Error) =>
         this.logger.warn(`Registry subscriber error: ${error.message}`),
@@ -189,5 +186,7 @@ function compile(row: CollectionRow): CompiledCollection {
     description: row.description,
     fields: row.fields,
     definition: fieldSpecToIndexDefinition(row.name, row.fields),
+    visibility: row.visibility,
+    ownerField: row.ownerField,
   };
 }

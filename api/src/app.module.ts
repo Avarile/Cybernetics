@@ -8,6 +8,7 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { ZodValidationPipe } from './common/pipes/zod-validation.pipe';
 import { RolesGuard } from './common/guards/roles.guard';
 import { CacheModule } from './infrastructure/cache/cache.module';
+import { RedisThrottlerStorage } from './infrastructure/cache/redis-throttler.storage';
 import { SessionCacheModule } from './infrastructure/cache/session/session-cache.module';
 import { DatabaseModule } from './infrastructure/database/database.module';
 import { ExceptionsModule } from './infrastructure/exceptions';
@@ -38,11 +39,21 @@ import { UsersModule } from './features/users/users.module';
   imports: [
     ObservabilityModule,
     ConfigModule,
+    // Redis-backed storage, not the default in-process Map: with N replicas
+    // the effective limit was N x THROTTLE_LIMIT and it reset on every deploy,
+    // which mattered most on the credential-brute-force endpoints that
+    // deliberately carry tight per-route limits.
     ThrottlerModule.forRootAsync({
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => {
+      imports: [CacheModule],
+      inject: [ConfigService, RedisThrottlerStorage],
+      useFactory: (config: ConfigService, storage: RedisThrottlerStorage) => {
         const auth = config.getOrThrow<AuthConfig>('auth');
-        return [{ ttl: auth.throttleTtl * 1000, limit: auth.throttleLimit }];
+        return {
+          throttlers: [
+            { ttl: auth.throttleTtl * 1000, limit: auth.throttleLimit },
+          ],
+          storage,
+        };
       },
     }),
 

@@ -15,6 +15,7 @@ import type { InitiateUploadDto } from './dto/initiate-upload.dto';
 import type { QueryFilesDto } from './dto/query-files.dto';
 import { FILE_PROCESS_JOB, FILE_PROCESSING_QUEUE } from './file.constants';
 import { FileRepository } from './file.repository';
+import { isAdmin, userIdOrNull } from '../../common/principal';
 import {
   toFileMetadata,
   type FileMetadata,
@@ -103,7 +104,7 @@ export class FileService {
       : randomObjectKey();
 
     const row = await this.repo.create({
-      ownerId: owner.id,
+      ownerId: userIdOrNull(owner),
       bucket: this.storage.bucketName(),
       objectKey,
       originalFilename: input.filename,
@@ -126,6 +127,15 @@ export class FileService {
   /**
    * Step 2 of the presigned upload. Verifies the object landed and is within
    * policy, transitions PENDING → AVAILABLE, and enqueues async processing.
+   */
+  /**
+   * Step 2 of the presigned upload.
+   *
+   * The caller-declared `sha256` is trusted here and verified asynchronously by
+   * `FileProcessingProcessor`, so between this call and that job the row is
+   * AVAILABLE with an unverified checksum. That window is now confined to the
+   * uploader: dedup is scoped to the owner, so a false checksum can only ever
+   * match the caller's own files. Quarantine still catches the mismatch.
    */
   async completeUpload(
     fileId: string,
@@ -169,7 +179,7 @@ export class FileService {
     fileId: string,
     owner: FilePrincipal,
   ): Promise<FileMetadata> {
-    const row = await this.loadOwned(fileId, owner);
+    const row = await this.loadReadable(fileId, owner);
     return toFileMetadata(row);
   }
 
@@ -178,7 +188,7 @@ export class FileService {
     owner: FilePrincipal,
   ): Promise<Paginated<FileMetadata>> {
     const { rows, total } = await this.repo.findByOwner(
-      owner.id,
+      userIdOrNull(owner),
       query.page,
       query.limit,
       { status: query.status, mimeType: query.mimeType },
@@ -202,14 +212,18 @@ export class FileService {
     owner: FilePrincipal,
     opts?: { ttl?: number },
   ): Promise<PresignedTarget> {
-    const row = await this.loadOwned(fileId, owner);
+    const row = await this.loadReadable(fileId, owner);
     if (row.status !== 'AVAILABLE') {
       throw this.errors.create(ErrorCode.FILE_INVALID_STATE, {
         message: `File is not available (status=${row.status})`,
       });
     }
     return this.storage.presignedGetUrl(row.objectKey, {
-      expiresIn: opts?.ttl ?? this.presignExpiry,
+      // Clamped, not trusted. A presigned URL is a bearer token for the object,
+      // so letting the caller pick its lifetime defeats the point of a short
+      // `MINIO_PRESIGN_EXPIRY` — a client could mint a link valid for MinIO's
+      // 7-day maximum.
+      expiresIn: Math.min(opts?.ttl ?? this.presignExpiry, this.presignExpiry),
       downloadFilename: row.originalFilename,
     });
   }
@@ -248,7 +262,7 @@ export class FileService {
     const size = meta.size ?? (await this.storage.statObject(objectKey)).size;
 
     const row = await this.repo.create({
-      ownerId: owner.id,
+      ownerId: userIdOrNull(owner),
       bucket: this.storage.bucketName(),
       objectKey,
       originalFilename: meta.filename,
@@ -263,12 +277,33 @@ export class FileService {
     return toFileMetadata(row);
   }
 
+  /**
+   * Record that document ingestion failed for this file.
+   *
+   * Written into `metadata` rather than a new status: the file itself is intact
+   * and downloadable — only the derived search record is missing — so
+   * QUARANTINED would misdescribe it. Before this, a failed extraction left no
+   * trace anywhere: the row stayed AVAILABLE, the job exhausted its retries and
+   * vanished, and the user saw an uploaded document the agent could never find.
+   */
+  async markIngestFailed(fileId: string, reason: string): Promise<void> {
+    const row = await this.repo.findById(fileId);
+    if (!row) return;
+    await this.repo.markStatus(fileId, row.status, {
+      metadata: {
+        ...row.metadata,
+        ingestFailedAt: new Date().toISOString(),
+        ingestError: reason.slice(0, 500),
+      },
+    });
+  }
+
   /** Streams an available file's bytes to an in-process consumer. */
   async getContentStream(
     fileId: string,
     owner: FilePrincipal,
   ): Promise<Readable> {
-    const row = await this.loadOwned(fileId, owner);
+    const row = await this.loadReadable(fileId, owner);
     if (row.status !== 'AVAILABLE') {
       throw this.errors.create(ErrorCode.FILE_INVALID_STATE, {
         message: `File is not available (status=${row.status})`,
@@ -296,10 +331,42 @@ export class FileService {
     }
   }
 
-  /** Loads a row and asserts the principal owns it (404 otherwise). */
-  private async loadOwned(fileId: string, owner: FilePrincipal) {
+  /**
+   * Loads a row the principal is allowed to READ (404 otherwise).
+   *
+   * Reads are granted to the owner, to internal pipelines, and to admins.
+   * `system` is privileged *explicitly* here rather than by matching a null
+   * `ownerId` — under the old `{ id: string | null }` principal, "system" and
+   * "anonymous guest" were the same value, so an ownership check comparing ids
+   * handed every ownerless file (every mailbox raw `.eml` and attachment) to
+   * whichever of the two arrived.
+   */
+  private async loadReadable(fileId: string, principal: FilePrincipal) {
     const row = await this.repo.findById(fileId);
-    if (!row || row.isDeleted || row.ownerId !== owner.id) {
+    if (!row || row.isDeleted) {
+      throw this.errors.create(ErrorCode.FILE_NOT_FOUND);
+    }
+    if (principal.kind === 'system' || isAdmin(principal)) return row;
+    if (principal.kind !== 'user' || row.ownerId !== principal.userId) {
+      throw this.errors.create(ErrorCode.FILE_NOT_FOUND);
+    }
+    return row;
+  }
+
+  /**
+   * Loads a row the principal is allowed to MUTATE (404 otherwise).
+   *
+   * Stricter than {@link loadReadable}: admins may read another user's file but
+   * may not complete or delete their upload. Only the owner and internal
+   * pipelines can change a file's lifecycle.
+   */
+  private async loadOwned(fileId: string, principal: FilePrincipal) {
+    const row = await this.repo.findById(fileId);
+    if (!row || row.isDeleted) {
+      throw this.errors.create(ErrorCode.FILE_NOT_FOUND);
+    }
+    if (principal.kind === 'system') return row;
+    if (principal.kind !== 'user' || row.ownerId !== principal.userId) {
       throw this.errors.create(ErrorCode.FILE_NOT_FOUND);
     }
     return row;
@@ -317,10 +384,11 @@ export class FileService {
   ) {
     const existing = await this.repo.findAvailableByChecksum(
       sha256.toLowerCase(),
+      userIdOrNull(owner),
     );
     if (!existing) return null;
     return this.repo.create({
-      ownerId: owner.id,
+      ownerId: userIdOrNull(owner),
       bucket: existing.bucket,
       objectKey: existing.objectKey,
       originalFilename: meta.filename,

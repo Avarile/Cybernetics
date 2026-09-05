@@ -14,7 +14,8 @@ import type { Request } from 'express';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { Public } from '../../common/decorators/public.decorator';
 import { LocalAuthGuard } from '../../common/guards/local-auth.guard';
-import type { Principal } from '../../common/principal';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { requireUserId, type Principal } from '../../common/principal';
 import type { UserRow } from '../../infrastructure/database/schema/identity.schema';
 import { AuthService } from './auth.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
@@ -69,25 +70,29 @@ export class AuthController {
   }
 
   @ApiOperation({ summary: 'Revoke all user sessions' })
+  @Roles('user', 'admin')
   @Post('logout-all')
   @HttpCode(204)
   async logoutAll(@CurrentUser() user: Principal) {
-    await this.auth.logoutAll(user.id as string);
+    await this.auth.logoutAll(requireUserId(user));
   }
 
   @ApiOperation({ summary: 'Get current user profile' })
+  @Roles('user', 'admin', 'agent')
   @Get('me')
   me(@CurrentUser() user: Principal) {
     return this.auth.getProfile(user);
   }
 
   @ApiOperation({ summary: 'List active sessions' })
+  @Roles('user', 'admin')
   @Get('sessions')
   sessions(@CurrentUser() user: Principal) {
-    return this.auth.listSessions(user.id as string);
+    return this.auth.listSessions(requireUserId(user));
   }
 
   @ApiOperation({ summary: 'Change account password' })
+  @Roles('user', 'admin')
   @Patch('password')
   @HttpCode(204)
   async changePassword(
@@ -95,7 +100,7 @@ export class AuthController {
     @Body() body: ChangePasswordDto,
   ) {
     await this.auth.changePassword(
-      user.id as string,
+      requireUserId(user),
       body.currentPassword,
       body.newPassword,
     );

@@ -23,6 +23,7 @@ describe('AuthService', () => {
   let sessions: any;
   let tokens: any;
   let passwords: any;
+  let revocation: any;
   let service: AuthService;
 
   beforeEach(() => {
@@ -54,10 +55,18 @@ describe('AuthService', () => {
     passwords = {
       verify: jest.fn(async () => true),
       hash: jest.fn(async () => 'NEWHASH'),
+      verifyDecoy: jest.fn(async () => undefined),
+    };
+    revocation = {
+      revokeSession: jest.fn(async () => undefined),
+      claimForRotation: jest.fn(async () => true),
+      revokeFamily: jest.fn(async () => undefined),
+      revokeAllForUser: jest.fn(async () => undefined),
     };
     service = new AuthService(
       users,
       sessions,
+      revocation,
       tokens,
       passwords,
       new ExceptionService(),
@@ -98,10 +107,18 @@ describe('AuthService', () => {
   describe('getProfile', () => {
     it('enriches the principal with email and display name from the DB', async () => {
       users.findActiveById.mockResolvedValueOnce(
-        makeUser({ id: 'u1', role: 'admin', email: 'jane@acme.com', displayName: 'Jane Doe' }),
+        makeUser({
+          id: 'u1',
+          role: 'admin',
+          email: 'jane@acme.com',
+          displayName: 'Jane Doe',
+        }),
       );
-      await expect(service.getProfile({ id: 'u1', role: 'admin' })).resolves.toEqual({
+      await expect(
+        service.getProfile({ kind: 'user', userId: 'u1', role: 'admin' }),
+      ).resolves.toEqual({
         id: 'u1',
+        kind: 'user',
         role: 'admin',
         email: 'jane@acme.com',
         displayName: 'Jane Doe',
@@ -110,15 +127,23 @@ describe('AuthService', () => {
 
     it('returns the bare principal for a non-user caller (no users row)', async () => {
       users.findActiveById.mockResolvedValueOnce(null);
-      await expect(service.getProfile({ id: 'svc-1', role: 'agent' })).resolves.toEqual({
+      await expect(
+        service.getProfile({
+          kind: 'service',
+          credentialId: 'svc-1',
+          role: 'agent',
+        }),
+      ).resolves.toEqual({
         id: 'svc-1',
+        kind: 'service',
         role: 'agent',
       });
     });
 
     it('returns the bare principal for the system caller (id === null)', async () => {
-      await expect(service.getProfile({ id: null, role: 'agent' })).resolves.toEqual({
+      await expect(service.getProfile({ kind: 'system' })).resolves.toEqual({
         id: null,
+        kind: 'system',
         role: 'agent',
       });
       expect(users.findActiveById).not.toHaveBeenCalled();
@@ -154,12 +179,12 @@ describe('AuthService', () => {
         expiresAt: new Date(Date.now() + 10000),
       });
       const pair = await service.refresh('refresh-raw', {});
-      expect(sessions.revokeById).toHaveBeenCalledWith('s1');
+      expect(revocation.claimForRotation).toHaveBeenCalledWith('s1');
       expect(sessions.create).toHaveBeenCalledWith(
         expect.objectContaining({ familyId: 'fam-1' }),
       );
       expect(pair.accessToken).toBe('access.jwt');
-      expect(sessions.revokeFamily).not.toHaveBeenCalled();
+      expect(revocation.revokeFamily).not.toHaveBeenCalled();
     });
 
     it('detects reuse: revokes the whole family and throws 401', async () => {
@@ -173,7 +198,7 @@ describe('AuthService', () => {
       await expect(service.refresh('refresh-raw', {})).rejects.toMatchObject({
         code: ErrorCode.AUTH_TOKEN_REUSE,
       });
-      expect(sessions.revokeFamily).toHaveBeenCalledWith('fam-1');
+      expect(revocation.revokeFamily).toHaveBeenCalledWith('fam-1');
     });
 
     it('throws 401 for an unknown refresh token', async () => {
@@ -190,7 +215,7 @@ describe('AuthService', () => {
       expect(users.update).toHaveBeenCalledWith('u1', {
         passwordHash: 'NEWHASH',
       });
-      expect(sessions.revokeAllForUser).toHaveBeenCalledWith('u1');
+      expect(revocation.revokeAllForUser).toHaveBeenCalledWith('u1');
     });
     it('throws 401 when the current password is wrong', async () => {
       passwords.verify.mockResolvedValueOnce(false);
@@ -203,6 +228,55 @@ describe('AuthService', () => {
         code: ErrorCode.AUTH_INVALID_CREDENTIALS,
       });
       await expect(result).rejects.toThrow('Current password is incorrect');
+    });
+  });
+  describe('credential-enumeration resistance', () => {
+    // Argon2id is deliberately expensive. Skipping it for a missing account
+    // made "unknown email" answer an order of magnitude faster than "wrong
+    // password" — measurable over the network, and a user-enumeration oracle.
+    it('spends the same hashing work when the account does not exist', async () => {
+      users.findByEmail.mockResolvedValueOnce(null);
+      await expect(
+        service.validateUser('nobody@x.co', 'pw'),
+      ).rejects.toBeDefined();
+      expect(passwords.verifyDecoy).toHaveBeenCalledWith('pw');
+    });
+
+    it('does not call the decoy when the account exists', async () => {
+      users.findByEmail.mockResolvedValueOnce({ id: 'u1', passwordHash: 'H' });
+      await service.validateUser('someone@x.co', 'pw');
+      expect(passwords.verifyDecoy).not.toHaveBeenCalled();
+    });
+
+    it('returns the same error for both failure modes', async () => {
+      users.findByEmail.mockResolvedValueOnce(null);
+      const unknown = await service
+        .validateUser('nobody@x.co', 'pw')
+        .catch((e: { code: string }) => e.code);
+      users.findByEmail.mockResolvedValueOnce({ id: 'u1', passwordHash: 'H' });
+      passwords.verify.mockResolvedValueOnce(false);
+      const wrongPw = await service
+        .validateUser('someone@x.co', 'bad')
+        .catch((e: { code: string }) => e.code);
+      expect(unknown).toBe(wrongPw);
+    });
+  });
+
+  describe('refresh rotation atomicity', () => {
+    // Both halves of a concurrent pair used to pass the `revokedAt` check and
+    // both mint a token pair, splitting the family into two live lineages —
+    // exactly the state reuse detection exists to catch.
+    it('refuses when another request already claimed the rotation', async () => {
+      revocation.claimForRotation.mockResolvedValueOnce(false);
+      await expect(service.refresh('tok', {})).rejects.toMatchObject({
+        code: ErrorCode.AUTH_TOKEN_INVALID,
+      });
+    });
+
+    it('does not issue a second pair for a lost race', async () => {
+      revocation.claimForRotation.mockResolvedValueOnce(false);
+      await service.refresh('tok', {}).catch(() => undefined);
+      expect(sessions.create).not.toHaveBeenCalled();
     });
   });
 });

@@ -25,6 +25,21 @@ export const envSchema = z
     DATABASE_PASSWORD: z.string().default('postgres'),
     DATABASE_NAME: z.string().min(1).default('cybernetics'),
     DATABASE_SSL: booleanFromEnv.default(false),
+    /** Verify the DB server's TLS certificate. Disable only for self-signed dev servers. */
+    DATABASE_SSL_REJECT_UNAUTHORIZED: booleanFromEnv.default(true),
+    /** pg pool size for the WHOLE process: HTTP handlers + queue workers + Mastra's store. */
+    DATABASE_POOL_MAX: z.coerce.number().int().positive().default(20),
+    DATABASE_POOL_IDLE_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(30_000),
+    /** Fail rather than wait forever when the pool is saturated. */
+    DATABASE_POOL_CONNECTION_TIMEOUT_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(5_000),
     DATABASE_LOGGING: booleanFromEnv.default(false),
 
     // Redis (shared by cache, session cache, and BullMQ)
@@ -37,6 +52,18 @@ export const envSchema = z
     SENTRY_DSN: z.string().default(''),
     SENTRY_TRACES_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(0.1),
     SENTRY_PROFILES_SAMPLE_RATE: z.coerce.number().min(0).max(1).default(0.1),
+
+    /**
+     * Heap ceiling past which the admin health report calls the process
+     * degraded. Reported only — it does not fail the liveness or readiness
+     * probes, so crossing it cannot get a pod restarted or pulled from the load
+     * balancer. Container memory limits are the right tool for that.
+     */
+    HEALTH_HEAP_THRESHOLD_BYTES: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(1_073_741_824),
 
     // Logging
     LOG_LEVEL: z
@@ -55,8 +82,19 @@ export const envSchema = z
 
     // File policy
     FILE_MAX_SIZE: z.coerce.number().int().positive().default(52_428_800),
+    /**
+     * Comma-separated upload allowlist. Empty means ALLOW ANY, which is fine
+     * for development but is rejected in production below — an unrestricted
+     * upload surface feeds bytes straight to the document parsers.
+     */
     FILE_ALLOWED_MIME: z.string().default(''),
     FILE_PENDING_TTL: z.coerce.number().int().positive().default(3600),
+    /**
+     * Retention for soft-deleted files. Mirrors SEARCH_PURGE_AFTER_DAYS — before
+     * this existed the hourly sweep hard-deleted soft-deleted rows and their
+     * objects on its next pass, so a delete was irrecoverable within the hour.
+     */
+    FILE_PURGE_AFTER_DAYS: z.coerce.number().int().positive().default(30),
 
     // MeiliSearch / search engine
     MEILISEARCH_HOST: z.string().min(1).default('localhost'),
@@ -92,6 +130,16 @@ export const envSchema = z
       .int()
       .positive()
       .default(300_000),
+    /**
+     * Ceiling on the sweep's per-record backoff. The wait before a retry doubles
+     * with each failed attempt, so a permanently broken record settles at this
+     * interval instead of retrying every few minutes forever.
+     */
+    SEARCH_RECONCILE_MAX_BACKOFF_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(3_600_000),
     /** Max records re-enqueued per sweep. */
     SEARCH_RECONCILE_BATCH: z.coerce.number().int().positive().default(500),
     /** BullMQ worker concurrency for the search-indexing queue. */
@@ -128,6 +176,8 @@ export const envSchema = z
       .positive()
       .default(86_400_000),
     MASTRA_SCHEDULES_ENABLED: booleanFromEnv.default(false),
+    /** Ceiling on one agent turn. Without it a hung model call holds a request open. */
+    MASTRA_RUN_TIMEOUT_MS: z.coerce.number().int().positive().default(120_000),
 
     // Auth / JWT
     JWT_ACCESS_SECRET: z
@@ -138,6 +188,15 @@ export const envSchema = z
     JWT_REFRESH_TTL: z.coerce.number().int().positive().default(604_800),
     AGENT_TOKEN_TTL: z.coerce.number().int().positive().default(900),
     JWT_ISSUER: z.string().min(1).default('cybernetics'),
+    /** Verified on every token, so a token minted for another service is refused. */
+    JWT_AUDIENCE: z.string().min(1).default('cybernetics-api'),
+
+    /**
+     * Max JSON request body. Express defaults to 100kb, which silently
+     * contradicted `persistRecordsSchema`'s 1000-record batches — any realistic
+     * batch was rejected before validation ever ran.
+     */
+    REQUEST_BODY_LIMIT: z.string().min(1).default('2mb'),
 
     // Security
     THROTTLE_TTL: z.coerce.number().int().positive().default(60),
@@ -153,6 +212,8 @@ export const envSchema = z
       .string()
       .min(1)
       .default('dev-insecure-reset-pepper-change-me'),
+    PASSWORD_RESET_CODE_TTL: z.coerce.number().int().positive().default(900),
+    PASSWORD_RESET_MAX_ATTEMPTS: z.coerce.number().int().positive().default(5),
 
     // System module (secret encryption at rest)
     SYSTEM_ENCRYPTION_KEY: z
@@ -163,6 +224,18 @@ export const envSchema = z
       .int()
       .positive()
       .default(1),
+    /** How long a system setting stays cached. Invalidated on write regardless. */
+    SYSTEM_SETTINGS_CACHE_TTL_MS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(300_000),
+    /**
+     * Retired encryption keys, `{"1":"<base64>"}`. Lets a rotation decrypt what
+     * the previous key wrote — without it, rotating SYSTEM_ENCRYPTION_KEY makes
+     * every stored secret permanently unreadable.
+     */
+    SYSTEM_ENCRYPTION_KEYS_PREVIOUS: z.string().default(''),
 
     // OpenAPI / API reference docs (Scalar)
     OPENAPI_ENABLED: booleanFromEnv.default(true),
@@ -180,6 +253,18 @@ export const envSchema = z
         path: ['MINIO_ROOT_PASSWORD'],
         message:
           'Default MinIO credentials (minioadmin) are not allowed when NODE_ENV=production; set MINIO_ROOT_USER and MINIO_ROOT_PASSWORD.',
+      });
+    }
+
+    if (
+      env.NODE_ENV === 'production' &&
+      env.FILE_ALLOWED_MIME.trim().length === 0
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['FILE_ALLOWED_MIME'],
+        message:
+          'FILE_ALLOWED_MIME must list the accepted upload types when NODE_ENV=production (empty allows any type).',
       });
     }
 
@@ -232,6 +317,17 @@ export const envSchema = z
       });
     }
 
+    // `CORS_ORIGINS` empty means "reflect any origin" in main.ts. Tolerable in
+    // development; in production it should be a deliberate list.
+    if (env.NODE_ENV === 'production' && env.CORS_ORIGINS.trim().length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['CORS_ORIGINS'],
+        message:
+          'CORS_ORIGINS must list the allowed origins when NODE_ENV=production (empty reflects any origin).',
+      });
+    }
+
     if (env.NODE_ENV === 'production' && env.AI_GATEWAY_API_KEY.length === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -274,11 +370,34 @@ export const envSchema = z
 export type Env = z.infer<typeof envSchema>;
 
 /**
+ * Memoised on the exact object identity last parsed.
+ *
+ * Every `registerAs` factory calls `validateEnv(process.env)`, so booting ran
+ * the whole schema — including `superRefine` — twelve times over the same
+ * object. `process.env` is a stable reference, so keying on identity collapses
+ * that to one parse while leaving explicit calls with a different object (the
+ * tests, the seed runner) fully re-validated.
+ */
+let cache: { source: Record<string, unknown>; parsed: Env } | null = null;
+
+/**
  * Passed to `ConfigModule.forRoot({ validate })`. Fails fast at boot with a
  * readable list of every invalid variable. Also used by the namespaced config
  * factories and the standalone seed runner so all coercion lives here.
  */
 export function validateEnv(config: Record<string, unknown>): Env {
+  if (cache && cache.source === config) return cache.parsed;
+  const result = parseEnv(config);
+  cache = { source: config, parsed: result };
+  return result;
+}
+
+/** Test seam: drop the memo so a suite can re-parse the same object. */
+export function resetEnvCache(): void {
+  cache = null;
+}
+
+function parseEnv(config: Record<string, unknown>): Env {
   const parsed = envSchema.safeParse(config);
   if (!parsed.success) {
     const issues = parsed.error.issues

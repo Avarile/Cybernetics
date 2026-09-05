@@ -181,9 +181,11 @@ describe('SearchRecordRepository delete paths', () => {
 });
 
 describe('SearchRecordRepository sweep queries', () => {
+  const BACKOFF = { staleMs: 300_000, maxBackoffMs: 3_600_000 };
+
   it('orders unsynced records oldest-attempt-first, NULLs before all', async () => {
     const { repo, captured } = make();
-    await repo.findUnsynced(new Date('2026-01-01T00:00:00Z'), 250);
+    await repo.findUnsynced(250, BACKOFF);
     expect(captured.limit).toBe(250);
     const order = sqlText(captured.orderBy);
     expect(order).toContain('index_attempted_at');
@@ -192,12 +194,23 @@ describe('SearchRecordRepository sweep queries', () => {
 
   it('matches never-attempted rows as well as stale ones', async () => {
     const { repo, captured } = make();
-    await repo.findUnsynced(new Date(), 10);
+    await repo.findUnsynced(10, BACKOFF);
     const where = sqlText(captured.where);
     // Without the IS NULL branch, a row whose handoff was never stamped can
     // never satisfy `index_attempted_at < cutoff` and would be swept never.
     expect(where).toContain('is null');
     expect(where).toContain('index_state');
+  });
+
+  // A record that can never succeed must not burn a retry every few minutes
+  // forever — the wait doubles per attempt, capped, and it is never abandoned.
+  it('backs off exponentially on the attempt count, capped', async () => {
+    const { repo, captured } = make();
+    await repo.findUnsynced(10, BACKOFF);
+    const where = sqlText(captured.where);
+    expect(where).toContain('power');
+    expect(where).toContain('index_attempts');
+    expect(where).toContain('least');
   });
 
   it('purge bounds the delete and returns the reclaimed count', async () => {

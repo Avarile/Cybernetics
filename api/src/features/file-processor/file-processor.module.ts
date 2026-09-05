@@ -1,4 +1,5 @@
 import { BullModule } from '@nestjs/bullmq';
+import { QueueModule } from '../../infrastructure/queue/queue.module';
 import { Module } from '@nestjs/common';
 import { INGEST_DOCUMENT_QUEUE } from '../document-ingest/document-ingest.constants';
 import { FILE_PROCESSING_QUEUE } from './file.constants';
@@ -21,6 +22,7 @@ import { FileReconciliationScheduler } from './schedulers/file-reconciliation.sc
  */
 @Module({
   imports: [
+    QueueModule,
     BullModule.registerQueue({ name: FILE_PROCESSING_QUEUE }),
     BullModule.registerQueue({ name: INGEST_DOCUMENT_QUEUE }),
   ],

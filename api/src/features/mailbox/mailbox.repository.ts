@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, count, desc, eq, gte } from 'drizzle-orm';
+import { and, count, desc, eq, gte, sql } from 'drizzle-orm';
 import {
   DRIZZLE,
   type DrizzleDB,
@@ -99,7 +99,12 @@ export class MailboxRepository extends BaseRepository<typeof emailMessages> {
     const attachments = await this.db
       .select()
       .from(emailAttachments)
-      .where(eq(emailAttachments.emailId, id));
+      .where(
+        and(
+          eq(emailAttachments.emailId, id),
+          eq(emailAttachments.isDeleted, false),
+        ),
+      );
     return { message, attachments };
   }
 
@@ -169,23 +174,26 @@ export class MailboxRepository extends BaseRepository<typeof emailMessages> {
     return rows[0] ?? null;
   }
 
+  /**
+   * Insert-or-update the sync cursor in one statement.
+   *
+   * Read-then-write raced itself: two concurrent syncs for the same
+   * `(accountId, mailbox)` both saw "no row" and both inserted, violating
+   * `email_sync_state_account_mailbox_idx` and failing the sync with a 500.
+   */
   async upsertSyncState(
     accountId: string,
     mailbox: string,
     patch: Partial<NewEmailSyncStateRow>,
   ): Promise<EmailSyncStateRow> {
-    const existing = await this.getSyncState(accountId, mailbox);
-    if (existing) {
-      const [row] = await this.db
-        .update(emailSyncState)
-        .set(patch)
-        .where(eq(emailSyncState.id, existing.id))
-        .returning();
-      return row;
-    }
     const [row] = await this.db
       .insert(emailSyncState)
       .values({ accountId, mailbox, ...patch })
+      .onConflictDoUpdate({
+        target: [emailSyncState.accountId, emailSyncState.mailbox],
+        targetWhere: sql`${emailSyncState.isDeleted} = false`,
+        set: patch,
+      })
       .returning();
     return row;
   }

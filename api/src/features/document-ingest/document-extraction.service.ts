@@ -18,7 +18,7 @@ import {
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const pdfParse = require('pdf-parse/lib/pdf-parse.js') as (
   buffer: Buffer,
-) => Promise<{ text: string }>;
+) => Promise<{ text: string; info?: { Title?: unknown } }>;
 
 export interface ExtractedDocument {
   title?: string;
@@ -44,7 +44,12 @@ export class DocumentExtractionService {
     switch (mimeType) {
       case PDF_MIME: {
         const parsed = await pdfParse(buffer);
-        return { text: parsed.text.trim() };
+        return {
+          text: parsed.text.trim(),
+          // PDF metadata carries a title often enough to be worth reading; the
+          // caller falls back to the filename when it is absent or blank.
+          title: cleanTitle(parsed.info?.Title),
+        };
       }
       case DOCX_MIME: {
         const { value } = await mammoth.extractRawText({ buffer });
@@ -56,6 +61,13 @@ export class DocumentExtractionService {
         return { text: buffer.toString('utf8').trim() };
     }
   }
+}
+
+/** A metadata title is only useful if it is non-empty after trimming. */
+function cleanTitle(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const trimmed = raw.replace(/\s+/g, ' ').trim();
+  return trimmed.length > 0 ? trimmed.slice(0, 500) : undefined;
 }
 
 export async function streamToBuffer(src: Readable): Promise<Buffer> {

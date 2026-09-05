@@ -3,6 +3,7 @@ import { CacheModule as NestCacheModule } from '@nestjs/cache-manager';
 import { Global, Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { RedisConfig } from '../../config/configurations/redis.config';
+import { RedisThrottlerStorage } from './redis-throttler.storage';
 import {
   REDIS_CLIENT,
   RedisClientLifecycle,
@@ -32,7 +33,7 @@ import {
       },
     }),
   ],
-  providers: [redisClientProvider, RedisClientLifecycle],
-  exports: [REDIS_CLIENT, NestCacheModule],
+  providers: [redisClientProvider, RedisClientLifecycle, RedisThrottlerStorage],
+  exports: [REDIS_CLIENT, RedisThrottlerStorage, NestCacheModule],
 })
 export class CacheModule {}

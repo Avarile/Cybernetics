@@ -19,6 +19,15 @@ type TableWithId = PgTable & { id: PgColumn };
  * Drizzle's query types are heavily inferred; the internal casts below are the
  * accepted cost of a generic repository. Direct `db` usage in a feature
  * repository remains fully type-safe.
+ *
+ * Deliberately NO `findAll()`. It was an unbounded, soft-delete-blind
+ * `SELECT *` inherited by ten repositories — one autocomplete away from
+ * selecting every `search_records` row (full JSONB documents) or every
+ * `email_messages` row (full bodies). Paginated, filtered listings belong on
+ * the feature repository that knows what a sensible page looks like.
+ *
+ * `findById` likewise ignores `isDeleted`, which is why subclasses define their
+ * own `findLiveById`. Use those for anything user-facing.
  */
 export abstract class BaseRepository<TTable extends TableWithId> {
   constructor(
@@ -28,11 +37,6 @@ export abstract class BaseRepository<TTable extends TableWithId> {
 
   protected get id(): PgColumn {
     return this.table.id;
-  }
-
-  async findAll(): Promise<InferSelectModel<TTable>[]> {
-    const rows = await this.db.select().from(this.table as PgTable);
-    return rows as InferSelectModel<TTable>[];
   }
 
   async findById(

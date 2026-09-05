@@ -35,6 +35,15 @@ export class MailboxIngestService {
     this.cfg = config.getOrThrow<MailboxConfig>('mailbox');
   }
 
+  /**
+   * Pull one batch of new messages for `(accountId, mailbox)`.
+   *
+   * The whole batch runs inside ONE IMAP session. This used to open a fresh
+   * connection — TCP, TLS, LOGIN, LOGOUT — for the mailbox probe, for the UID
+   * listing, and then once per message, so a single poll could open
+   * `MAILBOX_BATCH_CAP` + 2 connections (202 by default) every five minutes.
+   * Most providers rate-limit or lock an account long before that.
+   */
   async sync(
     accountId: string,
     mailbox: string,
@@ -48,42 +57,52 @@ export class MailboxIngestService {
     let lastSeenUid = 0;
     try {
       const state = await this.repo.getSyncState(accountId, mailbox);
-      const server = await this.inbox.mailboxState(mailbox);
-      const uidValidityChanged =
-        state?.uidValidity != null && state.uidValidity !== server.uidValidity;
-      lastSeenUid = uidValidityChanged ? 0 : (state?.lastSeenUid ?? 0);
 
-      const uids = await this.inbox.listUidsSince(lastSeenUid, {
-        mailbox,
-        limit: this.cfg.batchCap,
-      });
+      const { processed, batchWasFull, cursor, uidValidity } =
+        await this.inbox.withSession(accountId, mailbox, async (session) => {
+          const server = await session.state();
+          // A changed UIDVALIDITY invalidates every stored UID for this mailbox,
+          // so the cursor restarts rather than skipping the whole history.
+          const uidValidityChanged =
+            state?.uidValidity != null &&
+            state.uidValidity !== server.uidValidity;
+          let cursor = uidValidityChanged ? 0 : (state?.lastSeenUid ?? 0);
 
-      let processed = 0;
-      for (const uid of uids) {
-        const already = await this.repo.findByUid(
-          accountId,
-          mailbox,
-          server.uidValidity,
-          uid,
-        );
-        if (!already) {
-          const msg = await this.inbox.fetchForIngest(uid, mailbox);
-          if (msg) {
-            await this.persist(accountId, mailbox, server.uidValidity, msg);
-            processed++;
+          const uids = await session.listUidsSince(cursor, this.cfg.batchCap);
+          let processed = 0;
+          for (const uid of uids) {
+            const already = await this.repo.findByUid(
+              accountId,
+              mailbox,
+              server.uidValidity,
+              uid,
+            );
+            if (!already) {
+              const msg = await session.fetchForIngest(uid);
+              if (msg) {
+                await this.persist(accountId, mailbox, server.uidValidity, msg);
+                processed++;
+              }
+            }
+            cursor = uid;
           }
-        }
-        lastSeenUid = uid;
-      }
+          return {
+            processed,
+            batchWasFull: uids.length >= this.cfg.batchCap,
+            cursor,
+            uidValidity: server.uidValidity,
+          };
+        });
 
+      lastSeenUid = cursor;
       await this.repo.upsertSyncState(accountId, mailbox, {
-        uidValidity: server.uidValidity,
+        uidValidity,
         lastSeenUid,
         lastStatus: 'ok',
         lastSyncFinishedAt: new Date(),
         lastError: null,
       });
-      return { processed, batchWasFull: uids.length >= this.cfg.batchCap };
+      return { processed, batchWasFull };
     } catch (error) {
       await this.repo.upsertSyncState(accountId, mailbox, {
         lastSeenUid,
@@ -139,7 +158,8 @@ export class MailboxIngestService {
       const raw = await this.files.putFromStream(
         msg.raw,
         {
-          filename: `${msg.uid}.eml`,
+          // Namespaced: `${uid}.eml` alone collides across mailboxes and accounts.
+          filename: `${accountId}-${mailbox}-${msg.uid}.eml`,
           mimeType: 'message/rfc822',
           size: msg.raw.length,
           allowAnyMime: true,
@@ -180,46 +200,84 @@ export class MailboxIngestService {
     }
 
     const references = normalizeReferences(msg.references);
-    const row = await this.repo.insertMessageWithAttachments(
-      {
-        accountId,
-        mailbox,
-        uid: msg.uid,
-        uidValidity,
-        messageId: msg.messageId,
-        inReplyTo: msg.inReplyTo,
-        references,
-        threadId: computeThreadId(
+    // Track what we uploaded so a failed insert does not leak it. The bytes go
+    // to MinIO before the row exists (the attachment rows need the message id),
+    // so without this a failed transaction left `files` rows that nothing
+    // referenced and that the file sweep never collects — they are AVAILABLE,
+    // not soft-deleted.
+    const uploadedFileIds = [
+      ...(rawFileId ? [rawFileId] : []),
+      ...attachmentRows.map((a) => a.fileId),
+    ];
+    let row: Awaited<
+      ReturnType<MailboxRepository['insertMessageWithAttachments']>
+    >;
+    try {
+      row = await this.repo.insertMessageWithAttachments(
+        {
+          accountId,
+          mailbox,
+          uid: msg.uid,
+          uidValidity,
+          messageId: msg.messageId,
+          inReplyTo: msg.inReplyTo,
           references,
-          msg.inReplyTo,
-          msg.messageId,
-          `${accountId}:${mailbox}:${uidValidity}:${msg.uid}`,
+          threadId: computeThreadId(
+            references,
+            msg.inReplyTo,
+            msg.messageId,
+            `${accountId}:${mailbox}:${uidValidity}:${msg.uid}`,
+          ),
+          fromAddress: msg.from.address,
+          fromName: msg.from.name,
+          toAddresses: msg.to.map((a) => ({
+            address: a.address,
+            name: a.name,
+          })),
+          ccAddresses: msg.cc.map((a) => ({
+            address: a.address,
+            name: a.name,
+          })),
+          subject: msg.subject,
+          sentAt: msg.sentAt,
+          // The server's INTERNALDATE, not the sender's `Date:` header. This
+          // column is the inbox ordering AND the reconcile sweep's window, so a
+          // forged or merely wrong `Date:` used to bury a message and could put
+          // it outside the lookback entirely.
+          receivedAt: msg.receivedAt,
+          snippet: makeSnippet(msg.text),
+          bodyText: msg.text,
+          bodyHtml: msg.html,
+          sizeBytes: msg.sizeBytes,
+          seen: msg.seen,
+          hasAttachments: attachmentRows.length > 0,
+          rawFileId,
+        },
+        attachmentRows,
+      );
+    } catch (error) {
+      await Promise.all(
+        uploadedFileIds.map((id) =>
+          this.files.softDelete(id, SYSTEM_PRINCIPAL).catch(() => undefined),
         ),
-        fromAddress: msg.from.address,
-        fromName: msg.from.name,
-        toAddresses: msg.to.map((a) => ({ address: a.address, name: a.name })),
-        ccAddresses: msg.cc.map((a) => ({ address: a.address, name: a.name })),
-        subject: msg.subject,
-        sentAt: msg.sentAt,
-        receivedAt: msg.sentAt ?? new Date(),
-        snippet: makeSnippet(msg.text),
-        bodyText: msg.text,
-        bodyHtml: msg.html,
-        sizeBytes: msg.sizeBytes,
-        seen: msg.seen,
-        hasAttachments: attachmentRows.length > 0,
-        rawFileId,
-      },
-      attachmentRows,
-    );
+      );
+      throw error;
+    }
 
     try {
       await this.search.persist(INBOUND_EMAIL_COLLECTION, [
         { externalId: row.id, document: toSearchDocument(row) },
       ]);
     } catch (error) {
-      this.logger.warn(
-        `Failed to index message ${row.id} for search: ${error instanceof Error ? error.message : String(error)}`,
+      // Loud, and deliberately so. `persist` throwing means NO search record was
+      // written — a validation failure writes nothing at all — and the mailbox
+      // reconcile sweep only revisits messages inside its 7-day lookback. Past
+      // that window this message is invisible to search with nothing left to
+      // re-drive it, so this line is the only trace.
+      this.logger.error(
+        `Message ${row.id} persisted but NOT indexed; it will be retried only ` +
+          `while it stays inside the ${RECONCILE_LOOKBACK_MS / 86_400_000}-day ` +
+          `reconcile window: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

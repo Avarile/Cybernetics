@@ -560,7 +560,71 @@ Postgres + Redis + Meilisearch. Two were in this change; one was pre-existing.
 The general lesson is worth keeping: every one of these is a failure of a *mocked* assumption
 about an external system, so no amount of unit testing would have surfaced them.
 
-### 7.3 Deferred, deliberately
+### 7.3 Follow-up: the keyless-index failure loop (2026-09-05)
+
+After the change was deployed, the sweep began reporting six records as failed every
+~6 minutes:
+
+```
+Meili task 1106 failed: The primary key inference failed as the engine found
+2 fields ending with `id` in their names: 'externalId' and 'id'.
+```
+
+The sweep was behaving correctly — it had found genuinely broken records. Two further
+defects were behind them, one of them pre-existing and never previously exercised.
+
+1. **No document write ever stated the primary key.** `addOrReplace` called
+   `addDocuments(docs)` with no options, leaving the engine to *infer* which field
+   identifies a document. `toMeiliDocument` emits both `id` and `externalId`, so inference
+   is ambiguous and the task fails — identically on every retry, forever.
+
+2. **`ensureIndex` could not repair a keyless index.** It sets the key only through
+   `createIndex(uid, { primaryKey })`; on an existing index that fails with
+   `index_already_exists` and is swallowed, and `updateSettings` does not cover the primary
+   key. Once an index existed without a key, no code path could add one.
+
+Combined, an index auto-created by a document write (which is what happened during the
+earlier pre-fix e2e runs) was permanently unusable. **This was never test-only**: every
+production collection sets `externalId` — `documents` (`externalId: fileId`) and
+`inbound_email` (`externalId: row.id`) — so any wiped Meili volume or deleted index would
+have produced the same permanent loop.
+
+**Fixes.** Every write now passes `RECORD_PRIMARY_KEY` (`search.constants.ts`, the single
+source of truth also used by `fieldSpecToIndexDefinition`). Meili sets the key on an index
+that lacks one, so this both prevents the failure and *self-heals* an already-broken index
+on the next write. `ensureIndex` additionally repairs a missing or mismatched key via
+`updateIndex`, best-effort, so boot convergence fixes it even with no writes flowing.
+
+**A consequence worth stating.** Supplying the primary key means a write against a missing
+index now *succeeds* and auto-creates the index with **default settings**, where it used to
+fail loudly. That is the silent corruption §4.5 set out to prevent, so the guard was
+strengthened: `indexExists` became `needsEnsure(def)`, which compares the index's
+attribute configuration against the definition rather than checking mere existence. It
+costs the same single read and detects both "missing" and "reset to defaults". The e2e
+suite caught this immediately — the vanished-index test began failing with "Attribute
+`status` is not filterable" once writes stopped failing.
+
+**Retry backoff.** A record that can never succeed was re-driven every ~6 minutes forever,
+logging an ERROR each time. `findUnsynced` now doubles the wait per attempt
+(`staleMs × 2^attempts`, capped by `SEARCH_RECONCILE_MAX_BACKOFF_MS`, default 1 h). It
+never gives up, it just stops burning retries and flooding the log.
+
+**Also fixed while here:** `IndexRegistry` created its subscriber with
+`enableOfflineQueue: false`, which rejects `subscribe()` whenever the socket has not
+finished connecting — the common case at startup ("Stream isn't writeable"). Registry
+invalidation would therefore almost never have been wired up, silently degrading to the
+TTL. The offline queue is enabled again; the 2 s timeout still bounds boot.
+
+**Test hygiene.** `search.e2e-spec.ts` created a collection per run and never removed it —
+that is how eight orphaned collections accumulated. It now deletes its collection in
+`afterAll`. The reload test also left a destructive rebuild in flight, racing every test
+after it; it now waits for completion, keyed on `indexedAt` changing (hit count is useless
+as a signal — the index already holds those documents before the rebuild starts).
+
+**Cleanup.** The eight leftover `articles_*` / `bad_*` collections were removed through the
+service's own delete path. Sync status afterwards: `pending 0, indexed 40, failed 0`.
+
+### 7.4 Deferred, deliberately
 
 - **Mailbox body duplication** (§4.9) is untouched — it is a storage/product trade-off, not
   a defect, and needs a call on expected mail volume. Open decision #3 stands.
@@ -572,14 +636,16 @@ about an external system, so no amount of unit testing would have surfaced them.
   reload remains a destructive rebuild. Making it non-destructive (index to a new uid and
   swap) is a larger change and was not in scope.
 
-### 7.4 Verification
+### 7.5 Verification
 
 - `pnpm typecheck`, `pnpm build`: clean.
-- Unit: **529 tests / 89 suites pass** (was 509/88 before this change).
+- Unit: **544 tests / 89 suites pass** (was 509/88 before this change).
 - E2E against live Postgres + Redis + Meilisearch, run serially:
-  `search.e2e` (17), `search-engine.e2e`, `mailbox-ingest.e2e` — **20 tests, all pass**,
-  including the reconciliation-repairs-a-lost-handoff test that is the whole point of
-  Phase 1.
+  `search.e2e` (18), `search-engine.e2e`, `mailbox-ingest.e2e` — **21 tests, all pass**,
+  repeated to confirm stability. These include the two tests that carry the guarantees:
+  reconciliation repairing a lost handoff (Phase 1), and an index auto-created without a
+  primary key healing itself (§7.3). Both were confirmed to fail when their fix is
+  reverted, so they genuinely pin the behaviour.
 - Pre-existing failures **not** caused by this change, left as they were found: several e2e
   suites (`system`, `password-reset`, `auth-mock-validation`, and previously `search`) assert
   DTO-level `400`s but never register `ZodValidationPipe`, which only `AppModule` provides —

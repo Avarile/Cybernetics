@@ -20,54 +20,63 @@ export function isMimeAllowed(
 }
 
 /**
- * Minimal magic-byte MIME sniffer for common types. Returns the detected MIME
- * type, or `null` when the signature is unrecognised (unknown ≠ mismatch). Swap
- * for the `file-type` package to broaden coverage.
+ * Byte signatures we can positively identify, longest-prefix first.
+ *
+ * `null` from the sniffer means "unrecognised", which the quarantine gate
+ * treats as "not a mismatch" — so every signature missing from this table is a
+ * type that can be declared as anything and pass. The dangerous gap was
+ * text-ish payloads: HTML, SVG and scripts declared as `text/plain` sailed
+ * through, and `document-ingest` then parses those bytes.
+ */
+const SIGNATURES: ReadonlyArray<{ magic: number[]; mime: string }> = [
+  { magic: [0x25, 0x50, 0x44, 0x46], mime: 'application/pdf' }, // %PDF
+  { magic: [0x89, 0x50, 0x4e, 0x47], mime: 'image/png' },
+  { magic: [0x47, 0x49, 0x46, 0x38], mime: 'image/gif' }, // GIF8
+  { magic: [0x50, 0x4b, 0x03, 0x04], mime: 'application/zip' }, // PK.. (also OOXML)
+  { magic: [0x50, 0x4b, 0x05, 0x06], mime: 'application/zip' }, // empty archive
+  { magic: [0x50, 0x4b, 0x07, 0x08], mime: 'application/zip' }, // spanned archive
+  { magic: [0xff, 0xd8, 0xff], mime: 'image/jpeg' },
+  { magic: [0x1f, 0x8b], mime: 'application/gzip' },
+  { magic: [0x42, 0x4d], mime: 'image/bmp' },
+  { magic: [0x25, 0x21, 0x50, 0x53], mime: 'application/postscript' }, // %!PS
+  { magic: [0x7f, 0x45, 0x4c, 0x46], mime: 'application/x-elf' },
+  { magic: [0x4d, 0x5a], mime: 'application/x-msdownload' }, // MZ (PE)
+  { magic: [0xca, 0xfe, 0xba, 0xbe], mime: 'application/java-vm' },
+];
+
+/** Leading bytes that identify markup even though it has no binary signature. */
+const TEXT_SIGNATURES: ReadonlyArray<{ prefix: string; mime: string }> = [
+  { prefix: '<?xml', mime: 'application/xml' },
+  { prefix: '<svg', mime: 'image/svg+xml' },
+  { prefix: '<!doctype html', mime: 'text/html' },
+  { prefix: '<html', mime: 'text/html' },
+  { prefix: '<script', mime: 'text/html' },
+  { prefix: '#!', mime: 'text/x-shellscript' },
+];
+
+function startsWith(head: Buffer, magic: number[]): boolean {
+  if (head.length < magic.length) return false;
+  return magic.every((byte, i) => head[i] === byte);
+}
+
+/**
+ * Magic-byte MIME sniffer. Returns the detected MIME type, or `null` when the
+ * signature is unrecognised (unknown ≠ mismatch).
  */
 export function detectMimeFromMagic(head: Buffer): string | null {
-  if (head.length >= 4) {
-    // %PDF
-    if (
-      head[0] === 0x25 &&
-      head[1] === 0x50 &&
-      head[2] === 0x44 &&
-      head[3] === 0x46
-    ) {
-      return 'application/pdf';
-    }
-    // PNG: 89 50 4E 47
-    if (
-      head[0] === 0x89 &&
-      head[1] === 0x50 &&
-      head[2] === 0x4e &&
-      head[3] === 0x47
-    ) {
-      return 'image/png';
-    }
-    // GIF8
-    if (
-      head[0] === 0x47 &&
-      head[1] === 0x49 &&
-      head[2] === 0x46 &&
-      head[3] === 0x38
-    ) {
-      return 'image/gif';
-    }
-    // ZIP / OOXML / JAR / …: PK 03 04
-    if (
-      head[0] === 0x50 &&
-      head[1] === 0x4b &&
-      head[2] === 0x03 &&
-      head[3] === 0x04
-    ) {
-      return 'application/zip';
-    }
+  for (const { magic, mime } of SIGNATURES) {
+    if (startsWith(head, magic)) return mime;
   }
-  if (head.length >= 3) {
-    // JPEG: FF D8 FF
-    if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) {
-      return 'image/jpeg';
-    }
+  // Markup sniffing, after the binary table so a binary format that happens to
+  // begin with '<' is never misread. Leading whitespace and a BOM are skipped
+  // because both are common and neither changes what the payload is.
+  const text = head
+    .toString('utf8')
+    .replace(/^\uFEFF/, '')
+    .trimStart()
+    .toLowerCase();
+  for (const { prefix, mime } of TEXT_SIGNATURES) {
+    if (text.startsWith(prefix)) return mime;
   }
   return null;
 }
@@ -95,5 +104,17 @@ export function isDeclaredMimeMismatch(
   if (detected === null) return false; // unknown signature — not a mismatch
   if (detected === declared) return false;
   if (detected === 'application/zip' && isZipFamily(declared)) return false;
+  // XML is a supertype of several declared types we accept as-is.
+  if (detected === 'application/xml' && isXmlFamily(declared)) return false;
   return true;
+}
+
+/** Declared types whose payload legitimately begins with an XML declaration. */
+function isXmlFamily(mime: string): boolean {
+  return (
+    mime === 'application/xml' ||
+    mime === 'text/xml' ||
+    mime === 'image/svg+xml' ||
+    mime.endsWith('+xml')
+  );
 }

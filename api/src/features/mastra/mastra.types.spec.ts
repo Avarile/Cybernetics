@@ -7,7 +7,10 @@ describe('mastra shared contracts', () => {
     expect(AGENT_RUN_QUEUE).toBe('agent-run');
   });
   it('AgentReportSchema validates a report and defaults actions', () => {
-    const r = AgentReportSchema.parse({ summary: 's', findings: [{ title: 't', detail: 'd' }] });
+    const r = AgentReportSchema.parse({
+      summary: 's',
+      findings: [{ title: 't', detail: 'd' }],
+    });
     expect(r.recommendedActions).toEqual([]);
   });
 });

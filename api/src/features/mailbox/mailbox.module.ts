@@ -1,10 +1,12 @@
 import { BullModule } from '@nestjs/bullmq';
+import { QueueModule } from '../../infrastructure/queue/queue.module';
 import { Module } from '@nestjs/common';
 import { EmailModule } from '../../infrastructure/email/email.module';
 import { FileProcessorModule } from '../file-processor/file-processor.module';
 import { SearchServiceModule } from '../search-service/search-service.module';
 import { MailboxController } from './mailbox.controller';
 import { MailboxIngestService } from './mailbox-ingest.service';
+import { ImapConfigRepository } from '../system/imap-config.repository';
 import { MailboxRepository } from './mailbox.repository';
 import { MailboxService } from './mailbox.service';
 import { MAILBOX_SYNC_QUEUE } from './mailbox.constants';
@@ -24,11 +26,13 @@ import { MailboxSyncScheduler } from './schedulers/mailbox-sync.scheduler';
     EmailModule,
     FileProcessorModule,
     SearchServiceModule,
+    QueueModule,
     BullModule.registerQueue({ name: MAILBOX_SYNC_QUEUE }),
   ],
   controllers: [MailboxController],
   providers: [
     MailboxRepository,
+    ImapConfigRepository,
     MailboxIngestService,
     MailboxService,
     MailboxSyncProcessor,

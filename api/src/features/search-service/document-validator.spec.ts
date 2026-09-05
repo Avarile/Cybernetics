@@ -3,10 +3,17 @@ import {
   fieldSpecToIndexDefinition,
   validateDocument,
   validateFieldSpec,
+  validateVisibility,
 } from './document-validator';
 
 const fields: FieldSpec[] = [
-  { name: 'title', type: 'string', required: true, searchable: true, sortable: true },
+  {
+    name: 'title',
+    type: 'string',
+    required: true,
+    searchable: true,
+    sortable: true,
+  },
   { name: 'body', type: 'string', searchable: true },
   { name: 'tags', type: 'string[]', filterable: true },
   { name: 'price', type: 'number', filterable: true, sortable: true },
@@ -23,7 +30,9 @@ describe('validateFieldSpec', () => {
   });
 
   it('rejects a reserved field name', () => {
-    const errs = validateFieldSpec([{ name: 'id', type: 'string', searchable: true }]);
+    const errs = validateFieldSpec([
+      { name: 'id', type: 'string', searchable: true },
+    ]);
     expect(errs.some((e) => e.includes('reserved'))).toBe(true);
   });
 
@@ -36,7 +45,9 @@ describe('validateFieldSpec', () => {
   });
 
   it('rejects searchable on a non-string field', () => {
-    const errs = validateFieldSpec([{ name: 'n', type: 'number', searchable: true }]);
+    const errs = validateFieldSpec([
+      { name: 'n', type: 'number', searchable: true },
+    ]);
     expect(errs.some((e) => e.includes('searchable'))).toBe(true);
   });
 
@@ -49,7 +60,9 @@ describe('validateFieldSpec', () => {
   });
 
   it('requires at least one searchable field', () => {
-    const errs = validateFieldSpec([{ name: 'n', type: 'number', filterable: true }]);
+    const errs = validateFieldSpec([
+      { name: 'n', type: 'number', filterable: true },
+    ]);
     expect(errs.some((e) => e.includes('searchable'))).toBe(true);
   });
 });
@@ -57,12 +70,19 @@ describe('validateFieldSpec', () => {
 describe('validateDocument', () => {
   it('accepts a valid document', () => {
     expect(
-      validateDocument(fields, { title: 'Hi', tags: ['a'], price: 9, status: 'live' }),
+      validateDocument(fields, {
+        title: 'Hi',
+        tags: ['a'],
+        price: 9,
+        status: 'live',
+      }),
     ).toEqual([]);
   });
 
   it('flags a missing required field', () => {
-    expect(validateDocument(fields, { body: 'x' }).some((e) => e.includes('title'))).toBe(true);
+    expect(
+      validateDocument(fields, { body: 'x' }).some((e) => e.includes('title')),
+    ).toBe(true);
   });
 
   it('flags an unknown field', () => {
@@ -93,8 +113,68 @@ describe('fieldSpecToIndexDefinition', () => {
       name: 'articles',
       primaryKey: 'id',
       searchableAttributes: ['title', 'body'],
-      filterableAttributes: ['tags', 'price', 'status', 'createdAt', 'updatedAt', 'externalId'],
+      filterableAttributes: [
+        'tags',
+        'price',
+        'status',
+        'createdAt',
+        'updatedAt',
+        'externalId',
+      ],
       sortableAttributes: ['title', 'price', 'createdAt', 'updatedAt'],
     });
+  });
+});
+
+describe('validateVisibility', () => {
+  const fields: FieldSpec[] = [
+    { name: 'title', type: 'string', searchable: true },
+    { name: 'ownerUserId', type: 'string', filterable: true },
+    { name: 'notFilterable', type: 'string' },
+    { name: 'count', type: 'number', filterable: true },
+  ];
+
+  it('accepts owner_scoped with a string, filterable owner field', () => {
+    expect(validateVisibility('owner_scoped', 'ownerUserId', fields)).toEqual(
+      [],
+    );
+  });
+
+  it('accepts private and shared without an owner field', () => {
+    expect(validateVisibility('private', null, fields)).toEqual([]);
+    expect(validateVisibility('shared', null, fields)).toEqual([]);
+  });
+
+  it('rejects owner_scoped without an owner field', () => {
+    expect(validateVisibility('owner_scoped', null, fields)).toEqual([
+      'An owner_scoped collection must declare an ownerField',
+    ]);
+  });
+
+  it('rejects an owner field that is not declared in the field spec', () => {
+    expect(validateVisibility('owner_scoped', 'nope', fields)).toEqual([
+      'ownerField "nope" is not a declared field',
+    ]);
+  });
+
+  // The read filter the policy emits is `ownerField = "<uuid>"`. Meili rejects a
+  // filter on a non-filterable attribute, so an unfilterable owner field would
+  // turn every owner-scoped read into a 500 rather than a scoped result.
+  it('rejects an owner field that is not filterable', () => {
+    expect(validateVisibility('owner_scoped', 'notFilterable', fields)).toEqual(
+      ['ownerField "notFilterable" must be filterable'],
+    );
+  });
+
+  it('rejects a non-string owner field', () => {
+    expect(validateVisibility('owner_scoped', 'count', fields)).toEqual([
+      'ownerField "count" must be of type string (is number)',
+    ]);
+  });
+
+  it('rejects an owner field on a collection that is not owner_scoped', () => {
+    expect(validateVisibility('shared', 'ownerUserId', fields)).toEqual([
+      'ownerField is only meaningful for an owner_scoped collection (visibility is shared)',
+    ]);
   });
 });

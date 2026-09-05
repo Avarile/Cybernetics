@@ -12,6 +12,7 @@ import {
   SYNC_JOB_OPTS,
   SYNC_MAILBOX_JOB,
 } from '../mailbox.constants';
+import { workersEnabled } from '../../../infrastructure/queue/worker-role';
 
 /**
  * Registers the repeatable inbound-sync poll on startup (best-effort so boot
@@ -35,6 +36,8 @@ export class MailboxSyncScheduler implements OnApplicationBootstrap {
   }
 
   async onApplicationBootstrap(): Promise<void> {
+    // API-only replicas serve HTTP and leave the queues alone.
+    if (!workersEnabled()) return;
     if (!this.cfg.defaultAccountId) {
       this.logger.log(
         'Mailbox poll disabled (MAILBOX_DEFAULT_ACCOUNT_ID unset)',

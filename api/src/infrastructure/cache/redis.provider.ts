@@ -25,6 +25,13 @@ export const redisClientProvider: Provider = {
       port: redis.port,
       password: redis.password,
       db: redis.db,
+      // Bound how long a command can be in flight. Without this, ioredis'
+      // defaults (`enableOfflineQueue: true`, 20 retries) mean a command issued
+      // while Redis is unreachable neither resolves nor rejects — it queues.
+      // Callers on a request path then hang instead of failing, which is why
+      // `SessionCacheService` also races every command against `withTimeout`.
+      commandTimeout: 1_000,
+      maxRetriesPerRequest: 3,
     });
   },
 };
