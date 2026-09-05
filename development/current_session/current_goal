@@ -1,11 +1,11 @@
-# Goal
+# Goal: design feature based data model for this project, to support authentication, authorization, user management, project management, knowledge management, notification management, human relaetionship management, financial management, system-data management(settings, configuration, logs, etc.).
 
-- Design a comprehensive AI UI based on the existing UIs in `frontend/components/ai-elements`.
-- Design the state managements accordingly.
-- Connect to the backend module `api/src/features/mastra`.
-- Including the file upload and data processing pipeline(for docx, pdf, markdown, when those file is uploaded, they will be transformed into texts and save to a record). This feature will be add to 
-- Basically, should follow the design of the Claude.
-- Discuss with me if you have any other suggestions.
-- Design the UI in a fashion and neat way
-
-# Output the design to development/current_session/current_design.md
+1. Authentication and Authorization: This is already implemented in the current system. We will continue to use the existing authentication and authorization mechanisms to ensure secure access to the system. 
+2. System-Data Management: We will design a data model to manage system settings, configurations, and logs. This will include tables for storing configuration parameters, system logs, and audit trails to track changes made to the system. Those tables are already partially implemented in the current system, and we will extend them as needed to support new features and requirements.
+3. User Management: This will be based on the existing authentication and authorization mechanisms. We will design a data model to manage user profiles, roles, permissions, and user activity logs. This will include tables for storing user information, role definitions, permission mappings, and activity logs to track user actions within the system. Check the existing schema first.
+4. Project Management: Need to design a set of tables to manage projects, tasks, goals, milestones, and project-related documents. This will include tables for storing project details, task assignments, progress tracking, and knowledege reference, contact reference. We will also consider relationships between projects and users to facilitate collaboration and access control.
+5. Knowledge Management: We will design a data model to manage knowledge resources, this set of tables will only include knowledge, knowledge_type, knowledge_category, knowledge_tags, and knowledge_access_control. This will allow us to categorize and organize knowledge resources, as well as control access to them based on user roles and permissions.
+6. Notification Management: We will design a data model to manage notifications, including tables for storing notification templates, notification preferences, and notification history. This will allow us to send notifications to users based, all notifications will be sent through email.
+7. Human Relationship Management: We will design a data model to manage human relationships, including tables for store contact_info, contact_type, contact_company_info, contact_category, contact_tags.
+   
+Give me a comprehensive and professional design, and output to development/current_session/current_design.md
