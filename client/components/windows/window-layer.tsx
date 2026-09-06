@@ -34,7 +34,11 @@ export function WindowLayer() {
   return (
     <div className="pointer-events-none absolute inset-0 z-10">
       {topModal && (
-        <div className="pointer-events-auto absolute inset-0 bg-background/60 backdrop-blur-sm" />
+        // A fixed dark scrim, not `bg-background/60`. What sits underneath is
+        // always the theme-exempt dark canvas (design §4.3), so a themed scrim
+        // washes it to grey in light mode and erases the machine behind the
+        // dialog — the opposite of the intended "it's there, just not yours yet".
+        <div className="pointer-events-auto absolute inset-0 bg-black/50 backdrop-blur-sm" />
       )}
       {windows.map((win) => {
         const descriptor = WINDOW_REGISTRY[win.kind]
