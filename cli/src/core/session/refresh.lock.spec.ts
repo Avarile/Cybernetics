@@ -132,4 +132,23 @@ describe('RefreshLock', () => {
     expect(existsSync(path)).toBe(true);
     expect(JSON.parse(readFileSync(path, 'utf-8'))).toEqual(liveRecord);
   });
+
+  it('release() never deletes a lock file other than the one this instance created', async () => {
+    // Reproduces the other end of the same class of bug: a holds the lock,
+    // its work hangs past staleMs, another process reaps a's now-stale
+    // lock and acquires its own fresh, live one in its place -- all
+    // without a's knowledge -- and only then does a's hung work finish and
+    // call release().
+    const a = new RefreshLock(path);
+    await a.acquire();
+
+    unlinkSync(path);
+    const otherRecord = { pid: process.pid + 1, at: Date.now() };
+    writeFileSync(path, JSON.stringify(otherRecord), { mode: 0o600 });
+
+    a.release();
+
+    expect(existsSync(path)).toBe(true);
+    expect(JSON.parse(readFileSync(path, 'utf-8'))).toEqual(otherRecord);
+  });
 });

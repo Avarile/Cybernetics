@@ -56,6 +56,7 @@ let reapCounter = 0;
 export class RefreshLock {
   private readonly opts: LockOptions;
   private held = false;
+  private ownRecord: LockRecord | null = null;
 
   constructor(
     private readonly path: string,
@@ -84,11 +85,14 @@ export class RefreshLock {
   release(): void {
     if (!this.held) return;
     this.held = false;
-    try {
-      unlinkSync(this.path);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-    }
+    const record = this.ownRecord;
+    this.ownRecord = null;
+    // Same ownership discipline as reaping: claim whatever is at the path
+    // and discard it only if it is still the exact record this instance
+    // wrote. A hung operation can outlive staleMs and get legitimately
+    // reaped by someone else before this call happens -- releasing must not
+    // blindly unlink whatever a subsequent holder has since created there.
+    this.reapRecord(record);
   }
 
   async withLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -109,12 +113,13 @@ export class RefreshLock {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
       throw err;
     }
+    const record: LockRecord = { pid: process.pid, at: Date.now() };
     try {
-      const record: LockRecord = { pid: process.pid, at: Date.now() };
       writeSync(fd, JSON.stringify(record));
     } finally {
       closeSync(fd);
     }
+    this.ownRecord = record;
     return true;
   }
 
