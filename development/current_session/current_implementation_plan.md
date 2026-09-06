@@ -3199,3 +3199,92 @@ pure-function level; the pointer plumbing has not been exercised by hand.
 Window-layout persistence. `serialiseForPersist` and `hydrate` exist and are
 tested, but nothing writes to or reads from `localStorage` yet — only the auth
 session survives a reload.
+
+---
+
+# Phase 2: The 3D System Core
+
+**Goal:** Replace the `SYSTEM CORE` placeholder with the real WebGL scene, with each rotating band bound to a live feature domain.
+
+**Deps added:** `three@0.185.1`, `@react-three/fiber@9.7.0` (v9 is the React 19 line), `@types/three@0.185.4`.
+
+## Porting decisions
+
+The reference (`cybernetics-agentics/.../SystemCore`) splits cleanly into three groups:
+
+| Group | Treatment |
+|---|---|
+| `scene/{palette,config,materials,labels}.ts`, `objects/*` | **Port near-verbatim.** Framework-free or pure R3F. Changes limited to: import paths, `@librechat/client` → local equivalents, and R3F v8 → v9 typing. |
+| `scene/{tone,audio}.ts` | **Port verbatim** (42 KB, only depends on `three` + `./config`), but see *Audio* below. |
+| `data/*` | **Does not exist.** Authored fresh, and much smaller than the reference's — only `Module`, `STATUS`, `bandText` are actually reachable from `Scene`/`resolve`, because `Panel`/`Form`/`Fields`/`List` are not being ported. |
+
+### Audio is ported but defaults OFF
+
+The reference builds a tone bus whenever motion is allowed, so the stack hums on open. Three reasons that is wrong here, none of which apply in the reference's modal-on-demand context:
+
+1. Browsers refuse an `AudioContext` before a user gesture, so an auto-built bus is dead weight at best.
+2. The core is now the **post-login landing surface** — an unprompted drone every session is hostile.
+3. It is the single largest chunk of ported code serving the least of the design's stated goals.
+
+So `createToneBus` is gated on `animate && soundEnabled`, `soundEnabled` defaults `false`, and a toolbar toggle turns it on. The seam already exists: `Scene`, `Strip` and `Hum` all accept `bus === null` and skip their voices.
+
+### Reference bugs carried in, and fixed
+
+The reference has three blocks commented out — `Contact` in `Strip.tsx`, the spine mesh in `Mainframe.tsx`, the sweep mesh in `Scanner.tsx`. `Scanner` still animates `sweepRef` every frame against a mesh that no longer renders, and `Strip` still computes `spec.lane` and takes a `scannerVisible` prop that nothing consumes. Ported with the dead paths **removed**, not carried over commented.
+
+## Tasks
+
+| # | Task | Verify |
+|---|---|---|
+| 13 | Port `scene/{palette,config}.ts` + author `data/status.ts`, `data/domains.ts` | Unit: `DOMAINS` endpoints all exist in `api/src/**/*.controller.ts` |
+| 14 | Author `data/schema.ts` (`Module`, `bandText`, `blankModule`) + port `scene/resolve.ts` | Unit: `colorOf`/`gainOf`/`stripSpec` map status → numbers |
+| 15 | Port `scene/materials.ts` + `scene/labels.ts` | Unit: registry shares by appearance, disposes, dims |
+| 16 | Port `scene/{tone,audio}.ts` verbatim | Unit: `emitterOffset`, `roarLevel`, `humLevel` are pure and bounded |
+| 17 | Port `objects/{Orbit,Mainframe,Scanner,Contact,Tone,Hum,Strip}.tsx` | Renders in a test canvas without throwing |
+| 18 | Port `Scene.tsx` + `Boundary.tsx`, lazy-mount behind `next/dynamic({ssr:false})` | Canvas mounts, disposes cleanly on unmount |
+| 19 | `stores/domain.store.ts` + `useDomainHealth()` | Unit: health resolves from counts; poll pauses when hidden |
+| 20 | Wire into `CoreShell`; strip click opens that domain's window | Browser: strips turn; clicking one opens a window |
+| 21 | Window-layout persistence (carried from Phase 1) | Reload restores open windows and their rects |
+
+## Phase 2 definition of done
+
+`pnpm test` green · `typecheck` clean · `build` clean · in a browser: the stack renders and turns, `prefers-reduced-motion` yields a static frame, closing the tab leaks no WebGL context, and a strip's colour tracks its domain's real row count.
+
+## Phase 2 outcome (2026-09-06)
+
+**Status: complete.** 157 tests across 17 files, `typecheck` clean, `build` clean,
+verified in a browser. Tasks 13–21 done.
+
+### Deviations from the Phase 2 plan
+
+| Plan said | What happened | Why |
+|---|---|---|
+| Author `data/schema.ts` with a `Module` type | **Dropped it.** `Domain + Health → StripSpec` directly | The reference's Module exists because a side panel edits it. We do not port that panel and our strips are derived, so a Module had no consumer and no editor. |
+| Port `objects/Contact.tsx` | Not ported | It is commented out in the reference. Its `lane`/`scannerVisible` plumbing was removed rather than carried as dead parameters. |
+| Port `Scanner` as-is | **Sweep re-enabled** | The reference rotates `sweepRef` every frame against a mesh it has commented out — the animation drives nothing. The chrome exposes a scanner toggle, and a deck with no sweep is a grid. |
+| Port `Boundary` as-is | **Added a retry** | The reference needed none: its core lived in a modal that unmounted on close. Ours never unmounts, so a lost WebGL context would be permanent. |
+| — | `labels.ts` retargeted to `--font-mono` | The reference reads `--theme-font-family`, a LibreChat token that does not exist here. |
+| `unknown` = `0x2a2a35 / gain 0.35` | `0x46536b / gain 0.62` | At the planned values the bands rendered near-black and the machine read as **broken**, not dormant. Only visible in a browser. |
+| — | **Fixed a modal-scrim z-order bug** | The scrim had no `zIndex` while every window has one, so non-modal windows painted over it and nothing behind the auth dialog was dimmed. Regression test added; it fails without the fix. |
+
+### Verified in a browser
+
+The stack renders: eight bands between the two cap rings, each at its own radius,
+arc and phase; band labels legible; scanner deck and sweep drawing; zero console
+errors. Window layout survives a reload — Terminal and Live restored together
+(**the design's terminal-plus-voice requirement, now proven outside jsdom**),
+while an unregistered kind seeded into storage was correctly dropped.
+
+### Still not verified — needs credentials
+
+Strip colour tracking a **real** row count, and a strip click opening its
+domain's window. `useDomainHealth` resets when signed out, so every band sits at
+`unknown` until someone logs in. The mapping itself is unit-tested; the wiring
+to live data is not.
+
+### Carried forward
+
+- Audio is ported and toggleable but has never been heard — no gesture has been
+  made in a browser to unlock an `AudioContext`.
+- `prefers-reduced-motion` yielding a static frame is implemented but untested
+  in a browser.
