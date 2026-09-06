@@ -21,6 +21,30 @@ describe("parseErrorEnvelope", () => {
     expect(err.message).toBe("Access token expired")
   })
 
+  it("normalises a numeric correlationId to a string", () => {
+    // Verified against the live API: nestjs-pino's req.id is a number, despite
+    // the backend's ErrorEnvelope interface declaring `correlationId: string`.
+    const err = parseErrorEnvelope(401, {
+      error: {
+        code: "AUTH_INVALID_CREDENTIALS",
+        message: "Invalid credentials",
+        statusCode: 401,
+        details: null,
+        correlationId: 3489,
+        timestamp: "2026-09-06T03:17:15.116Z",
+        path: "/auth/login",
+      },
+    })
+    expect(err.correlationId).toBe("3489")
+  })
+
+  it("leaves correlationId undefined when absent", () => {
+    const err = parseErrorEnvelope(500, {
+      error: { code: "X", message: "m", statusCode: 500 },
+    })
+    expect(err.correlationId).toBeUndefined()
+  })
+
   it("falls back when the body is not an envelope", () => {
     const err = parseErrorEnvelope(502, "<html>bad gateway</html>")
     expect(err.code).toBe("UNKNOWN")

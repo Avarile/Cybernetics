@@ -57,7 +57,13 @@ interface EnvelopeShape {
     message: string
     statusCode: number
     details?: unknown
-    correlationId?: string
+    /**
+     * Declared `string` by the backend's ErrorEnvelope interface, but it is
+     * really `req.id` from nestjs-pino, which defaults to an auto-incrementing
+     * NUMBER. Verified against a live response: `"correlationId": 3489`.
+     * Accepted as either and normalised to a string below.
+     */
+    correlationId?: string | number
   }
 }
 
@@ -84,7 +90,7 @@ export function parseErrorEnvelope(status: number, body: unknown): ApiError {
       message: e.message || `Request failed (${status})`,
       statusCode: e.statusCode || status,
       details: e.details,
-      correlationId: e.correlationId,
+      correlationId: e.correlationId == null ? undefined : String(e.correlationId),
     })
   }
   return new ApiError({
