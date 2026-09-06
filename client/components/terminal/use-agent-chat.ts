@@ -6,6 +6,7 @@ import type { ChatStreamRequest } from "@/lib/agent/types"
 import { ApiError } from "@/lib/api/errors"
 import { createAgentApi } from "@/lib/api/endpoints/agent"
 import { useApi } from "@/lib/api/provider"
+import { rowsOf } from "@/lib/api/types"
 import { useAuthStore } from "@/stores/auth.store"
 import { useConversationStore } from "@/stores/conversation.store"
 
@@ -33,7 +34,7 @@ export function useAgentChat() {
     store.getState().setConversationsStatus("loading")
     try {
       const page = await agent.current.listConversations()
-      store.getState().setConversations(page.data)
+      store.getState().setConversations(rowsOf(page))
     } catch (err) {
       store
         .getState()

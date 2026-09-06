@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef } from "react"
 import { useApi } from "@/lib/api/provider"
-import type { Paginated } from "@/lib/api/types"
+import { rowsOf, type Paginated } from "@/lib/api/types"
 import { selectIsAuthenticated, useAuthStore } from "@/stores/auth.store"
 import { resolveHealth, useDomainStore, type DomainState } from "@/stores/domain.store"
 import { DOMAINS } from "./data/domains"
@@ -47,11 +47,12 @@ export function useDomainHealth(): { refresh: () => void } {
             if (d.attentionEndpoint) {
               try {
                 const flagged = await client.get<unknown>(d.attentionEndpoint)
+                // Attention probes answer as either a bare array
+                // (/agent/approvals) or a list envelope, whose rows may be
+                // under `data` or `items` — see rowsOf.
                 needsAttention = Array.isArray(flagged)
                   ? flagged.length > 0
-                  : Array.isArray((flagged as Paginated<unknown>)?.data)
-                    ? (flagged as Paginated<unknown>).data.length > 0
-                    : false
+                  : rowsOf(flagged as Paginated<unknown>).length > 0
               } catch {
                 // An attention probe that fails is not itself an error state —
                 // the domain is still reachable, we just cannot escalate it.

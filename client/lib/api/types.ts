@@ -18,14 +18,30 @@ export interface TokenPair {
 }
 
 /**
- * The list envelope every paginated endpoint returns — see e.g.
- * `contact.service.ts#list` and `conversation.service.ts#listForOwner`.
+ * The list envelope paginated endpoints return.
+ *
+ * The rows arrive under `data` from ten of the eleven paginated services
+ * (contacts, knowledge, projects, notifications, tags, activity, comments,
+ * schedules, system-settings, integration-credentials) — but under `items`
+ * from `file-processor`, which declares its own local `Paginated<T>` with that
+ * key. Verified against a live `/files` response: the table reported "49 rows"
+ * from `total` while rendering the empty state, because `data` was undefined.
+ *
+ * Both are accepted here rather than pretending the API is uniform. See
+ * `rowsOf()`.
  */
 export interface Paginated<T> {
-  data: T[]
+  data?: T[]
+  /** file-processor's spelling of `data`. */
+  items?: T[]
   total: number
   page: number
   limit: number
+}
+
+/** The rows from a list envelope, whichever key this endpoint used. */
+export function rowsOf<T>(page: Paginated<T> | null | undefined): T[] {
+  return page?.data ?? page?.items ?? []
 }
 
 /**

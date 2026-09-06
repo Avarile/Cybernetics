@@ -238,3 +238,32 @@ describe("DataTable", () => {
     expect(screen.queryByRole("button", { name: /new/i })).not.toBeInTheDocument()
   })
 })
+
+describe("list envelope shape", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.stubGlobal("fetch", fetchImpl)
+  })
+
+  it("reads rows from `data` (contacts, knowledge, projects, …)", async () => {
+    fetchImpl.mockResolvedValue(json({ data: ROWS, total: 2, page: 1, limit: 20 }))
+    renderTable()
+    expect(await screen.findByText("Alpha")).toBeInTheDocument()
+  })
+
+  it("reads rows from `items` (file-processor's spelling)", async () => {
+    // Regression: /files returns `items`, not `data`. Against a live API the
+    // table showed "49 rows / Page 1 of 3" in the footer while the body
+    // rendered the empty state, because `data` was undefined.
+    fetchImpl.mockResolvedValue(json({ items: ROWS, total: 2, page: 1, limit: 20 }))
+    renderTable()
+    expect(await screen.findByText("Alpha")).toBeInTheDocument()
+    expect(screen.queryByText("No widgets.")).not.toBeInTheDocument()
+  })
+
+  it("still shows the empty state when both keys are absent", async () => {
+    fetchImpl.mockResolvedValue(json({ total: 0, page: 1, limit: 20 }))
+    renderTable()
+    expect(await screen.findByText("No widgets.")).toBeInTheDocument()
+  })
+})

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { ApiError } from "@/lib/api/errors"
 import { useApi } from "@/lib/api/provider"
-import type { Paginated } from "@/lib/api/types"
+import { rowsOf, type Paginated } from "@/lib/api/types"
 import { buildListUrl, clampPage, initialQuery, type TableQuery } from "./query"
 import type { DomainTableConfig, HasId } from "./types"
 
@@ -57,7 +57,7 @@ export function useDomainTable<T extends HasId>(
           buildListUrl(config.endpoint, query, config.tabs),
         )
         if (cancelled || seq !== requestSeq.current) return
-        setRows(page.data ?? [])
+        setRows(rowsOf(page))
         setTotal(page.total ?? 0)
         setStatus("ready")
       } catch (err) {
