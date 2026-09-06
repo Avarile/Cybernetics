@@ -3288,3 +3288,70 @@ to live data is not.
   made in a browser to unlock an `AudioContext`.
 - `prefers-reduced-motion` yielding a static frame is implemented but untested
   in a browser.
+
+---
+
+# Phase 3: The terminal — outcome (2026-09-06)
+
+**Status: complete.** 236 tests across 23 files, `typecheck` clean, `build` clean,
+verified in a browser.
+
+## What landed
+
+| File | Role |
+|---|---|
+| `lib/agent/types.ts` | The wire contract, hand-mirrored from the backend |
+| `lib/agent/sse.ts` | Incremental frame parser (`SseParser`) |
+| `lib/agent/reducer.ts` | Pure `(TurnState, SseEvent) => TurnState` |
+| `lib/agent/stream.ts` | `fetch` + `ReadableStream` transport |
+| `lib/api/endpoints/agent.ts` | Conversations, messages, approvals |
+| `stores/conversation.store.ts` | Rail, history, in-flight turn |
+| `components/terminal/*` | Window, rail, message parts, approval gate |
+
+## Design decisions worth recording
+
+- **The stream bypasses `ApiClient`.** That wrapper buffers the whole body to
+  parse JSON, which defeats streaming. The cost is that single-flight refresh
+  does not cover this path — so the stream **deliberately does not retry a 401**.
+  Racing a second refresh against `ApiClient`'s latch is exactly what revokes the
+  token family. The rail's conversation list is an ordinary request and refreshes
+  the token before any turn is started.
+- **Approvals resume, they do not decide.** `POST /agent/chat/stream` with a
+  `resume` body continues the turn and streams the rest back;
+  `POST /agent/approvals/:id` only records a decision. Not interchangeable — a
+  test asserts which one the Approve button calls.
+- **The approval UI is not ai-elements' `Confirmation`.** That component renders
+  nothing unless handed an `approval` object describing a decision already made,
+  while `ConfirmationRequest` only shows before one exists — the request UI is
+  unreachable. Built from `Alert` instead; its accepted/rejected views remain
+  useful once approval history is rendered.
+- **One renderer for live and replayed turns.** The reducer emits the same
+  `ChatMessagePart` shape the history endpoint returns, so `MessageParts` serves
+  both and the two are indistinguishable on screen.
+
+## Bugs the tests caught
+
+1. **`ConversationEmptyState` renders `children` *instead of* its
+   title/description**, not alongside. Passing children silently dropped the
+   heading — the empty state would have shipped as bare suggestion chips.
+2. **A zustand render loop, reintroduced from Phase 1.** `buildVisibleMessages`
+   constructs a new message object per call, so subscribing through it as a
+   selector blew React's getSnapshot identity check and looped until the tree
+   unmounted. `useShallow` does **not** help — it compares array items by
+   reference. Now derived with `useMemo` from two stable subscriptions.
+   *Diagnosis note: the symptom was "assistant text never renders"; the cause
+   only surfaced by capturing `console.error` during the test.*
+3. `test/setup.ts` needed jsdom shims (ResizeObserver, IntersectionObserver,
+   pointer capture, matchMedia) that `use-stick-to-bottom` and Radix reach for.
+
+## Verified in a browser
+
+Terminal opens over the 3D core with full window chrome; empty state shows its
+heading, description and suggestions; the rail surfaces `Unauthorized` when the
+conversation list 401s. The only console errors are those expected 401s.
+
+## Still not verified — needs credentials
+
+A real streamed turn end to end. Every layer is covered by tests against a
+mocked stream (including a real `ReadableStream` split mid-frame and mid-UTF-8),
+but no turn has run against the live Mastra agent.
