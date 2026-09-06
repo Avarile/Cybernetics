@@ -6,18 +6,15 @@
 //
 // `extend()` plus a JSX element would be the other option, but that needs a
 // global JSX namespace augmentation in a feature file to stay typed.
-//
-// Ported to R3F v9 / React 19: MutableRefObject is deprecated there, and plain
-// RefObject is mutable by default.
 
 import { useEffect, useMemo } from 'react';
 import { useThree, useFrame } from '@react-three/fiber';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import type { RefObject } from 'react';
+import type { MutableRefObject } from 'react';
 
 interface OrbitProps {
   /** Published so the framing helper and the reset button can retarget it. */
-  controlsRef: RefObject<OrbitControls | null>;
+  controlsRef: MutableRefObject<OrbitControls | null>;
   /** Damping is inertia, which is motion: off when the user asked for less. */
   damping: boolean;
 }

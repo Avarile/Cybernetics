@@ -1,43 +1,36 @@
-// How a domain's health reads on its band.
+// The statuses a module may carry.
 //
-// Shape matches the reference's STATUS contract — `{ color, gain }` consumed by
-// scene/resolve.ts — but the keys are health states rather than the reference's
-// user-authored module statuses, because our strips are bound to live feature
-// domains (design 4.2), not to hand-edited fixture rows.
+// `color` is what three.js wants (a hex number), `hex` what CSS wants, and
+// `gain` scales the band's emissive intensity — running is the common case and
+// reads too hot at full strength when a dozen of them are on screen at once.
 //
-// `hex` exists so a legend outside the canvas can show the colours actually on
-// screen. It is the single sanctioned bridge across the boundary palette.ts
-// draws; see that file's header.
+// These are deliberately NOT the `--status-*` theme tokens. Those are text
+// colours: light mode resolves `--status-warning` to `amber-700` (dark, for
+// text on white) and dark mode to `amber-300` (pastel, for text on near-black).
+// Neither survives being used as an emissive colour — the scene's additive
+// materials need full saturation to read as lit rather than dusty against the
+// stage. See `../scene/palette.ts` for why the stage stays dark in both themes.
 
-export type Health = "unknown" | "nominal" | "active" | "attention" | "error"
-
-export interface StatusSpec {
-  /** Emissive colour for the band. */
-  color: number
-  /** Emissive scaling. Running is the common case and reads too hot at full
-   *  strength with eight bands on screen. */
-  gain: number
-  /** Multiplier on the module's base rotation speed. */
-  speed: number
-  /** CSS hex, for legends rendered outside the canvas. */
-  hex: string
-  label: string
+export interface StatusDef {
+  color: number;
+  hex: string;
+  name: string;
+  gain?: number;
 }
 
-export const STATUS: Record<Health, StatusSpec> = {
-  // Not loaded yet, or signed out. Dim and slow, so the stack resolves into
-  // life as the counts land rather than flashing a wrong colour first — but not
-  // *dark*: at 0x2a2a35/0.35 the bands rendered as near-black against the stage
-  // and the machine read as broken rather than dormant. Verified in a browser.
-  unknown: { color: 0x46536b, gain: 0.62, speed: 0.15, hex: "#46536B", label: "Unknown" },
-  // Reachable, nothing pending. The resting state, deliberately cool and dim.
-  nominal: { color: 0x6f8fa8, gain: 0.85, speed: 1, hex: "#6F8FA8", label: "Nominal" },
-  // Work in flight.
-  active: { color: 0x7fd4c1, gain: 1.35, speed: 1.9, hex: "#7FD4C1", label: "Active" },
-  // Pending approvals, failed ingests, overdue tasks.
-  attention: { color: 0xd8a24a, gain: 1.5, speed: 0.7, hex: "#D8A24A", label: "Attention" },
-  // The endpoint answered non-2xx.
-  error: { color: 0xc2603f, gain: 1.6, speed: 0.25, hex: "#C2603F", label: "Error" },
-}
+export const STATUS: Record<string, StatusDef> = {
+  running: { color: 0xf89945, hex: '#F89945', name: 'running', gain: 0.62 },
+  // Yellow rather than amber, and deliberately so: `running` is already an
+  // orange (hue ~28°), and an amber degraded would have sat right next to it.
+  // This is ~48°, which separates on a dark stage where the two are adjacent in
+  // the stack. No `gain`, so it defaults to full strength like `fault` — a
+  // degraded module is uncommon and is meant to draw the eye, unlike `running`,
+  // which is damped precisely because a dozen of them are on screen at once.
+  degraded: { color: 0xefc71f, hex: '#EFC71F', name: 'degraded' },
+  fault: { color: 0xe0342b, hex: '#E0342B', name: 'fault' },
+  init: { color: 0x2fcb6a, hex: '#2FCB6A', name: 'initializing' },
+  loading: { color: 0x3e8cf0, hex: '#3E8CF0', name: 'loading' },
+  controller: { color: 0xffffff, hex: '#ffffff', name: 'loading' },
+};
 
-export const STATUS_KEYS = Object.keys(STATUS) as Health[]
+export const STATUS_KEYS = Object.keys(STATUS);

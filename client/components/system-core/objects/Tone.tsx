@@ -35,8 +35,21 @@ interface ToneProps {
 export default function Tone({ bus, hz, level, radius, arcDeg }: ToneProps) {
   const camera = useThree((state) => state.camera);
 
-  const audio = useMemo(() => bus.roar(hz, level), [bus, hz, level]);
+  // Keyed on [bus, hz], deliberately not on `level`. `level` is bound to live
+  // health, so including it would rebuild the whole voice on every poll — see
+  // ToneBus.setLevel, which retunes the running one instead. `hz` stays in the
+  // key because retuning it properly means three biquad frequencies plus the
+  // make-up gain, which is a rebuild either way; it is authored, so it moves only
+  // on a hand edit, which is exactly when rebuilding is the right answer.
+  // `level` is read here only as the voice's starting value; the effect below
+  // owns it from then on, which is why it is not a dependency.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const audio = useMemo(() => bus.roar(hz, level), [bus, hz]);
   const position = useMemo(() => emitterOffset(radius, arcDeg), [radius, arcDeg]);
+
+  useEffect(() => {
+    bus.setLevel(audio, level);
+  }, [bus, audio, level]);
 
   useEffect(() => {
     return () => bus.release(audio);

@@ -1,202 +1,240 @@
-"use client"
-
 // The canvas: renderer, camera, lights, and the model the strips turn inside.
 //
 // This is the lazy boundary's payload — `three` is reachable only from here
-// down, so the library is not fetched until the core is actually mounted.
+// down, so the library is not fetched until the modal is actually opened.
 //
 // R3F absorbs most of what the reference implementation's Stage class did by
 // hand: it owns the renderer, measures and resizes the canvas, disposes
-// geometry on unmount, and runs one loop instead of the reference's two.
+// geometry on unmount, and runs one loop instead of the reference's two (a
+// render loop and a separate simulation loop that both had to be torn down).
 // What is left here is the framing pass and the scene's own furniture.
 
-import { useRef, useMemo, useState, useEffect } from "react"
-import { Canvas, useThree, useFrame } from "@react-three/fiber"
-import * as THREE from "three"
-import type { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js"
-import type { RefObject } from "react"
-import type { Domain } from "./data/domains"
-import type { Health } from "./data/status"
-import Orbit from "./objects/Orbit"
-import Strip from "./objects/Strip"
-import Scanner from "./objects/Scanner"
-import Mainframe from "./objects/Mainframe"
-import Hum from "./objects/Hum"
-import { LabelFactory, preloadLabelFont } from "./scene/labels"
-import { MaterialRegistry } from "./scene/materials"
-import { createToneBus } from "./scene/audio"
-import { colorOf, gainOf, newRuntime, stripSpec, type Runtime } from "./scene/resolve"
-import { LIGHTS, STAGE_BACKGROUND } from "./scene/palette"
-import { SCANNER, FRAME_FOV, FRAME_DISTANCE, FRAME_DIRECTION } from "./scene/config"
+import { useRef, useMemo, useState, useEffect } from 'react';
+import { Canvas, useThree, useFrame } from '@react-three/fiber';
+import { useMediaQuery } from '@/components/system-core/shims/ui';
+import * as THREE from 'three';
+import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import type { MutableRefObject } from 'react';
+import type { Reading } from './live/bind';
+import type { Module } from './data/schema';
+import type { Runtime } from './scene/resolve';
+import Orbit from './objects/Orbit';
+import Strip from './objects/Strip';
+import Scanner from './objects/Scanner';
+import Mainframe from './objects/Mainframe';
+import { LabelFactory, preloadLabelFont } from './scene/labels';
+import { MaterialRegistry } from './scene/materials';
+import { createToneBus } from './scene/audio';
+import { stripSpec, appearanceOf } from './scene/resolve';
+import logger from '@/components/system-core/shims/logger';
+import { LIGHTS, STAGE_BACKGROUND } from './scene/palette';
+import { SCANNER, FRAME_FOV, FRAME_DISTANCE, FRAME_DIRECTION } from './scene/config';
 
 export interface SceneProps {
-  domains: readonly Domain[]
-  /** Live health per domain key. Missing keys resolve to "unknown". */
-  healthFor: (key: string) => Health
-  selected: string | null
-  onSelect: (id: string | null) => void
-  scannerVisible: boolean
-  /** Opt-in. Browsers refuse an AudioContext without a gesture, and an
-   *  unprompted drone on the landing surface is hostile — see the Phase 2 plan. */
-  soundEnabled: boolean
+  modules: Module[];
+  /** Live samples by module id. Empty when the feature is off or unconfigured,
+   *  which is what makes the fixture-only scene the same code path. */
+  readings: ReadonlyMap<string, Reading>;
+  runtimeFor: (m: Module) => Runtime;
+  parkPhase: (id: string, phase: number) => void;
+  selected: string | null;
+  onSelect: (id: string | null) => void;
+  scannerVisible: boolean;
   /** Bumped to re-run the framing pass. */
-  resetToken: number
+  resetToken: number;
 }
 
 /** The one default view: the framing direction, at the framed distance, looking
  *  at the stack's centre. The canvas opens on it and the reset button returns
  *  to it, so there is a single composition to get right. */
-const DEFAULT_VIEW = new THREE.Vector3(...FRAME_DIRECTION).setLength(FRAME_DISTANCE)
+const DEFAULT_VIEW = new THREE.Vector3(...FRAME_DIRECTION).setLength(FRAME_DISTANCE);
 
 /**
  * Puts the camera in the default view, once, and again whenever the reset
  * button asks.
  *
  * Composed against the cap rings rather than measured off the scene — see
- * FRAME_EXTENT in config.ts. A measured bounding box cannot hold a composition
- * still here: the deck is a backdrop 10x wider than the thing worth looking at,
- * so the box a measured fit sees is set by the deck, not the stack.
+ * FRAME_EXTENT. A measured bounding box was what the reference fitted, and it
+ * cannot hold a composition still here: the deck is a backdrop 10× wider than
+ * the thing worth looking at, and a strip's contact reaches out to sit on that
+ * deck, so the box a measured fit sees is set by the widest module's contact.
+ * Editing one module's radius, or adding a module, would then move the default
+ * view.
  */
 function Frame({
   controlsRef,
   resetToken,
 }: {
-  controlsRef: RefObject<OrbitControls | null>
-  resetToken: number
+  controlsRef: MutableRefObject<OrbitControls | null>;
+  resetToken: number;
 }) {
-  const camera = useThree((state) => state.camera) as THREE.PerspectiveCamera
-  const invalidate = useThree((state) => state.invalidate)
+  const camera = useThree((state) => state.camera) as THREE.PerspectiveCamera;
+  const invalidate = useThree((state) => state.invalidate);
 
   useEffect(() => {
-    const controls = controlsRef.current
+    const controls = controlsRef.current;
     if (!controls) {
-      return
+      return;
     }
-    camera.position.copy(DEFAULT_VIEW)
-    camera.near = Math.max(FRAME_DISTANCE / 100, 0.01)
-    camera.far = FRAME_DISTANCE * 100
-    camera.updateProjectionMatrix()
-    controls.target.set(0, 0, 0)
-    controls.update()
-    invalidate()
-  }, [camera, invalidate, controlsRef, resetToken])
+    camera.position.copy(DEFAULT_VIEW);
+    camera.near = Math.max(FRAME_DISTANCE / 100, 0.01);
+    camera.far = FRAME_DISTANCE * 100;
+    camera.updateProjectionMatrix();
+    controls.target.set(0, 0, 0);
+    controls.update();
+    invalidate();
+  }, [camera, invalidate, controlsRef, resetToken]);
 
-  return null
+  return null;
 }
 
-/** The selection pulse. Only the picked strip's overlay renders with these
- *  materials, so this animates it alone. */
+/**
+ * The selection pulse.
+ *
+ * Motion *is* the selection signal now: every strip carries the bright overlay as
+ * its resting appearance, and only the picked one breathes. So this runs while
+ * something is selected and not otherwise — and `pulse()` deliberately animates
+ * only the `mark` kind, which is the picked strip's material alone. Were it to
+ * touch `hot` as well, the whole stack would pulse together the instant anything
+ * was clicked, because the registry is keyed by appearance and every unselected
+ * strip of a given status shares one material.
+ */
 function Pulse({ mats, active }: { mats: MaterialRegistry; active: boolean }) {
   useFrame(({ clock }) => {
     if (active) {
-      mats.pulse(clock.elapsedTime * 1000)
+      mats.pulse(clock.elapsedTime * 1000);
     }
-  })
-  return null
+  });
+  return null;
 }
 
 function Core({
-  domains,
-  healthFor,
+  modules,
+  readings,
+  runtimeFor,
+  parkPhase,
   selected,
   onSelect,
   scannerVisible,
-  soundEnabled,
   resetToken,
   animate,
 }: SceneProps & { animate: boolean }) {
-  const controlsRef = useRef<OrbitControls | null>(null)
-  const camera = useThree((state) => state.camera)
-  const maxAnisotropy = useThree((state) => state.gl.capabilities.getMaxAnisotropy())
+  const controlsRef = useRef<OrbitControls | null>(null);
+  const camera = useThree((state) => state.camera);
+  const maxAnisotropy = useThree((state) => state.gl.capabilities.getMaxAnisotropy());
+  // What the GPU will accept as a texture width. A readout string runs to a
+  // hundred characters, which at the rasteriser's type size is a canvas several
+  // thousand pixels wide, and WebGL2 only guarantees 2048 — so the factory needs
+  // this to scale the canvas into range rather than have the upload fail.
+  const maxTextureSize = useThree((state) => state.gl.capabilities.maxTextureSize);
 
-  // One registry per scene. Materials are shared across strips that look alike,
-  // and the dimming pass has to be able to reach every one of them.
-  const mats = useMemo(() => new MaterialRegistry(), [])
-  const labels = useMemo(() => new LabelFactory(maxAnisotropy), [maxAnisotropy])
-
-  // Per-strip spin phase. A Map in a ref, written 60x/second by every strip on
-  // screen and never read by React's render path — a setState here would
-  // re-render the whole stack every frame. Keyed by domain key rather than list
-  // index so removing a domain cannot shift everyone else's phase onto their
-  // neighbours'.
-  const runtime = useRef(new Map<string, Runtime>())
-  const runtimeFor = (d: Domain): Runtime => {
-    const found = runtime.current.get(d.key)
-    if (found) return found
-    const created = newRuntime(d)
-    runtime.current.set(d.key, created)
-    return created
-  }
-  const parkPhase = (id: string, phase: number) => {
-    const rt = runtime.current.get(id)
-    if (rt) rt.phase = phase
-  }
-
-  // Not built at all when the stack is holding still or sound is off, which
-  // silences the mainframe's hum as well as the strips. null also covers a
-  // browser that refuses us an AudioContext — see createToneBus.
-  const bus = useMemo(
-    () => (animate && soundEnabled ? createToneBus(camera) : null),
-    [animate, soundEnabled, camera],
-  )
+  // One registry per scene. Materials are shared across modules that look
+  // alike, and the dimming pass has to be able to reach every one of them.
+  const mats = useMemo(() => new MaterialRegistry(), []);
+  const labels = useMemo(
+    () => new LabelFactory(maxAnisotropy, maxTextureSize),
+    [maxAnisotropy, maxTextureSize],
+  );
+  // Not built at all when the stack is holding still, which silences the
+  // mainframe's hum as well as the strips.
+  //
+  // This is a choice, not a technical limit, and worth saying so. Under reduced
+  // motion `frameloop` is "demand", but Orbit invalidates on every controls
+  // change and R3F renders once at mount, so a static voice would in fact be
+  // handed a correct level and would track zoom perfectly well. It is left silent
+  // because a continuous unmutable drone over a deliberately still frame, with no
+  // visible motion to account for it, is worse than nothing. Skipping the bus
+  // also means no AudioContext for a scene that was never going to use one, and
+  // null likewise covers a browser that refuses us one — see createToneBus.
+  const bus = useMemo(() => (animate ? createToneBus(camera) : null), [animate, camera]);
 
   useEffect(() => {
     return () => {
-      mats.dispose()
-      labels.dispose()
-    }
-  }, [mats, labels])
+      mats.dispose();
+      labels.dispose();
+    };
+  }, [mats, labels]);
 
   // Its own effect rather than a line in the one above: the bus can be rebuilt
-  // without the materials being rebuilt, and folding it in would mean toggling
-  // sound disposed the material registry the live scene is still using.
+  // without the materials being rebuilt, and folding it in would mean a change
+  // of `animate` disposed the material registry the live scene is still using.
   useEffect(() => {
     if (!bus) {
-      return
+      return;
     }
-    return () => bus.dispose()
-  }, [bus])
+    return () => bus.dispose();
+  }, [bus]);
 
   // Band names are rasterised through the theme's UI face. Rather than block
   // the whole scene on the font, the stack renders immediately and labels
-  // appear once it resolves. Gating matters because the rasteriser caches per
-  // string: drawing early would cache the fallback face permanently.
-  const [fontReady, setFontReady] = useState(false)
+  // appear once it resolves — usually the next frame, since the face is already
+  // in use by the app around it. Gating matters because the rasteriser caches
+  // per string: drawing early would cache the fallback face permanently.
+  const [fontReady, setFontReady] = useState(false);
   useEffect(() => {
-    let alive = true
+    let alive = true;
     preloadLabelFont().then(() => {
       if (alive) {
-        setFontReady(true)
+        setFontReady(true);
       }
-    })
+    });
     return () => {
-      alive = false
-    }
-  }, [])
+      alive = false;
+    };
+  }, []);
 
   // Dim the always-on materials while something is picked, so the selected
-  // strip carries the eye.
+  // strip and its contact carry the eye.
   useEffect(() => {
-    mats.setDimmed(selected != null)
-    return () => mats.setDimmed(false)
-  }, [mats, selected])
+    mats.setDimmed(selected != null);
+    return () => mats.setDimmed(false);
+  }, [mats, selected]);
 
+  // Where the three sources meet: the authored module, its live sample, and the
+  // per-frame runtime. Rebuilt on every data change, which at a 20s poll is
+  // rare; the strips are keyed by module id below, so a rebuild re-renders them
+  // without remounting and without disturbing their rotation.
   const strips = useMemo(
     () =>
-      domains.map((d) => {
-        const health = healthFor(d.key)
-        const spec = stripSpec(d, health)
+      modules.map((m) => {
+        const rt = runtimeFor(m);
+        const live = readings.get(m.id) ?? null;
+        const spec = stripSpec(m, rt, live);
+        const look = appearanceOf(m, live);
         return {
           spec: fontReady ? spec : { ...spec, label: null },
-          initialPhase: runtimeFor(d).phase,
-          mats: mats.forModule(colorOf(health), null, gainOf(health)),
-        }
+          initialPhase: rt.phase,
+          mats: mats.forModule(look.color, look.opacity, look.gain),
+        };
       }),
-    // runtimeFor is intentionally excluded: it reads and writes a ref, and
-    // including it would rebuild every spec on each render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [domains, healthFor, mats, fontReady],
-  )
+    [modules, readings, runtimeFor, mats, fontReady],
+  );
+
+  // Release materials and label textures the build above stopped asking for, and
+  // open the next generation. After the commit rather than inside the memo: a
+  // material still referenced by a mesh that has just rendered would draw black
+  // if disposed, and a texture would draw blank.
+  useEffect(() => {
+    mats.sweep();
+    labels.sweep();
+  }, [strips, mats, labels]);
+
+  // What the caches are holding. Free unless VITE_ENABLE_LOGGER is on. Every
+  // number here should be flat across ticks in the steady state — a climbing count
+  // means something with an unbounded codomain reached a cache (see live/bind.ts).
+  // `labels` is the one to watch once a band carries live text: it is a canvas and
+  // a texture per distinct string, so it climbs first and fastest.
+  const gl = useThree((state) => state.gl);
+  useEffect(() => {
+    logger.log('system_core', {
+      modules: strips.length,
+      materials: mats.size,
+      labels: labels.size,
+      geometries: gl.info.memory.geometries,
+      textures: gl.info.memory.textures,
+      programs: gl.info.programs?.length,
+    });
+  }, [strips, mats, labels, gl]);
 
   return (
     <>
@@ -219,11 +257,10 @@ function Core({
         </group>
         <group name="stack">
           <Mainframe />
-          {/* A sibling of the mainframe rather than a child of it: both groups
-              are untransformed, so this sits in exactly the same place, and
-              Mainframe stays propless with its claim to no per-frame work
-              intact. Mirrors the gate Strip uses for its own voice. */}
-          {bus && <Hum bus={bus} />}
+          {/* A sibling of the mainframe rather than a child of it: `mainframe`
+              and `stack` are both untransformed, so this sits in exactly the same
+              place, and Mainframe stays propless with its claim to no per-frame
+              work intact. Mirrors the gate Strip uses for its own voice. */}
           {strips.map((strip) => (
             <Strip
               key={strip.spec.id}
@@ -232,6 +269,7 @@ function Core({
               labels={labels}
               bus={bus}
               picked={selected === strip.spec.id}
+              scannerVisible={scannerVisible}
               animate={animate}
               initialPhase={strip.initialPhase}
               onPhase={parkPhase}
@@ -245,27 +283,20 @@ function Core({
       <Frame controlsRef={controlsRef} resetToken={resetToken} />
       <Pulse mats={mats} active={selected != null} />
     </>
-  )
+  );
 }
 
 export default function Scene(props: SceneProps) {
-  // Reduced motion renders a static frame rather than a paused animation.
-  // "demand" means nothing repaints unless something asks, and Orbit asks while
-  // the user is dragging.
-  const [reducedMotion, setReducedMotion] = useState(false)
-  useEffect(() => {
-    const mql = window.matchMedia("(prefers-reduced-motion: reduce)")
-    const sync = () => setReducedMotion(mql.matches)
-    sync()
-    mql.addEventListener("change", sync)
-    return () => mql.removeEventListener("change", sync)
-  }, [])
-
-  const animate = !reducedMotion
+  // Reduced motion renders a static frame rather than a paused animation, which
+  // is the convention the shared AnimatedGridPattern and OrbitMark primitives
+  // already follow. "demand" means nothing repaints unless something asks, and
+  // Orbit asks while the user is dragging.
+  const reducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
+  const animate = !reducedMotion;
 
   return (
     <Canvas
-      frameloop={animate ? "always" : "demand"}
+      frameloop={animate ? 'always' : 'demand'}
       dpr={[1, 2]}
       gl={{ antialias: true, alpha: true }}
       camera={{
@@ -277,5 +308,5 @@ export default function Scene(props: SceneProps) {
     >
       <Core {...props} animate={animate} />
     </Canvas>
-  )
+  );
 }

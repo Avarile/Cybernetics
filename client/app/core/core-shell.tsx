@@ -17,23 +17,21 @@ export function CoreShell() {
   useSessionBootstrap()
   const authed = useAuthStore(selectIsAuthenticated)
 
+  // The reference's three viewport controls, same defaults.
+  const [panelOpen, setPanelOpen] = useState(true)
   const [scannerVisible, setScannerVisible] = useState(true)
-  // Off by default: browsers refuse an AudioContext without a gesture, and an
-  // unprompted drone on the landing surface is hostile. The toolbar turns it on.
-  const [soundEnabled, setSoundEnabled] = useState(false)
   const [resetToken, setResetToken] = useState(0)
 
+  const togglePanel = useCallback(() => setPanelOpen((v) => !v), [])
   const toggleScanner = useCallback(() => setScannerVisible((v) => !v), [])
-  const toggleSound = useCallback(() => setSoundEnabled((v) => !v), [])
   const resetView = useCallback(() => setResetToken((n) => n + 1), [])
 
   return (
     <main className="relative h-[100dvh] w-full overflow-hidden bg-[#00001c]">
       {/*
         The stage colour is hard-coded rather than themed, matching the
-        reference's STAGE_BACKGROUND: per design 4.3 the canvas is exempt from
-        theme tokens, because emissive materials only read as light against a
-        dark ground in both themes.
+        reference's STAGE_BACKGROUND: the canvas is exempt from theme tokens,
+        because emissive materials only read as light against a dark ground.
 
         Signed out, the machine is dimmed and inert behind the auth dialog —
         visibly there, just not yours yet.
@@ -46,17 +44,18 @@ export function CoreShell() {
       >
         <SystemCoreCanvas
           scannerVisible={scannerVisible}
-          soundEnabled={authed && soundEnabled}
+          panelOpen={authed && panelOpen}
           resetToken={resetToken}
+          active={authed}
         />
       </div>
 
       <WindowLayer />
       <ShellChrome
+        panelOpen={panelOpen}
         scannerVisible={scannerVisible}
-        soundEnabled={soundEnabled}
+        onTogglePanel={togglePanel}
         onToggleScanner={toggleScanner}
-        onToggleSound={toggleSound}
         onResetView={resetView}
       />
       <Dock />

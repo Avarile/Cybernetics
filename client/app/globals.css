@@ -127,3 +127,46 @@
     @apply font-mono;
     }
 }
+/* ──────────────────────────────────────────────────────────────────────────
+   SystemCore compatibility layer
+
+   The SystemCore tree is ported verbatim from the reference implementation,
+   which is a LibreChat app and styles itself with LibreChat's semantic
+   utilities (`text-text-secondary`, `bg-surface-primary`, `border-border-light`
+   …). Those classes do not exist here, so without this block the panel renders
+   with no colour at all.
+
+   Defining the tokens — rather than rewriting the class names in the ported
+   files — is deliberate: it keeps those files byte-identical to upstream, so
+   the next time the reference changes they can be re-copied and diffed instead
+   of reconciled by hand. Each is expressed in our own shadcn variables, so the
+   panel follows our theme in both light and dark.
+   ────────────────────────────────────────────────────────────────────────── */
+@layer components {
+  .text-text-primary    { color: var(--foreground); }
+  .text-text-secondary  { color: var(--muted-foreground); }
+  .text-text-tertiary   { color: color-mix(in oklch, var(--muted-foreground) 70%, transparent); }
+  .bg-text-tertiary     { background-color: color-mix(in oklch, var(--muted-foreground) 70%, transparent); }
+
+  .border-border-light  { border-color: var(--border); }
+
+  .bg-surface-primary   { background-color: var(--card); }
+  .bg-surface-tertiary  { background-color: var(--muted); }
+  .bg-surface-hover     { background-color: var(--accent); }
+  .bg-surface-active-alt{ background-color: var(--accent); }
+
+  .text-status-error    { color: var(--destructive); }
+  .bg-status-error      { background-color: var(--destructive); }
+  .bg-status-error-subtle { background-color: color-mix(in oklch, var(--destructive) 12%, transparent); }
+
+  /* No warning/success role exists in our palette; these match the scene's own
+     status hues (see components/system-core/data/status.ts) so the panel and
+     the bands agree. */
+  .text-status-warning     { color: oklch(0.72 0.14 75); }
+  .bg-status-warning       { background-color: oklch(0.72 0.14 75); }
+  .bg-status-warning-subtle{ background-color: oklch(0.72 0.14 75 / 12%); }
+  .bg-status-success       { background-color: oklch(0.70 0.15 155); }
+
+  /* LibreChat's motion token. */
+  .duration-theme-fast { transition-duration: 150ms; }
+}

@@ -5,20 +5,22 @@
 // The scene is lit almost entirely by emissive and additively-blended
 // materials. That only reads as light against a near-black ground, so the
 // viewport is a fixed dark stage in both light and dark mode — the convention
-// every 3D editor uses. Semantic roles would fight it: our `--background` is
-// white in light mode, and `--destructive`/`--chart-*` are surface and text
-// colours that go pastel in dark mode, so neither survives being used as an
-// emissive colour. The reference author hit the same wall and documented it: a
-// design-system gold at 68% saturation "reads dusty against black where the
-// reference reads lit".
+// every 3D editor uses, and what the reference implementation renders.
+// Semantic roles would fight it: `--surface-primary` is white in light mode,
+// and the `--status-*` roles are text colours (light mode resolves
+// `--status-warning` to `amber-700`, dark mode to a pastel `amber-300`), so
+// neither survives being used as an emissive colour. The reference author hit
+// the same wall and documented it: a design-system gold at 68% saturation
+// "reads dusty against black where the reference reads lit".
 //
-// Design doc 4.3 ratifies this: fixed colours inside the canvas, semantic
-// shadcn tokens everywhere outside it. The modal scrim in WindowLayer is part
-// of "inside" for the same reason — a themed scrim over this stage washes it
-// to grey in light mode.
+// CLAUDE.md sanctions this — specialized visualization stays feature-owned. The
+// rule that still applies: everything OUTSIDE the canvas (dialog chrome, the
+// control panel, the module list) uses semantic tokens only. The one exception
+// is the status legend, which has to match the colours actually on screen, so
+// it reads its swatches from STATUS.hex.
 //
 // If a second visualization ever needs this stage, promote these into the
-// theme layer as `--viewport-*` then. Not for one feature.
+// versioned theme registry as `rgb-viewport-*` then. Not for one feature.
 
 /** The stage. Near-black with a blue cast, so the emissive bands read warm. */
 export const STAGE_BACKGROUND = 0x00001c;

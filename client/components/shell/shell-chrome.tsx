@@ -3,11 +3,10 @@
 import {
   LogOutIcon,
   MicIcon,
+  PanelRightIcon,
   RadarIcon,
   RotateCcwIcon,
   TerminalIcon,
-  Volume2Icon,
-  VolumeXIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import {
@@ -23,10 +22,10 @@ import { selectIsAuthenticated, useAuthStore } from "@/stores/auth.store"
 import { useWindowStore } from "@/stores/window.store"
 
 export interface ShellChromeProps {
+  panelOpen: boolean
   scannerVisible: boolean
-  soundEnabled: boolean
+  onTogglePanel: () => void
   onToggleScanner: () => void
-  onToggleSound: () => void
   onResetView: () => void
 }
 
@@ -41,10 +40,10 @@ const SCENE_BUTTON =
   "focus-visible:ring-white/50 focus-visible:ring-offset-0"
 
 export function ShellChrome({
+  panelOpen,
   scannerVisible,
-  soundEnabled,
+  onTogglePanel,
   onToggleScanner,
-  onToggleSound,
   onResetView,
 }: ShellChromeProps) {
   const { auth } = useApi()
@@ -75,20 +74,24 @@ export function ShellChrome({
               aria-orientation="horizontal"
               className="mr-1 flex items-center gap-0.5 rounded-lg bg-white/5 p-0.5 backdrop-blur-sm"
             >
+              {/* Same three viewport controls as the reference's toolbar, with
+                  its aria-labels: Toggle module panel / Scanner deck / Reset
+                  view. (Its fourth, Close, dismisses the modal — the core here
+                  is the surface itself, so there is nothing to close.) */}
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
                     variant="ghost"
                     size="icon"
-                    aria-label="Scanner"
-                    aria-pressed={scannerVisible}
-                    onClick={onToggleScanner}
-                    className={cn(SCENE_BUTTON, scannerVisible && "text-white")}
+                    aria-label="Toggle module panel"
+                    aria-pressed={panelOpen}
+                    onClick={onTogglePanel}
+                    className={cn(SCENE_BUTTON, panelOpen && "text-white")}
                   >
-                    <RadarIcon className="size-3.5" />
+                    <PanelRightIcon className="size-3.5" />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>Scanner</TooltipContent>
+                <TooltipContent>Module panel</TooltipContent>
               </Tooltip>
 
               <Tooltip>
@@ -96,19 +99,15 @@ export function ShellChrome({
                   <Button
                     variant="ghost"
                     size="icon"
-                    aria-label={soundEnabled ? "Mute core" : "Unmute core"}
-                    aria-pressed={soundEnabled}
-                    onClick={onToggleSound}
-                    className={cn(SCENE_BUTTON, soundEnabled && "text-white")}
+                    aria-label="Scanner deck"
+                    aria-pressed={scannerVisible}
+                    onClick={onToggleScanner}
+                    className={cn(SCENE_BUTTON, scannerVisible && "text-white")}
                   >
-                    {soundEnabled ? (
-                      <Volume2Icon className="size-3.5" />
-                    ) : (
-                      <VolumeXIcon className="size-3.5" />
-                    )}
+                    <RadarIcon className="size-3.5" />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>{soundEnabled ? "Mute core" : "Unmute core"}</TooltipContent>
+                <TooltipContent>Scanner deck</TooltipContent>
               </Tooltip>
 
               <Tooltip>

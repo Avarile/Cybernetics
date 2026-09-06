@@ -55,6 +55,25 @@ export const LABEL_FILL = 0.95;
  *  stack turns instead of drifting with each strip's own arc length. */
 export const LABEL_LEAD = 0.05;
 
+/** Share of the usable arc the fixed name may take before it shrinks to fit,
+ *  when there is a readout behind it wanting the rest. Without a readout the
+ *  name still gets the whole arc, exactly as it did before there was one. */
+export const NAME_SHARE = 0.4;
+
+/** How fast the readout scrolls, in world units per second.
+ *
+ *  A judgement to make looking at a real screen rather than a derivation — the
+ *  band is already turning underneath it (18-67s per revolution), and the two
+ *  motions compound where the arc faces the camera. Same standing as GAIN in the
+ *  server's catalogue, which was retuned once after being looked at. */
+export const TICKER_SPEED = 0.09;
+
+/** Below this share of the usable arc a readout window is dropped rather than
+ *  shown unreadable. The narrow controller ring carrying the longest name in the
+ *  catalogue is the case this exists for; the panel has the same numbers in a
+ *  font you can actually read. */
+export const TICKER_MIN_SHARE = 0.25;
+
 /** Where along a strip's arc its sound comes from, as a fraction of that arc.
  *  The midpoint, so a wide band is not heard from one of its own edges. Position
  *  in the model, hence here rather than in ./tone.ts with the audible values. */

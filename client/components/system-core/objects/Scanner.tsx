@@ -8,12 +8,6 @@
 // The sweep is the only moving part, and it is rotated through a ref rather
 // than a prop: a `rotation` array prop would call Euler.set() on every
 // re-render and snap it back to zero.
-//
-// DIVERGENCE FROM THE REFERENCE: the reference has the sweep mesh commented out
-// while still running its rotation every frame — the animation drives nothing.
-// The sweep is restored here rather than deleted: the shell chrome exposes a
-// scanner toggle, and a deck with no sweep is a grid, not a scanner. Reduced
-// motion still parks it, via `animate`.
 
 import { useRef, useMemo, useEffect } from 'react';
 import { useFrame } from '@react-three/fiber';
@@ -113,9 +107,9 @@ export default function Scanner({ animate }: ScannerProps) {
           <planeGeometry args={[0.007, R * 2]} />
         </mesh>
       ))}
-      <mesh ref={sweepRef} name="scanner-sweep" material={mats.sweep}>
+      {/* <mesh ref={sweepRef} name="scanner-sweep" material={mats.sweep}>
         <circleGeometry args={[R * 0.995, 90, 0, SCANNER.sweepArc]} />
-      </mesh>
+      </mesh> */}
     </group>
   );
 }

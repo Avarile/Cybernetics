@@ -334,6 +334,20 @@ export function roarLevel(distance: number, centre: number, radius: number): num
 }
 
 /**
+ * A module's peak amplitude: its own share of the one global ceiling.
+ *
+ * Lives here rather than inline in ../audio.ts because two callers now need it —
+ * `roar` when it builds a voice and `setLevel` when it retunes one — and the two
+ * disagreeing would mean a retuned voice landing at a different loudness from a
+ * freshly built one at the same level. It is also the only part of `setLevel`
+ * that can be tested honestly: jsdom has no AudioContext, so everything the
+ * other side of that boundary is only reachable behind a stand-in.
+ */
+export function roarCeiling(level: number): number {
+  return clamp01(level) * ROAR.ceiling;
+}
+
+/**
  * The master lowpass cutoff for a given level, interpolated in log frequency.
  *
  * Cutoffs are heard geometrically, not arithmetically: halfway between 120 Hz

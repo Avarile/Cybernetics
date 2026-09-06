@@ -43,6 +43,7 @@ import {
   humLevel,
   roarLevel,
   roarCutoff,
+  roarCeiling,
   NOISE_SECONDS,
   saturationCurve,
 } from './tone';
@@ -84,7 +85,8 @@ interface Voice {
   sources: AudioScheduledSourceNode[];
   /** Everything to disconnect on teardown. */
   nodes: AudioNode[];
-  /** Peak amplitude for this module: ROAR.ceiling times its own level. */
+  /** Peak amplitude for this module — see roarCeiling(). Mutable: ToneBus.setLevel
+   *  moves it so a voice can be retuned without being rebuilt. */
   ceiling: number;
   /** Seconds since this voice last wrote its parameters. */
   since: number;
@@ -210,7 +212,7 @@ export class ToneBus {
       cutoff,
       nodes,
       sources,
-      ceiling: ROAR.ceiling * level,
+      ceiling: roarCeiling(level),
       fadeIn: ROAR.fadeIn,
     });
     return audio;
@@ -316,6 +318,36 @@ export class ToneBus {
 
   /** Ends one voice. Terminal: neither a noise player nor a modulator can be
    *  started twice, so a strip that comes back asks for a new one. */
+  /**
+   * Retunes a voice's share of the ceiling without rebuilding it.
+   *
+   * The alternative — and what happened before this existed — was keying Tone's
+   * memo on `level`, so every change tore the voice down and built a new one:
+   * roughly ten nodes per module, with `release`'s 0.25s fade-out overlapping the
+   * new voice. Across a couple of dozen modules on every poll that is audible as
+   * pumping, and `audio.ts`'s own note about overlapping voices summing to double
+   * amplitude is the reason why.
+   *
+   * Nothing is written to an AudioParam here. `ceiling` is the multiplier `write`
+   * already applies to the distance curve, so moving it lets the next scheduled
+   * write glide to the new target through the existing `ROAR.glide.level`
+   * envelope — inaudible as a transition, and one parameter write instead of ten
+   * node constructions. `since` is pushed to the interval so that write lands on
+   * the next frame rather than up to `ROAR.interval` later.
+   */
+  setLevel(audio: THREE.Audio<AudioNode>, level: number): void {
+    const voice = this.voices.get(audio);
+    if (!voice) {
+      return;
+    }
+    const ceiling = roarCeiling(level);
+    if (voice.ceiling === ceiling) {
+      return;
+    }
+    voice.ceiling = ceiling;
+    voice.since = ROAR.interval;
+  }
+
   release(audio: THREE.Audio<AudioNode>): void {
     const voice = this.voices.get(audio);
     if (!voice) {

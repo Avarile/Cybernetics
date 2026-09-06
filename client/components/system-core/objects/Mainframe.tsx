@@ -6,11 +6,9 @@
 // Its hum is a sibling in the stack rather than a child here, so that stays true
 // — see Hum.tsx.
 //
-// The reference built a containment shell here and then stopped adding it to
-// the group, and likewise commented out the central spine. Both are left out
-// rather than carried over commented — the two cap rings are what mark the
-// stack's extent, and MAINFRAME.spineRadius/spineHeight in config.ts are kept
-// only because FRAME_EXTENT is composed against shellRadius/capY.
+// The reference also built a containment shell here and then stopped adding it
+// to the group ("due to I dont like it"). It is left out rather than carried
+// over commented, since nothing references it.
 
 import { useMemo, useEffect } from 'react';
 import * as THREE from 'three';
@@ -44,6 +42,11 @@ export default function Mainframe() {
 
   return (
     <group name="mainframe">
+      {/* <mesh name="mainframe-spine" material={spineMat}>
+        <cylinderGeometry
+          args={[MAINFRAME.spineRadius, MAINFRAME.spineRadius, MAINFRAME.spineHeight, 20]}
+        />
+      </mesh> */}
       {CAPS.map((cap) => (
         <mesh
           key={cap.name}
