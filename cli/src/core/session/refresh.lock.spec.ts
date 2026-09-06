@@ -1,4 +1,11 @@
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import {
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+  existsSync,
+  unlinkSync,
+  readFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LockTimeoutError, RefreshLock } from './refresh.lock';
@@ -95,5 +102,34 @@ describe('RefreshLock', () => {
       }),
     ).rejects.toThrow('boom');
     expect(existsSync(path)).toBe(false);
+  });
+
+  it('a reaper never removes a lock file other than the exact one it judged stale', () => {
+    // Reproduces the reaper/creator race: this instance reads a stale
+    // record and judges it worth reaping. Before it can act on that
+    // judgment, simulate another process reaping the same stale record and
+    // a third process creating a fresh, live lock in its place -- all
+    // between our read and our removal step, which is exactly what a real
+    // multi-process race can interleave.
+    const staleRecord = { pid: 4_194_304, at: Date.now() - 60_000 };
+    writeFileSync(path, JSON.stringify(staleRecord), { mode: 0o600 });
+
+    const lock = new RefreshLock(path);
+
+    unlinkSync(path);
+    const liveRecord = { pid: process.pid, at: Date.now() };
+    writeFileSync(path, JSON.stringify(liveRecord), { mode: 0o600 });
+
+    // Act on the (now stale, superseded) judgment directly -- this is what
+    // reapIfStale would have called had it read staleRecord a moment ago.
+    const reaped = (
+      lock as unknown as {
+        reapRecord(judged: { pid: number; at: number } | null): boolean;
+      }
+    ).reapRecord(staleRecord);
+
+    expect(reaped).toBe(false);
+    expect(existsSync(path)).toBe(true);
+    expect(JSON.parse(readFileSync(path, 'utf-8'))).toEqual(liveRecord);
   });
 });

@@ -1,8 +1,10 @@
 import {
   closeSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
+  renameSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
@@ -36,6 +38,11 @@ interface LockRecord {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Shared by every RefreshLock instance in this process, so two reap attempts
+// racing in the same process (e.g. two instances in one test file, both
+// sharing process.pid) can never pick the same temp filename.
+let reapCounter = 0;
 
 /**
  * A cross-process mutex built on O_EXCL file creation.
@@ -122,21 +129,71 @@ export class RefreshLock {
         return true;
       }
       // Unparseable content cannot identify an owner, so it can only deadlock.
-      return this.remove();
+      return this.reapRecord(null);
     }
 
     const expired = Date.now() - record.at > this.opts.staleMs;
-    if (expired || !isAlive(record.pid)) return this.remove();
+    if (expired || !isAlive(record.pid)) return this.reapRecord(record);
     return false;
   }
 
-  private remove(): boolean {
+  /**
+   * Atomically claims whatever currently sits at `this.path` and discards it
+   * only if it is still the exact record `judged` names (or, when `judged`
+   * is null, still equally unparseable). If the file has changed underneath
+   * us -- another reaper won the race for the record we judged, and a fresh,
+   * live lock has since been created in its place -- the claimed file is
+   * restored rather than deleted, and this reports that we did not win.
+   *
+   * The claim (`renameSync`) is atomic: at most one racing reaper's rename
+   * can succeed against a given source path. Every other racer's rename
+   * fails with ENOENT because the source is already gone, so a losing
+   * reaper never acts on a file it didn't itself just remove from
+   * `this.path` -- it only ever retries. This is what keeps two reapers that
+   * both judged the same stale record from one of them deleting whatever a
+   * third process created in the path's place.
+   */
+  private reapRecord(judged: LockRecord | null): boolean {
+    const tempPath = `${this.path}.reap.${process.pid}.${reapCounter++}`;
     try {
-      unlinkSync(this.path);
+      renameSync(this.path, tempPath);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        // Someone else already reaped or released it first; retry.
+        return true;
+      }
+      throw err;
     }
-    return true;
+
+    let claimed: LockRecord | null;
+    try {
+      claimed = JSON.parse(readFileSync(tempPath, 'utf-8')) as LockRecord;
+    } catch {
+      claimed = null;
+    }
+
+    const matches =
+      judged === null
+        ? claimed === null
+        : claimed !== null && claimed.pid === judged.pid && claimed.at === judged.at;
+
+    if (matches) {
+      unlinkSync(tempPath);
+      return true;
+    }
+
+    // Not the file we judged -- someone else's fresh lock landed here
+    // between our read and our claim. Put it back. `linkSync` fails loudly
+    // (EEXIST) instead of silently clobbering, in case a third process has
+    // since taken the path too.
+    try {
+      linkSync(tempPath, this.path);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    } finally {
+      unlinkSync(tempPath);
+    }
+    return false;
   }
 }
 
