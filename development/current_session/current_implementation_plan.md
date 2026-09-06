@@ -3355,3 +3355,62 @@ conversation list 401s. The only console errors are those expected 401s.
 A real streamed turn end to end. Every layer is covered by tests against a
 mocked stream (including a real `ReadableStream` split mid-frame and mid-UTF-8),
 but no turn has run against the live Mastra agent.
+
+---
+
+# Phase 4: Tables and file upload — outcome (2026-09-06)
+
+**Status: complete.** 293 tests across 26 files, `typecheck` clean, `build`
+clean, **verified against the live API while signed in.**
+
+## What landed
+
+`components/data-table/` (generic shell, query builder, pagination, state triad,
+record windows), `components/domains/` (contacts + files configs and windows,
+dropzone), `lib/files/upload.ts`, `stores/upload.store.ts`,
+`components/windows/confirm-window.tsx`. Registry gains `contacts`, `files`,
+`confirm` and the three `record-*` kinds.
+
+## Decisions
+
+- **TanStack was dropped, not ported.** The demo needs it for client-side
+  sorting/filtering/pagination row models; all three now live on the server, and
+  what remained was a header, a body and a selection set. Every affordance the
+  demo had is kept.
+- **Record forms are declared, not derived from the zod DTOs.** The backend
+  schemas carry cross-field `.refine()` rules, `nullable` vs `optional`
+  distinctions that differ between create and update, and `z.coerce.date()`
+  inputs — none survive a generic schema-to-form walk. The contacts spec mirrors
+  the DTO's own refine so the form fails before the request.
+- **`WindowDescriptor.component` widened to `WindowBody`.** Narrowing it to
+  `ComponentType<Record<string, unknown>>` forces every body to declare all
+  props optional, hiding genuine requirements.
+- **Deletes report partial failure** ("3 of 5 deleted") — there is no bulk
+  delete endpoint, so it is one request per id.
+
+## The bug only a live API could surface
+
+**`/files` returns rows under `items`; everything else uses `data`.**
+`file-processor` declares its own local `Paginated<T>`. The Files table read
+"49 rows / Page 1 of 3" from `total` while rendering the empty state.
+
+Every unit fixture used `data`, so no test would ever have caught it. `rowsOf()`
+now reads either key at all three call sites, with regression tests for `data`,
+`items`, and neither.
+
+**This papers over a backend inconsistency.** Normalising `file.service.list` to
+return `data` — and hoisting one shared `Paginated<T>` — is the real fix, and is
+a backend change nobody has approved yet.
+
+## Verified against live data
+
+Signed in as `admin@cybernetics.local`: Contacts renders 282 real records across
+15 pages with working tabs, status filter, search and pager; Files renders 49
+real rows with correct type labels and the `indexed` badge on ingestable MIMEs.
+
+## Still not verified
+
+- An actual file upload end to end (no file has been dropped through the
+  browser), so the presigned-POST path is covered only by unit tests.
+- Create / edit / delete against live data — the forms and confirm dialog are
+  wired and typed but no record has been written.
