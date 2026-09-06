@@ -25,9 +25,11 @@ export interface StatusSpec {
 }
 
 export const STATUS: Record<Health, StatusSpec> = {
-  // Not loaded yet. Nearly dark and still, so the stack resolves into life as
-  // the counts land rather than flashing a wrong colour first.
-  unknown: { color: 0x2a2a35, gain: 0.35, speed: 0.15, hex: "#2A2A35", label: "Unknown" },
+  // Not loaded yet, or signed out. Dim and slow, so the stack resolves into
+  // life as the counts land rather than flashing a wrong colour first — but not
+  // *dark*: at 0x2a2a35/0.35 the bands rendered as near-black against the stage
+  // and the machine read as broken rather than dormant. Verified in a browser.
+  unknown: { color: 0x46536b, gain: 0.62, speed: 0.15, hex: "#46536B", label: "Unknown" },
   // Reachable, nothing pending. The resting state, deliberately cool and dim.
   nominal: { color: 0x6f8fa8, gain: 0.85, speed: 1, hex: "#6F8FA8", label: "Nominal" },
   // Work in flight.
