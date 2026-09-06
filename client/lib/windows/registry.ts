@@ -32,8 +32,8 @@ export const WINDOW_REGISTRY: Partial<Record<WindowKind, WindowDescriptor>> = {
     defaultRect: { w: 900, h: 600 },
     minSize: { w: 420, h: 320 },
     component: lazy(() =>
-      import("@/components/windows/placeholder-window").then((m) => ({
-        default: m.PlaceholderWindow,
+      import("@/components/terminal/terminal-window").then((m) => ({
+        default: m.TerminalWindow,
       })),
     ),
   },
