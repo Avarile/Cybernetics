@@ -272,6 +272,52 @@ export const ERROR_REGISTRY: Record<ErrorCode, ErrorSpec> = {
     kind: D,
     message: 'Failed to send email',
   },
+
+  [ErrorCode.TAG_NOT_FOUND]: {
+    status: S.NOT_FOUND,
+    kind: C,
+    message: 'Tag not found',
+  },
+  [ErrorCode.TAG_EXISTS]: {
+    status: S.CONFLICT,
+    kind: C,
+    message: 'A tag with that key already exists in this scope',
+  },
+  [ErrorCode.TAG_IMMUTABLE]: {
+    status: S.FORBIDDEN,
+    kind: C,
+    message: 'System tags cannot be modified or deleted',
+  },
+  [ErrorCode.COMMENT_NOT_FOUND]: {
+    status: S.NOT_FOUND,
+    kind: C,
+    message: 'Comment not found',
+  },
+  [ErrorCode.ATTACHMENT_NOT_FOUND]: {
+    status: S.NOT_FOUND,
+    kind: C,
+    message: 'Attachment not found',
+  },
+  [ErrorCode.ATTACHMENT_EXISTS]: {
+    status: S.CONFLICT,
+    kind: C,
+    message: 'That file is already attached to this record',
+  },
+  [ErrorCode.SETTING_VERSION_CONFLICT]: {
+    status: S.CONFLICT,
+    kind: C,
+    message: 'The setting was modified by someone else — reload and retry',
+  },
+  [ErrorCode.FEATURE_FLAG_NOT_FOUND]: {
+    status: S.NOT_FOUND,
+    kind: C,
+    message: 'Feature flag not found',
+  },
+  [ErrorCode.RETENTION_POLICY_NOT_FOUND]: {
+    status: S.NOT_FOUND,
+    kind: C,
+    message: 'Retention policy not found',
+  },
 };
 
 /** Maps a raw HTTP status (from framework-thrown HttpExceptions) to a generic code. */

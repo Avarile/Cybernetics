@@ -7,6 +7,7 @@ import type { AuthConfig } from './config/configurations/auth.config';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { ZodValidationPipe } from './common/pipes/zod-validation.pipe';
 import { RolesGuard } from './common/guards/roles.guard';
+import { PermissionsGuard } from './features/authorization/permissions.guard';
 import { CacheModule } from './infrastructure/cache/cache.module';
 import { RedisThrottlerStorage } from './infrastructure/cache/redis-throttler.storage';
 import { SessionCacheModule } from './infrastructure/cache/session/session-cache.module';
@@ -19,11 +20,19 @@ import { ObservabilityModule } from './infrastructure/observability/sentry.modul
 import { QueueModule } from './infrastructure/queue/queue.module';
 import { SearchEngineModule } from './infrastructure/search-engine/search-engine.module';
 import { AuthModule } from './features/auth/auth.module';
+import { AuthorizationModule } from './features/authorization/authorization.module';
+import { ContactsModule } from './features/contacts/contacts.module';
+import { KnowledgeModule } from './features/knowledge/knowledge.module';
+import { FinanceModule } from './features/finance/finance.module';
+import { NotificationsModule } from './features/notifications/notifications.module';
+import { ProjectsModule } from './features/projects/projects.module';
 import { DocumentIngestModule } from './features/document-ingest/document-ingest.module';
 import { FileProcessorModule } from './features/file-processor/file-processor.module';
 import { MailboxModule } from './features/mailbox/mailbox.module';
 import { MastraModule } from './features/mastra/mastra.module';
 import { SearchServiceModule } from './features/search-service/search-service.module';
+import { AttachmentsModule } from './features/shared/attachments.module';
+import { SharedModule } from './features/shared/shared.module';
 import { SystemModule } from './features/system/system.module';
 import { UsersModule } from './features/users/users.module';
 
@@ -69,10 +78,20 @@ import { UsersModule } from './features/users/users.module';
 
     // Feature modules.
     AuthModule,
+    AuthorizationModule,
     UsersModule,
     FileProcessorModule,
+    // Cross-cutting (tags, comments, attachments, activity) — before the
+    // capability modules that build on it.
+    SharedModule,
+    AttachmentsModule,
+    ContactsModule,
     SearchServiceModule,
     SystemModule,
+    KnowledgeModule,
+    ProjectsModule,
+    NotificationsModule,
+    FinanceModule,
     MailboxModule,
     DocumentIngestModule,
 
@@ -87,6 +106,10 @@ import { UsersModule } from './features/users/users.module';
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
+    // Last in the chain: throttle -> authenticate -> authorize by role ->
+    // authorize by permission. A route with no @RequirePermission passes
+    // straight through, so this is additive.
+    { provide: APP_GUARD, useClass: PermissionsGuard },
   ],
 })
 export class AppModule {}

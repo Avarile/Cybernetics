@@ -10,6 +10,7 @@ import { AppModule } from './app.module';
 import type { AppConfig } from './config/configurations/app.config';
 import type { AuthConfig } from './config/configurations/auth.config';
 import { assertEveryRouteDeclaresPolicy } from './common/route-policy.audit';
+import { assertPermissionCatalogIsComplete } from './features/authorization/permission-catalog.assertion';
 import { PG_POOL } from './infrastructure/database/drizzle.constants';
 import {
   assertSchemaIsCurrent,
@@ -31,6 +32,10 @@ async function bootstrap(): Promise<void> {
   // how the search endpoints became world-readable — make that a crash, not a
   // default. Runs before listen() so a misconfigured build never serves traffic.
   assertEveryRouteDeclaresPolicy(app);
+
+  // A `@RequirePermission` naming a key nobody seeded denies every caller
+  // silently, and surfaces as an unexplained 403 in production rather than here.
+  await assertPermissionCatalogIsComplete(app);
 
   // Refuse to serve against an un-migrated database. Without this a replica on
   // an old schema booted fine and then failed at the first query, producing one

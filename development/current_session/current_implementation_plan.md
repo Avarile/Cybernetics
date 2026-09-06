@@ -2,16 +2,17 @@
 CYBERNETICS -- IMPLEMENTATION PLAN
 ========================================================================================
 
-Status: Active, Date: 2026-09-06, Follows: current_design.md
-Prerequisite state: migration 0013_useful_vanisher applied; reference data seeded; 837
-tests green.
+Status: Complete -- all seven phases built, Date: 2026-09-06, Follows: current_design.md
+Prerequisite state: migration 0013_useful_vanisher applied; reference data seeded.
 
 CONTENTS
 --------
 
   1. Where Things Stand
+      Module boundary rule, learned twice
+      Two seams introduced in Phase 0 that later phases must use
   2. Sequencing Rules
-  3. Phase 0 -- Foundations Runtime
+  3. Phase 0 -- Foundations Runtime ✅ COMPLETE
   4. Phase 1 -- Authorization and User Management
       4.1 Permission resolution
       4.2 Profiles and preferences
@@ -26,7 +27,10 @@ CONTENTS
   10. Phase 6 -- Finance
   11. Test Strategy
   12. Watch Items
-  13. Immediate Next Actions
+  13. What Was Built
+      Verification
+  14. What Is Left
+      Carried into every later change
 
 ----------------------------------------------------------------------------------------
 
@@ -34,7 +38,8 @@ CONTENTS
 1. WHERE THINGS STAND
 ========================================================================================
 
-The data model is in the database. Nothing uses it yet.
+The data model is in the database. Phase 0 now runs on part of it; the capability
+modules do not exist yet.
 
   Layer                                         | State
   ----------------------------------------------+-----------------------------------------------
@@ -45,13 +50,75 @@ The data model is in the database. Nothing uses it yet.
   Seed data (11 vocabularies, idempotent)       | ✅ applied and re-run clean
   Schema specs                                  | ✅ one per file, locking enums and fail-closed
                                                 | defaults
-  Repositories / services / controllers         | ❌ none
-  Guards for the new permission layer           | ❌ none
-  Search projection for new entities            | ❌ none
-  Schedulers (retention, review, recurring,     | ❌ none
-  digest)                                       |
+  Phase 0 foundations (tags, comments,          | ✅ built, tested, e2e-verified
+  attachments, activity, flags, events,         |
+  retention)                                    |
+  Phase 1 authorization + user management       | ✅ resolver, cache, guard, boot assertion,
+                                                | profiles, preferences
+  Phase 2 CRM                                   | ✅ contacts, channels, companies, vocabularies,
+                                                | relationships, interactions
+  Phase 3 knowledge (+ 3.5 search projection)   | ✅ records, ACL, vocabularies, contact links,
+                                                | knowledge collection
+  Phase 4 projects                              | ✅ projects, members, tasks, dependencies,
+                                                | watchers, planning, links, time
+  Phase 5 notifications                         | ✅ outbox, drain, templates, preferences,
+                                                | suppressions
+  Phase 6 finance                               | ✅ accounts, ledger, budgets, recurring,
+                                                | invoicing, payments
 
-Every table is inert. This plan turns them on, one capability at a time.
+Every phase is implemented. What follows is the record of what was built and the
+decisions taken while building it.
+
+Module boundary rule, learned twice
+-----------------------------------
+
+SharedModule and SystemModule both had to be split during implementation, for the same
+reason each time: a module on the authentication path must not acquire heavy transitive
+dependencies.
+
+  - SharedModule imported FileProcessorModule (for attachment authorization), which
+    needs MinIO and the BullMQ connection. Since AuthorizationModule imports shared and
+    UsersModule imports authorization, logging in came to require object storage -- and
+    seven e2e suites failed at once. Fixed by moving AttachmentService into its own
+    AttachmentsModule; AttachmentRepository stays in shared so EntityCascadeService can
+    still purge.
+  - UsersModule imported the whole SystemModule to read one setting. Fixed by extracting
+    SystemSettingsModule, the same way SystemAuditModule was already extracted.
+
+The rule that falls out: a leaf module depends on infrastructure only, and when a leaf
+needs a feature service, the consumer moves out rather than the dependency moving in.
+
+Two seams introduced in Phase 0 that later phases must use
+----------------------------------------------------------
+
+Neither was in the original plan; both came out of building it, and both are
+load-bearing for what follows.
+
+EntityAccessRegistry (src/features/shared/entity-access.registry.ts) -- comments and
+attachments are polymorphic, so their readability is entirely their parent's. Rather
+than import every feature module (a cycle) or trust the caller's entityType (a hole),
+each module registers a resolver:
+
+    [ ts ]
+    registry.register('project', (id, principal) => this.projects.canRead(id, principal));
+
+An unregistered entity type is denied to non-admins. Until phases 2-4 register theirs,
+comments on projects/knowledge/contacts are admin-only -- which is the correct state for
+a type nothing can yet vouch for. Registering is a one-line addition in each phase and
+is listed in that phase below.
+
+RetentionPurgeRegistry (src/infrastructure/retention/retention.registry.ts) -- lives in
+infrastructure, not in the system feature, because both sides need it. Each module
+declares how its own table is purged:
+
+    [ ts ]
+    this.retention.register('activity_log', (cutoff, limit) => this.repo.purgeOlderThan(cutoff, limit));
+
+It started inside SystemModule and had to move: owning it there forced SystemModule to
+import the modules whose tables it purges, which dragged MinIO and the file queue into a
+module-subset e2e context that only wanted system settings, and broke eight existing
+tests. The lesson generalises -- a sweep must never import the features whose rows it
+deletes.
 
 ----------------------------------------------------------------------------------------
 
@@ -87,10 +154,12 @@ Definition of done, every phase:
 ----------------------------------------------------------------------------------------
 
 ========================================================================================
-3. PHASE 0 -- FOUNDATIONS RUNTIME
+3. PHASE 0 -- FOUNDATIONS RUNTIME ✅ COMPLETE
 ========================================================================================
 
-The cross-cutting services every later phase calls. Small, and everything depends on it.
+The cross-cutting services every later phase calls. Delivered as described below, with
+two additions (the registries in §1) and one substitution: entity-cascade.util.ts
+shipped as EntityCascadeService, since it needs both repositories injected.
 
 New: src/features/shared/
 
@@ -135,9 +204,20 @@ Invariants to enforce in code
     spec asserting the seeder ships them enabled = false, so nobody flips them by
     editing a seed file.
 
-Acceptance: an activity row appears for a settings change, with the correct actor kind
-for a human, an agent and a scheduler; the retention sweep deletes rows older than 120
-days in dev and reports its count.
+Delivered. 19 files under src/features/shared/ and src/features/system/, 9 new error
+codes, 4 new controllers (/tags, /comments, /attachments, /activity) and 3 system ones
+(/system/feature-flags, /system/retention, /system/events).
+
+Verified: unit specs for every service (fail-closed truth table for the access registry,
+actor-derivation table for activity, batching/skip/failure paths for retention,
+targeting and expiry for flags), plus test/shared-foundations.e2e-spec.ts covering the
+isolation cases -- a non-admin gets 404 (not 403) on an entity nothing vouches for,
+/activity/me ignores a spoofed actorUserId, and the cross-system feed stays admin-only.
+
+Two defects found by those tests, both fixed: FeatureFlagService.toPublic threw on an
+undefined expiresAt (a strict !== null check that undefined walks straight through), and
+the seeder helper derived a row's property name from the SQL column name, so any column
+whose two names differ re-inserted on every run and tripped its unique index.
 
 ----------------------------------------------------------------------------------------
 
@@ -466,14 +546,76 @@ concurrency, notification idempotency, and ACL propagation to search.
 ----------------------------------------------------------------------------------------
 
 ========================================================================================
-13. IMMEDIATE NEXT ACTIONS
+13. WHAT WAS BUILT
 ========================================================================================
 
-  1. Phase 0, first PR: ActivityService + entity-cascade.util.ts +
-     retention.scheduler.ts, with specs. Small, unblocks everything, and proves the flag
-     discipline end to end.
-  2. Phase 1 spike before committing to the guard: write permission-resolver.service.ts
-     and its truth-table spec first, with no HTTP surface. The algorithm is the risk;
-     the guard around it is twenty lines.
-  3. Land §7.1 (the three-line validateVisibility change plus a spec case) at any point
-     before phase 3 -- it is independent, and both knowledge and projects block on it.
+  Module                     | Files | Notable
+  ---------------------------+-------+----------------------------------------------------------
+  features/shared            | 14    | tags, comments, attachments, activity,
+                             |       | EntityAccessRegistry, EntityCascadeService,
+                             |       | materialized-path helpers
+  features/authorization     | 9     | PermissionResolver, epoch-invalidated Redis cache,
+                             |       | PermissionsGuard, @RequirePermission, boot assertion,
+                             |       | RBAC admin
+  features/users (extended)  | 4     | profiles, preferences, own-profile controller
+  features/contacts          | 13    | contacts + channels + companies + vocabularies +
+                             |       | relationships + interactions, resolveContactAccess
+  features/knowledge         | 13    | records, grant-only ACL, vocabularies, contact links,
+                             |       | search projection, review sweep
+  features/projects          | 15    | projects, members, tasks, dependencies, watchers,
+                             |       | milestones, goals, links, time, LexoRank board ordering
+  features/notifications     | 8     | outbox, drain processor, templates, preferences,
+                             |       | suppressions
+  features/finance           | 11    | exact decimal money, ledger, budgets, recurring
+                             |       | income/expense, invoicing, payments
+  features/system (extended) | 12    | feature flags, event log, retention sweep, setting
+                             |       | revisions
+
+Pure, exhaustively specced units -- the pieces where a mistake is silent:
+resolveContactAccess, resolveKnowledgeAccess, resolveProjectAccess, PermissionResolver,
+lexorank, money.util, template-renderer, materialized-path.
+
+Verification
+------------
+
+test/app-boot.e2e-spec.ts boots the real AppModule -- not a module subset -- and asserts
+what main.ts asserts before it listens: every route declares a policy, every
+@RequirePermission resolves to a seeded permission, every scoped entity type has an
+access resolver, and every governed log table has a retention purge. The other e2e
+suites build subsets and would not have caught a broken composition root.
+
+========================================================================================
+14. WHAT IS LEFT
+========================================================================================
+
+Deliberately not built, in rough priority order:
+
+  1. Notification emission from the feature modules. The pipeline exists and drains; the
+     events that should fill it (task.assigned, invoice.overdue, knowledge.review_due)
+     are enqueued from nowhere yet. Each is a call to NotificationService.enqueue inside
+     the caller's transaction -- the argument exists for exactly that.
+  2. Digest collapsing. digest_group_key is written and indexed; the sweep that folds a
+     group into one email is not written.
+  3. Bounce ingestion. NotificationAdminService.recordBounce exists but nothing calls
+     it; wiring it to the IMAP pipeline closes the loop that keeps the sending domain
+     healthy.
+  4. Agent tools for the new modules (create task, search knowledge), carrying the
+     triggering user's principal rather than admin.
+  5. Search reprojection on RBAC change. A role's members change what an ACL-scoped
+     knowledge record projects; the projection is correct on every knowledge and grant
+     write, but a user_roles change does not yet trigger it.
+  6. Invoice PDF rendering into pdfFileId.
+  7. Partitioning of the four log tables, per the threshold in the design's §4.7.
+
+Carried into every later change
+-------------------------------
+
+  - Register an EntityAccessRegistry resolver for each new entity type, or its comments
+    and attachments stay admin-only.
+  - Register a RetentionPurgeRegistry purge for any new log-shaped table, and add its
+    data_retention_policies row.
+  - Add each new controller to src/common/route-policy.coverage.spec.ts -- the boot
+    audit is the guarantee, that spec is the fast feedback.
+  - A module-subset e2e context must import the infrastructure its module transitively
+    needs; AppModule supplies it in production, a subset must not assume it.
+  - Keep leaf modules free of feature dependencies (see the boundary rule in §1).

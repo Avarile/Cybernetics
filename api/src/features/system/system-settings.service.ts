@@ -20,6 +20,8 @@ export interface PublicSetting {
   category: string;
   description: string | null;
   updatedAt: Date;
+  /** Pass back as `expectedVersion` to make the next write conflict-checked. */
+  version: number;
 }
 
 @Injectable()
@@ -49,6 +51,7 @@ export class SystemSettingsService {
       category: row.category,
       description: row.description ?? null,
       updatedAt: row.updatedAt,
+      version: row.version,
     };
   }
 
@@ -87,12 +90,29 @@ export class SystemSettingsService {
     dto: UpsertSettingDto,
     ctx: AuditContext,
   ): Promise<PublicSetting> {
-    const row = await this.repo.upsertByKey(key, {
-      valueJson: dto.value as SettingValue,
-      type: dto.type,
-      category: dto.category,
-      description: dto.description,
-    });
+    // Optimistic concurrency. Two admins editing one setting used to overwrite
+    // each other with no trace beyond the audit line; a caller that read the
+    // row first can now be told its edit was based on a stale value.
+    if (dto.expectedVersion !== undefined) {
+      const current = await this.repo.findByKey(key);
+      if (current && current.version !== dto.expectedVersion) {
+        throw this.errors.create(ErrorCode.SETTING_VERSION_CONFLICT, {
+          message:
+            `Setting "${key}" is at version ${current.version}, ` +
+            `not ${dto.expectedVersion}`,
+        });
+      }
+    }
+    const row = await this.repo.upsertByKey(
+      key,
+      {
+        valueJson: dto.value as SettingValue,
+        type: dto.type,
+        category: dto.category,
+        description: dto.description,
+      },
+      { changedBy: ctx.actorId },
+    );
     await this.cache.del(this.cacheKey(key));
     await this.audit.record({
       ctx,
@@ -117,6 +137,11 @@ export class SystemSettingsService {
       entityType: 'setting',
       metadata: { key },
     });
+  }
+
+  /** Value history for one setting, newest first. */
+  async revisions(key: string, limit = 50) {
+    return this.repo.listRevisions(key, limit);
   }
 
   // --- Typed getters for internal consumers (return default when missing) ---

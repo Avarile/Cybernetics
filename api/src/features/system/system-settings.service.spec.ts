@@ -95,6 +95,9 @@ describe('SystemSettingsService', () => {
     expect(repo.upsertByKey).toHaveBeenCalledWith(
       'features.signup_enabled',
       expect.objectContaining({ valueJson: true, type: 'boolean' }),
+      // Third argument carries the actor onto the revision row, so the value
+      // history records who made each change.
+      { changedBy: 'admin-1' },
     );
     expect(cache.del).toHaveBeenCalledWith(
       'system:setting:features.signup_enabled',

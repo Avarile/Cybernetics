@@ -11,6 +11,13 @@ export const upsertSettingSchema = z
     type: z.enum(['string', 'number', 'boolean', 'json']),
     category: z.string().min(1).max(100).default('general'),
     description: z.string().max(500).optional(),
+    /**
+     * The `version` the caller last read. When supplied, the write is rejected
+     * with SETTING_VERSION_CONFLICT if the row moved on in the meantime — two
+     * admins editing one setting used to overwrite each other silently.
+     * Omitted means last-write-wins, which keeps existing callers working.
+     */
+    expectedVersion: z.number().int().min(0).optional(),
   })
   .superRefine((data, ctx) => {
     const ok =

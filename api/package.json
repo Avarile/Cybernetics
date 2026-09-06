@@ -1,7 +1,7 @@
 {
   "name": "cybernetics",
   "version": "0.0.1",
-  "description": "Cybernetics — modular NestJS application",
+  "description": "Cybernetics \u2014 modular NestJS application",
   "author": "",
   "private": true,
   "license": "UNLICENSED",
@@ -33,7 +33,10 @@
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
     "seed": "ts-node -r tsconfig-paths/register src/infrastructure/database/seeders/seed.ts",
-    "storage:init": "ts-node -r tsconfig-paths/register src/infrastructure/file-manage/scripts/init-minio.ts"
+    "storage:init": "ts-node -r tsconfig-paths/register src/infrastructure/file-manage/scripts/init-minio.ts",
+    "test:api": "ts-node -r tsconfig-paths/register test/api-suite/index.ts",
+    "data:gen": "ts-node -r tsconfig-paths/register test/data-gen/index.ts",
+    "data:coverage": "ts-node -r tsconfig-paths/register test/data-gen/coverage.ts"
   },
   "dependencies": {
     "@ai-sdk/gateway": "^4.0.20",

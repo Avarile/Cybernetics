@@ -18,6 +18,8 @@ export const QUEUE_NAMES = {
   mailboxSync: 'mailbox-sync',
   agentRun: 'agent-run',
   authCleanup: 'auth-cleanup',
+  systemRetention: 'system-retention',
+  notificationSend: 'notification-send',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];

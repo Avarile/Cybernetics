@@ -25,3 +25,6 @@ pnpm-debug.log*
 # caches
 .eslintcache
 *.tsbuildinfo
+
+# live API suite output
+/test/api-suite/last-run.json

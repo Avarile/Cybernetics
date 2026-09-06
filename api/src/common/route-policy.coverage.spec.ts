@@ -21,11 +21,36 @@ import { CollectionController } from '../features/search-service/collection.cont
 import { RecordController } from '../features/search-service/record.controller';
 import { SearchQueryController } from '../features/search-service/search.controller';
 import { SearchStatusController } from '../features/search-service/search-status.controller';
+import { RbacController } from '../features/authorization/rbac.controller';
+import { ContactCompanyController } from '../features/contacts/contact-company.controller';
+import { ContactVocabularyController } from '../features/contacts/contact-vocabulary.controller';
+import { ContactController } from '../features/contacts/contact.controller';
+import { KnowledgeVocabularyController } from '../features/knowledge/knowledge-vocabulary.controller';
+import { KnowledgeController } from '../features/knowledge/knowledge.controller';
+import { FinanceController } from '../features/finance/finance.controller';
+import { InvoiceController } from '../features/finance/invoice.controller';
+import {
+  NotificationAdminController,
+  NotificationController,
+} from '../features/notifications/notification.controller';
+import { ProjectController } from '../features/projects/project.controller';
+import { TaskController } from '../features/projects/task.controller';
+import { ActivityController } from '../features/shared/activity.controller';
+import { AttachmentController } from '../features/shared/attachment.controller';
+import { CommentController } from '../features/shared/comment.controller';
+import { TagController } from '../features/shared/tag.controller';
+import { FeatureFlagController } from '../features/system/feature-flag.controller';
 import { ImapConfigController } from '../features/system/imap-config.controller';
+import { RetentionController } from '../features/system/retention.controller';
+import { SystemEventController } from '../features/system/system-event.controller';
 import { IntegrationCredentialController } from '../features/system/integration-credential.controller';
 import { SmtpConfigController } from '../features/system/smtp-config.controller';
 import { SystemAuditController } from '../features/system/system-audit.controller';
 import { SystemSettingsController } from '../features/system/system-settings.controller';
+import {
+  ProfileController,
+  UserProfileAdminController,
+} from '../features/users/profile.controller';
 import { UsersController } from '../features/users/users.controller';
 import { HealthController } from '../infrastructure/health/health.controller';
 
@@ -57,6 +82,27 @@ const CONTROLLERS = [
   SmtpConfigController,
   SystemAuditController,
   SystemSettingsController,
+  FeatureFlagController,
+  RetentionController,
+  SystemEventController,
+  TagController,
+  CommentController,
+  AttachmentController,
+  ActivityController,
+  RbacController,
+  ContactController,
+  ContactCompanyController,
+  ContactVocabularyController,
+  KnowledgeController,
+  KnowledgeVocabularyController,
+  ProjectController,
+  TaskController,
+  NotificationController,
+  NotificationAdminController,
+  FinanceController,
+  InvoiceController,
+  ProfileController,
+  UserProfileAdminController,
   UsersController,
   HealthController,
 ];

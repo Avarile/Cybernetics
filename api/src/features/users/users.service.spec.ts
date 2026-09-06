@@ -21,6 +21,8 @@ describe('UsersService', () => {
   let repo: any;
   let passwords: any;
   let revocation: any;
+  let permissionCache: any;
+  let permissions: any;
   let service: UsersService;
 
   beforeEach(() => {
@@ -36,10 +38,21 @@ describe('UsersService', () => {
     };
     passwords = { hash: jest.fn(async () => 'HASH') };
     revocation = { revokeAllForUser: jest.fn(async () => undefined) };
+    permissionCache = { invalidateAll: jest.fn(async () => undefined) };
+    permissions = {
+      findRoleByKey: jest.fn(async (key: string) => ({
+        id: `role-${key}`,
+        key,
+      })),
+      grantRole: jest.fn(async () => undefined),
+      revokeRole: jest.fn(async () => true),
+    };
     service = new UsersService(
       repo,
       passwords,
       revocation,
+      permissionCache,
+      permissions,
       new ExceptionService(),
     );
   });
@@ -107,6 +120,96 @@ describe('UsersService', () => {
     it('does not revoke on a display-name edit', async () => {
       await service.update('u1', { displayName: 'New Name' });
       expect(revocation.revokeAllForUser).not.toHaveBeenCalled();
+    });
+  });
+  describe('role assignment', () => {
+    // A provisioned account used to get `users.role` and nothing else, while
+    // the resolver read grants exclusively from `user_roles` — so every new
+    // account resolved to zero permissions and could not create a contact, a
+    // knowledge record or a task until an admin granted the role by hand.
+    it('grants the matching role row when an account is provisioned', async () => {
+      await service.create({
+        email: 'new@b.co',
+        password: 'a-very-strong-pass',
+        role: 'user',
+      });
+      expect(permissions.findRoleByKey).toHaveBeenCalledWith('user');
+      expect(permissions.grantRole).toHaveBeenCalledWith(
+        'u1',
+        'role-user',
+        null,
+        null,
+      );
+      expect(permissionCache.invalidateAll).toHaveBeenCalled();
+    });
+
+    it('grants the admin role row when an admin is provisioned', async () => {
+      repo.create.mockResolvedValueOnce(makeRow({ role: 'admin' }));
+      await service.create({
+        email: 'boss@b.co',
+        password: 'a-very-strong-pass',
+        role: 'admin',
+      });
+      expect(permissions.grantRole).toHaveBeenCalledWith(
+        'u1',
+        'role-admin',
+        null,
+        null,
+      );
+    });
+
+    // The account is already committed by this point; failing the request would
+    // tell the caller nothing happened when in fact a user now exists.
+    it('does not fail provisioning when the role is not seeded', async () => {
+      permissions.findRoleByKey.mockResolvedValueOnce(null);
+      await expect(
+        service.create({
+          email: 'new@b.co',
+          password: 'a-very-strong-pass',
+          role: 'user',
+        }),
+      ).resolves.toMatchObject({ email: 'new@b.co' });
+      expect(permissions.grantRole).not.toHaveBeenCalled();
+    });
+
+    it('moves the role row when an admin promotes a user', async () => {
+      repo.findActiveById.mockResolvedValueOnce(makeRow({ role: 'user' }));
+      await service.update('u1', { role: 'admin' });
+      expect(permissions.revokeRole).toHaveBeenCalledWith('u1', 'role-user');
+      expect(permissions.grantRole).toHaveBeenCalledWith(
+        'u1',
+        'role-admin',
+        null,
+        null,
+      );
+    });
+
+    it('moves the role row back on demotion', async () => {
+      repo.findActiveById.mockResolvedValueOnce(makeRow({ role: 'admin' }));
+      repo.update.mockResolvedValueOnce(makeRow({ role: 'user' }));
+      await service.update('u1', { role: 'user' });
+      expect(permissions.revokeRole).toHaveBeenCalledWith('u1', 'role-admin');
+      expect(permissions.grantRole).toHaveBeenCalledWith(
+        'u1',
+        'role-user',
+        null,
+        null,
+      );
+    });
+
+    // Re-granting a role the user already holds would reset an expiry an
+    // administrator set deliberately.
+    it('leaves the role row alone when the role does not change', async () => {
+      repo.findActiveById.mockResolvedValueOnce(makeRow({ role: 'user' }));
+      await service.update('u1', { role: 'user' });
+      expect(permissions.revokeRole).not.toHaveBeenCalled();
+      expect(permissions.grantRole).not.toHaveBeenCalled();
+    });
+
+    it('does not touch role rows on a display-name edit', async () => {
+      await service.update('u1', { displayName: 'New Name' });
+      expect(permissions.grantRole).not.toHaveBeenCalled();
+      expect(permissions.revokeRole).not.toHaveBeenCalled();
     });
   });
 });

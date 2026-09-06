@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, count, desc, eq } from 'drizzle-orm';
+import { and, count, desc, eq, inArray } from 'drizzle-orm';
 import {
   DRIZZLE,
   type DrizzleDB,
@@ -72,6 +72,21 @@ export class UserRepository extends BaseRepository<typeof users> {
       .from(users)
       .where(where);
     return { rows, total: Number(totals[0]?.value ?? 0) };
+  }
+
+  /**
+   * Live users for a set of ids, in one query.
+   *
+   * Used where a caller supplies user ids (comment mentions, membership edits)
+   * and they must be verified before being stored — checking them one at a time
+   * turns a 20-id request into 20 round trips.
+   */
+  async findLiveByIds(ids: string[]): Promise<UserRow[]> {
+    if (ids.length === 0) return [];
+    return this.db
+      .select()
+      .from(users)
+      .where(and(inArray(users.id, ids), eq(users.isDeleted, false)));
   }
 
   async stampLogin(id: string): Promise<void> {

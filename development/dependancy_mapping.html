@@ -1,0 +1,1352 @@
+
+<title>Cybernetics Module Graph</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --paper:      #F2F3F1;
+    --surface:    #FFFFFF;
+    --surface-2:  #E9ECEA;
+    --ink:        #12171C;
+    --ink-soft:   #5A646E;
+    --rule:       #D3D8D5;
+    --rule-firm:  #B4BCB8;
+    --accent:     #14595E;
+    --accent-dim: #14595E1A;
+    --ok:         #2E6B3E;
+    --ok-dim:     #2E6B3E14;
+    --warn:       #8A5A12;
+    --warn-dim:   #8A5A1214;
+
+    --f-display: 'Archivo', 'Helvetica Neue', Arial, sans-serif;
+    --f-body:    'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+    --f-mono:    'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:      #10151A;
+      --surface:    #161C22;
+      --surface-2:  #1D252C;
+      --ink:        #E6EAED;
+      --ink-soft:   #97A3AD;
+      --rule:       #27313A;
+      --rule-firm:  #3A4650;
+      --accent:     #5FBFC4;
+      --accent-dim: #5FBFC422;
+      --ok:         #6DBE83;
+      --ok-dim:     #6DBE831F;
+      --warn:       #D9A44A;
+      --warn-dim:   #D9A44A1F;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --paper:      #10151A;
+    --surface:    #161C22;
+    --surface-2:  #1D252C;
+    --ink:        #E6EAED;
+    --ink-soft:   #97A3AD;
+    --rule:       #27313A;
+    --rule-firm:  #3A4650;
+    --accent:     #5FBFC4;
+    --accent-dim: #5FBFC422;
+    --ok:         #6DBE83;
+    --ok-dim:     #6DBE831F;
+    --warn:       #D9A44A;
+    --warn-dim:   #D9A44A1F;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 0 28px 96px;
+  }
+
+  .prose { max-width: 68ch; }
+
+  /* ---------- masthead ---------- */
+
+  header.mast {
+    border-bottom: 2px solid var(--ink);
+    padding: 56px 0 20px;
+    margin-bottom: 40px;
+  }
+
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 18px;
+  }
+
+  h1 {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: clamp(2.1rem, 5.4vw, 3.4rem);
+    line-height: 1.02;
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+    margin: 0 0 18px;
+  }
+
+  .standfirst {
+    font-size: 1.075rem;
+    color: var(--ink-soft);
+    max-width: 64ch;
+    margin: 0 0 26px;
+  }
+
+  .runmeta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 26px;
+    font-family: var(--f-mono);
+    font-size: 12px;
+    color: var(--ink-soft);
+  }
+  .runmeta b { color: var(--ink); font-weight: 500; }
+
+  /* ---------- sections ---------- */
+
+  section { margin-top: 60px; }
+
+  h2 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 1.45rem;
+    letter-spacing: -0.015em;
+    margin: 0 0 6px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--rule-firm);
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+  }
+  h2 .num {
+    font-family: var(--f-mono);
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--accent);
+    letter-spacing: 0.08em;
+  }
+
+  h3 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 1.02rem;
+    letter-spacing: -0.005em;
+    margin: 34px 0 10px;
+  }
+
+  p { margin: 0 0 14px; }
+  .prose p + p { margin-top: 0; }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  code, .mono { font-family: var(--f-mono); font-size: 0.875em; }
+  .prose code {
+    background: var(--surface-2);
+    padding: 0.1em 0.36em;
+    border-radius: 2px;
+  }
+
+  /* ---------- verdict ---------- */
+
+  .verdict {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(232px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    margin-top: 22px;
+  }
+  .check {
+    background: var(--surface);
+    padding: 20px 20px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .check .state {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ok);
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .check .state::before {
+    content: "";
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--ok);
+    flex: none;
+  }
+  .check .what {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 0.985rem;
+    line-height: 1.3;
+  }
+  .check .how {
+    font-size: 0.845rem;
+    color: var(--ink-soft);
+    line-height: 1.5;
+  }
+  .check .tool {
+    font-family: var(--f-mono);
+    font-size: 11px;
+    color: var(--ink-soft);
+    padding-top: 3px;
+    border-top: 1px dotted var(--rule-firm);
+    margin-top: auto;
+  }
+
+  /* ---------- stat strip ---------- */
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    margin-top: 24px;
+  }
+  .stat { background: var(--surface); padding: 15px 16px; }
+  .stat .n {
+    font-family: var(--f-display);
+    font-weight: 700;
+    font-size: 1.75rem;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+  }
+  .stat .l {
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin-top: 3px;
+  }
+
+  /* ---------- layer strata ---------- */
+
+  .strata { margin-top: 26px; border-top: 1px solid var(--rule-firm); }
+
+  .band {
+    display: grid;
+    grid-template-columns: 116px 1fr;
+    gap: 20px;
+    padding: 16px 0;
+    border-bottom: 1px solid var(--rule);
+    align-items: start;
+  }
+  .band .tier { padding-top: 2px; }
+  .band .tier .id {
+    font-family: var(--f-mono);
+    font-weight: 600;
+    font-size: 13px;
+    color: var(--accent);
+    letter-spacing: 0.06em;
+  }
+  .band .tier .role {
+    font-size: 0.775rem;
+    color: var(--ink-soft);
+    line-height: 1.35;
+    margin-top: 2px;
+  }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-family: var(--f-mono);
+    font-size: 12px;
+    padding: 4px 9px;
+    background: var(--surface);
+    border: 1px solid var(--rule-firm);
+    white-space: nowrap;
+  }
+  .chip.g {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-dim);
+  }
+  .chip.root {
+    border-color: var(--ink);
+    background: var(--ink);
+    color: var(--paper);
+    font-weight: 500;
+  }
+
+  .flowkey {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 20px;
+    margin-top: 14px;
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+  }
+  .flowkey span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 11px; height: 11px; border: 1px solid var(--rule-firm); flex: none; }
+  .swatch.g { border-color: var(--accent); background: var(--accent-dim); }
+  .swatch.root { background: var(--ink); border-color: var(--ink); }
+
+  /* ---------- tables ---------- */
+
+  .scroll { overflow-x: auto; margin-top: 20px; border: 1px solid var(--rule); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.885rem; }
+  thead th {
+    text-align: left;
+    font-family: var(--f-mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    background: var(--surface-2);
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--rule-firm);
+    white-space: nowrap;
+  }
+  tbody td {
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--rule);
+    background: var(--surface);
+    vertical-align: top;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.n { font-variant-numeric: tabular-nums; text-align: right; font-family: var(--f-mono); white-space: nowrap; }
+  td.m, th.m { font-family: var(--f-mono); font-size: 0.82rem; }
+  .bar {
+    display: inline-block;
+    height: 8px;
+    background: var(--accent);
+    vertical-align: middle;
+    min-width: 2px;
+  }
+
+  /* ---------- module records ---------- */
+
+  .records {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    margin-top: 20px;
+  }
+  .rec { background: var(--surface); padding: 15px 16px 16px; }
+  .rec .hd {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    border-bottom: 1px solid var(--rule);
+    padding-bottom: 7px;
+    margin-bottom: 9px;
+  }
+  .rec .nm {
+    font-family: var(--f-mono);
+    font-weight: 600;
+    font-size: 0.875rem;
+    letter-spacing: -0.01em;
+  }
+  .rec .tags { display: flex; gap: 5px; flex: none; }
+  .tag {
+    font-family: var(--f-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 2px 5px;
+    border: 1px solid var(--rule-firm);
+    color: var(--ink-soft);
+    white-space: nowrap;
+  }
+  .tag.g { border-color: var(--accent); color: var(--accent); background: var(--accent-dim); }
+
+  .rec dl { margin: 0; display: grid; grid-template-columns: 62px 1fr; gap: 5px 10px; }
+  .rec dt {
+    font-family: var(--f-mono);
+    font-size: 9.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    padding-top: 2px;
+  }
+  .rec dd {
+    margin: 0;
+    font-family: var(--f-mono);
+    font-size: 0.775rem;
+    line-height: 1.5;
+    word-break: break-word;
+  }
+  .rec dd.none { color: var(--ink-soft); }
+
+  /* ---------- findings ---------- */
+
+  .finding {
+    border: 1px solid var(--rule-firm);
+    border-left-width: 3px;
+    background: var(--surface);
+    padding: 16px 18px 17px;
+    margin-top: 16px;
+  }
+  .finding.ok   { border-left-color: var(--ok);   }
+  .finding.warn { border-left-color: var(--warn); }
+  .finding.note { border-left-color: var(--accent); }
+
+  .finding .cap {
+    font-family: var(--f-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  .finding.ok   .cap { color: var(--ok);   }
+  .finding.warn .cap { color: var(--warn); }
+  .finding.note .cap { color: var(--accent); }
+
+  .finding h4 {
+    font-family: var(--f-display);
+    font-weight: 600;
+    font-size: 1.02rem;
+    margin: 0 0 8px;
+    letter-spacing: -0.01em;
+  }
+  .finding p { margin: 0 0 10px; font-size: 0.925rem; }
+  .finding p:last-child { margin-bottom: 0; }
+  .finding code {
+    font-family: var(--f-mono);
+    font-size: 0.85em;
+    background: var(--surface-2);
+    padding: 0.1em 0.34em;
+  }
+
+  pre {
+    font-family: var(--f-mono);
+    font-size: 0.79rem;
+    line-height: 1.6;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    padding: 13px 15px;
+    overflow-x: auto;
+    margin: 12px 0 0;
+  }
+
+  ul.tight { margin: 0 0 14px; padding-left: 20px; }
+  ul.tight li { margin-bottom: 5px; }
+
+  footer {
+    margin-top: 72px;
+    padding-top: 18px;
+    border-top: 1px solid var(--rule-firm);
+    font-family: var(--f-mono);
+    font-size: 11.5px;
+    color: var(--ink-soft);
+  }
+
+  @media (max-width: 620px) {
+    .band { grid-template-columns: 1fr; gap: 9px; }
+    .wrap { padding: 0 18px 72px; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <p class="eyebrow">Dependency audit · api/src</p>
+    <h1>No cycles. Six clean layers.</h1>
+    <p class="standfirst">
+      Three independent passes over the Cybernetics NestJS API — file-level imports,
+      declared module metadata, and the live DI container — agree: the graph is acyclic.
+      What follows is the full injection map behind that verdict.
+    </p>
+    <div class="runmeta">
+      <span><b>35</b> first-party modules</span>
+      <span><b>519</b> TypeScript files scanned</span>
+      <span>branch <b>feat-new-schema-related</b></span>
+      <span>commit <b>aaa47c2</b></span>
+    </div>
+  </header>
+
+  <section>
+    <h2><span class="num">01</span> Verdict</h2>
+    <div class="prose">
+      <p>
+        A cycle can hide from any single tool, so all three ran. They look at different
+        artifacts and would fail in different ways — agreement across them is the result
+        worth trusting.
+      </p>
+    </div>
+
+    <div class="verdict">
+      <div class="check">
+        <div class="state">Clean</div>
+        <div class="what">No circular file imports</div>
+        <div class="how">
+          Every <code>import</code> edge across 519 files, type-only imports included.
+          Catches cycles that never reach the DI container.
+        </div>
+        <div class="tool">madge --circular</div>
+      </div>
+      <div class="check">
+        <div class="state">Clean</div>
+        <div class="what">No cycles in declared modules</div>
+        <div class="how">
+          Tarjan SCC over the <code>imports:</code> arrays of all 35 first-party modules,
+          read straight from the TypeScript AST. 81 edges, zero components of size &gt; 1.
+        </div>
+        <div class="tool">TS compiler API + Tarjan</div>
+      </div>
+      <div class="check">
+        <div class="state">Clean</div>
+        <div class="what">The container assembles</div>
+        <div class="how">
+          <code>AppModule</code> resolves imports, validates exports and wires every
+          dependency in preview mode. A cycle needing <code>forwardRef</code> throws here.
+        </div>
+        <div class="tool">pnpm check:graph</div>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="n">0</div><div class="l">Cycles</div></div>
+      <div class="stat"><div class="n">0</div><div class="l">forwardRef</div></div>
+      <div class="stat"><div class="n">0</div><div class="l">ModuleRef escapes</div></div>
+      <div class="stat"><div class="n">6</div><div class="l">Graph depth</div></div>
+      <div class="stat"><div class="n">439</div><div class="l">Providers</div></div>
+      <div class="stat"><div class="n">41</div><div class="l">Controllers</div></div>
+      <div class="stat"><div class="n">694</div><div class="l">Injection edges</div></div>
+    </div>
+
+    <div class="prose">
+      <h3>Why zero <code>forwardRef</code> is the real headline</h3>
+      <p>
+        <code>forwardRef</code> is how a NestJS codebase survives a circular dependency
+        rather than fixes one. Not a single occurrence exists in <code>src/</code>, and
+        neither does <code>ModuleRef</code> or <code>LazyModuleLoader</code> — the other two
+        ways to reach a provider without declaring you depend on it. Nothing here is
+        papering over a cycle; there is no cycle to paper over.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">02</span> The layer map</h2>
+    <div class="prose">
+      <p>
+        Depth is the longest chain of first-party imports beneath a module. Because the
+        graph is acyclic this is well-defined, and it partitions all 35 modules into six
+        strata where <strong>every module depends only on layers below it</strong>. That
+        property is what "no cycles" looks like in practice.
+      </p>
+    </div>
+
+    <div class="strata">
+      <div class="band">
+        <div class="tier"><div class="id">L5</div><div class="role">Composition root</div></div>
+        <div class="chips">
+          <span class="chip root">AppModule</span>
+        </div>
+      </div>
+      <div class="band">
+        <div class="tier"><div class="id">L4</div><div class="role">Composite features</div></div>
+        <div class="chips">
+          <span class="chip">AuthModule</span>
+          <span class="chip">FinanceModule</span>
+          <span class="chip">NotificationsModule</span>
+        </div>
+      </div>
+      <div class="band">
+        <div class="tier"><div class="id">L3</div><div class="role">Domain features</div></div>
+        <div class="chips">
+          <span class="chip">KnowledgeModule</span>
+          <span class="chip">ProjectsModule</span>
+          <span class="chip">UsersModule</span>
+        </div>
+      </div>
+      <div class="band">
+        <div class="tier"><div class="id">L2</div><div class="role">Feature services</div></div>
+        <div class="chips">
+          <span class="chip">AttachmentsModule</span>
+          <span class="chip">AuthorizationModule</span>
+          <span class="chip">ContactsModule</span>
+          <span class="chip">DocumentIngestModule</span>
+          <span class="chip">HealthModule</span>
+          <span class="chip">MailboxModule</span>
+          <span class="chip">MastraModule</span>
+          <span class="chip">SystemModule</span>
+          <span class="chip">TokenRevocationModule</span>
+        </div>
+      </div>
+      <div class="band">
+        <div class="tier"><div class="id">L1</div><div class="role">Shared capability</div></div>
+        <div class="chips">
+          <span class="chip">EmailModule</span>
+          <span class="chip">FileProcessorModule</span>
+          <span class="chip">SearchServiceModule</span>
+          <span class="chip">SessionCacheModule</span>
+          <span class="chip">SharedModule</span>
+          <span class="chip">SystemSettingsModule</span>
+        </div>
+      </div>
+      <div class="band">
+        <div class="tier"><div class="id">L0</div><div class="role">Infrastructure &amp; registries</div></div>
+        <div class="chips">
+          <span class="chip g">CacheModule</span>
+          <span class="chip g">ConfigModule</span>
+          <span class="chip">CryptoModule</span>
+          <span class="chip g">DatabaseModule</span>
+          <span class="chip g">ExceptionsModule</span>
+          <span class="chip g">FileManageModule</span>
+          <span class="chip">LoggerModule</span>
+          <span class="chip">MastraRepositoriesModule</span>
+          <span class="chip">ObservabilityModule</span>
+          <span class="chip g">QueueModule</span>
+          <span class="chip">RetentionRegistryModule</span>
+          <span class="chip g">SearchEngineModule</span>
+          <span class="chip">SystemAuditModule</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="flowkey">
+      <span><i class="swatch root"></i> composition root</span>
+      <span><i class="swatch g"></i> <code>@Global()</code> — visible everywhere without an import</span>
+      <span><i class="swatch"></i> imported explicitly</span>
+      <span>▼ dependencies flow downward only</span>
+    </div>
+
+    <h3>Load-bearing modules</h3>
+    <div class="prose">
+      <p>
+        Fan-in counts first-party modules that import each one. These are the modules whose
+        exported surface is hardest to change.
+      </p>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th class="m">Module</th>
+            <th>Layer</th>
+            <th>Fan-in</th>
+            <th style="width:38%">Importers</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="m">QueueModule</td><td>L0</td><td class="n">9</td><td><i class="bar" style="width:100%"></i></td></tr>
+          <tr><td class="m">SearchServiceModule</td><td>L1</td><td class="n">7</td><td><i class="bar" style="width:78%"></i></td></tr>
+          <tr><td class="m">SharedModule</td><td>L1</td><td class="n">7</td><td><i class="bar" style="width:78%"></i></td></tr>
+          <tr><td class="m">CacheModule</td><td>L0</td><td class="n">5</td><td><i class="bar" style="width:56%"></i></td></tr>
+          <tr><td class="m">EmailModule</td><td>L1</td><td class="n">5</td><td><i class="bar" style="width:56%"></i></td></tr>
+          <tr><td class="m">FileProcessorModule</td><td>L1</td><td class="n">4</td><td><i class="bar" style="width:44%"></i></td></tr>
+          <tr><td class="m">ContactsModule</td><td>L2</td><td class="n">3</td><td><i class="bar" style="width:33%"></i></td></tr>
+          <tr><td class="m">RetentionRegistryModule</td><td>L0</td><td class="n">3</td><td><i class="bar" style="width:33%"></i></td></tr>
+          <tr><td class="m">SystemAuditModule</td><td>L0</td><td class="n">3</td><td><i class="bar" style="width:33%"></i></td></tr>
+          <tr><td class="m">SystemModule</td><td>L2</td><td class="n">3</td><td><i class="bar" style="width:33%"></i></td></tr>
+          <tr><td class="m">UsersModule</td><td>L3</td><td class="n">3</td><td><i class="bar" style="width:33%"></i></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">03</span> How the cycles were avoided</h2>
+    <div class="prose">
+      <p>
+        A graph this size does not stay acyclic by luck. Three registries sit at L0 and
+        invert what would otherwise be back-edges from infrastructure into features — the
+        classic source of NestJS cycles. Each is a single instance that feature modules
+        write into at bootstrap, so the dependency points one way only.
+      </p>
+    </div>
+
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th class="m">Registry</th>
+            <th class="m">Owner</th>
+            <th>Cycle it prevents</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="m">EntityAccessRegistry</td>
+            <td class="m">SharedModule</td>
+            <td>Comments and attachments are polymorphic across projects, tasks, knowledge, contacts and invoices. Resolving readability directly would make <code>SharedModule</code> import every feature module that imports it. Modules register a check instead; an unregistered entity type is denied, not allowed.</td>
+          </tr>
+          <tr>
+            <td class="m">RetentionPurgeRegistry</td>
+            <td class="m">RetentionRegistryModule</td>
+            <td>The retention sweep must reach into every feature's tables. Features register purge handlers rather than the scheduler importing them. Deliberately not <code>@Global()</code> — three importers, all named, so the seam stays visible.</td>
+          </tr>
+          <tr>
+            <td class="m">IndexRegistry</td>
+            <td class="m">SearchServiceModule</td>
+            <td>Search indexing needs per-collection schemas owned by feature modules. Bootstrap providers (<code>KnowledgeCollectionBootstrap</code>, <code>ProjectCollectionBootstrap</code>, <code>DocumentsCollectionBootstrap</code>) register from the feature side.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="prose">
+      <p style="margin-top:16px">
+        <code>MastraRepositoriesModule</code> is a fourth instance of the same discipline: the
+        <code>@mastra/nestjs</code> dynamic module resolves its factory's <code>inject</code>
+        tokens only against its own <code>imports</code>, not the host module's providers, so
+        the five Drizzle repositories were split into a module both sides can import.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">04</span> Where dependencies actually resolve</h2>
+    <div class="prose">
+      <p>
+        The container records 694 constructor injections. Splitting them by <em>how</em> each
+        one resolves shows the real coupling — including the edges that no
+        <code>imports:</code> array documents.
+      </p>
+    </div>
+
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Resolution path</th>
+            <th>Edges</th>
+            <th style="width:34%"></th>
+            <th>Reading</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Within one module</td><td class="n">370</td>
+            <td><i class="bar" style="width:100%"></i></td>
+            <td>Services wiring to their own repositories. Healthy cohesion.</td>
+          </tr>
+          <tr>
+            <td>Cross-module, via declared <code>imports</code></td><td class="n">102</td>
+            <td><i class="bar" style="width:28%"></i></td>
+            <td>Visible, checkable coupling across 47 module pairs.</td>
+          </tr>
+          <tr>
+            <td>Cross-module, via <code>@Global()</code></td><td class="n">132</td>
+            <td><i class="bar" style="width:36%; background:var(--warn)"></i></td>
+            <td>Resolves with nothing in the importer's <code>imports</code> array.</td>
+          </tr>
+          <tr>
+            <td>Into third-party modules</td><td class="n">90</td>
+            <td><i class="bar" style="width:24%"></i></td>
+            <td>Nest, BullMQ, Terminus, Passport, Mastra, Pino.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>The seven global modules</h3>
+    <div class="prose">
+      <p>
+        Seven of 35 modules are <code>@Global()</code>. Three of them carry almost all the
+        implicit coupling:
+      </p>
+    </div>
+
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th class="m">Global module</th>
+            <th>Injections through it</th>
+            <th class="m">Exported tokens</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="m">DatabaseModule</td><td class="n">48</td><td class="m">DRIZZLE, PG_POOL</td></tr>
+          <tr><td class="m">ExceptionsModule</td><td class="n">41</td><td class="m">ExceptionService</td></tr>
+          <tr><td class="m">ConfigModule</td><td class="n">34</td><td class="m">ConfigService <span style="color:var(--ink-soft)">(re-export)</span></td></tr>
+          <tr><td class="m">SearchEngineModule</td><td class="n">4</td><td class="m">SEARCH_ENGINE, MEILI_CLIENT</td></tr>
+          <tr><td class="m">FileManageModule</td><td class="n">3</td><td class="m">OBJECT_STORAGE, MINIO_CLIENT</td></tr>
+          <tr><td class="m">CacheModule</td><td class="n">2</td><td class="m">REDIS_CLIENT, RedisThrottlerStorage, NestCacheModule</td></tr>
+          <tr><td class="m">QueueModule</td><td class="n">0</td><td class="m">BullModule <span style="color:var(--ink-soft)">(re-export)</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="prose">
+      <p style="margin-top:16px">
+        This is a defensible line. All seven are cross-cutting infrastructure — a database
+        handle, an error mapper, config, object storage, a search client, a cache and a queue
+        root — and each exports symbol tokens rather than concrete classes, so nothing
+        downstream binds to an implementation. The cost is that 132 edges are invisible in
+        module metadata: <code>ContactsModule</code>'s four repositories depend on
+        <code>DRIZZLE</code>, and its <code>imports</code> array says only
+        <code>[SharedModule]</code>.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">05</span> Application-wide bindings</h2>
+    <div class="prose">
+      <p>
+        Enhancers registered by token apply to every route in the application, whichever
+        module declares them. Guard order is significant and is set by declaration order in
+        <code>app.module.ts</code>.
+      </p>
+    </div>
+
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr>
+            <th class="m">Token</th>
+            <th class="m">Bound class</th>
+            <th class="m">Declared in</th>
+            <th>Role</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="m">APP_PIPE</td><td class="m">ZodValidationPipe</td><td class="m">app.module.ts</td><td>Validates every request body, query and param</td></tr>
+          <tr><td class="m">APP_GUARD <span style="color:var(--ink-soft)">1</span></td><td class="m">ThrottlerGuard</td><td class="m">app.module.ts</td><td>Rate limit, backed by <code>RedisThrottlerStorage</code></td></tr>
+          <tr><td class="m">APP_GUARD <span style="color:var(--ink-soft)">2</span></td><td class="m">JwtAuthGuard</td><td class="m">app.module.ts</td><td>Authenticate</td></tr>
+          <tr><td class="m">APP_GUARD <span style="color:var(--ink-soft)">3</span></td><td class="m">RolesGuard</td><td class="m">app.module.ts</td><td>Authorize by role</td></tr>
+          <tr><td class="m">APP_GUARD <span style="color:var(--ink-soft)">4</span></td><td class="m">PermissionsGuard</td><td class="m">AuthorizationModule</td><td>Authorize by permission; additive — a route with no <code>@RequirePermission</code> passes through</td></tr>
+          <tr><td class="m">APP_FILTER</td><td class="m">GlobalExceptionFilter</td><td class="m">ExceptionsModule</td><td>Maps thrown errors to the wire format</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Symbol tokens</h3>
+    <div class="prose">
+      <p>
+        Six <code>Symbol</code> tokens carry the infrastructure boundary. Each pairs a raw
+        client with an interface-shaped service token, so callers can depend on the abstraction:
+      </p>
+    </div>
+    <pre>DRIZZLE, PG_POOL         src/infrastructure/database/drizzle.constants.ts
+MEILI_CLIENT, SEARCH_ENGINE  src/infrastructure/search-engine/meili.constants.ts
+MINIO_CLIENT, OBJECT_STORAGE src/infrastructure/file-manage/minio.constants.ts
+REDIS_CLIENT             src/infrastructure/cache/cache.module.ts</pre>
+
+    <h3>BullMQ queues</h3>
+    <div class="prose">
+      <p>
+        <code>QueueModule</code> sets the shared Redis connection and default job options and
+        registers no queue of its own; each feature module owns its queues via
+        <code>BullModule.registerQueue()</code>.
+      </p>
+    </div>
+    <pre>file-processing    FileProcessorModule      agent-run          MastraModule
+document-ingest    DocumentIngestModule     auth-cleanup       AuthModule
+search-indexing    SearchServiceModule      system-retention   SystemModule
+mailbox-sync       MailboxModule            notification-send  NotificationsModule</pre>
+  </section>
+
+  <section>
+    <h2><span class="num">06</span> Findings</h2>
+
+    <div class="finding warn">
+      <div class="cap">Act on this</div>
+      <h4>CI enforces types only — the DI check never runs</h4>
+      <p>
+        <code>.github/workflows/typecheck.yml</code> is the single workflow, and it runs
+        <code>pnpm typecheck</code>. The <code>verify</code> script chains typecheck, lint,
+        127 unit specs and <code>check:graph</code>, but nothing invokes it on push or PR.
+      </p>
+      <p>
+        This matters specifically because of what <code>check:graph</code> exists to catch. Its
+        own header records the incident: <code>SystemModule</code> kept exporting
+        <code>SystemAuditService</code> after that provider moved to
+        <code>SystemAuditModule</code>, and the first sign was <code>nest start</code> dying
+        with <code>UnknownExportException</code>. <code>tsc</code> cannot see that — DI wiring
+        is decorator metadata, not types — and the unit suite constructs services with
+        <code>new Service(mockA, mockB)</code>, so it never exercises the container either.
+        The tool that closes the hole is written and passing; it just isn't gated.
+      </p>
+      <p>
+        Fix is one line — <code>run: pnpm verify</code> in place of <code>pnpm typecheck</code>,
+        or a separate step. <code>check:graph</code> needs no Postgres, Redis, MinIO or
+        Meilisearch: preview mode instantiates no providers and opens no sockets.
+      </p>
+    </div>
+
+    <div class="finding warn">
+      <div class="cap">Dead edge</div>
+      <h4><code>SystemModule</code> imports <code>EmailModule</code> and never uses it</h4>
+      <p>
+        <code>EmailModule</code> exports <code>MailerService</code> and
+        <code>InboxService</code>. Neither is injected anywhere under
+        <code>src/features/system/</code>, and no injection edge crosses that module pair in
+        the container graph.
+      </p>
+      <p>
+        The import reads as necessary because <code>smtp-config.service.ts</code> and
+        <code>imap-config.service.ts</code> do reach into <code>infrastructure/email/</code> —
+        but for <code>verifySmtp</code> and <code>verifyImap</code>, which are plain exported
+        functions, not providers. A direct file import, not a DI dependency. Removing
+        <code>EmailModule</code> from <code>system.module.ts:imports</code> drops
+        <code>SystemModule</code> from fan-in on <code>EmailModule</code> (5 → 4) and changes
+        nothing at runtime.
+      </p>
+    </div>
+
+    <div class="finding note">
+      <div class="cap">Redundant, harmless</div>
+      <h4>Seven modules import <code>QueueModule</code> even though it is global</h4>
+      <p>
+        <code>QueueModule</code> is <code>@Global()</code> and re-exports
+        <code>BullModule</code>, so <code>BullModule.registerQueue()</code> already resolves
+        the root configuration without the explicit import. Auth, DocumentIngest,
+        FileProcessor, Mailbox, Mastra, Notifications, SearchService and System all list it
+        anyway — it contributes zero injection edges.
+      </p>
+      <p>
+        Worth leaving alone. The pairing of <code>QueueModule</code> with
+        <code>BullModule.registerQueue()</code> documents that the module owns a queue, and
+        that intent is more valuable than eight removed lines.
+      </p>
+    </div>
+
+    <div class="finding ok">
+      <div class="cap">Confirmed healthy</div>
+      <h4>No request-scoped providers in first-party code</h4>
+      <p>
+        Every provider in <code>src/</code> is a singleton. The nine non-default-scope
+        providers in the graph are all third-party — Terminus health indicators, Pino's
+        <code>PinoLogger</code>, and Nest's <code>INQUIRER</code>.
+      </p>
+      <p>
+        This is worth stating because request scope is contagious: one
+        <code>Scope.REQUEST</code> provider bubbles up through everything that injects it,
+        forcing per-request instantiation of whole subtrees. Nothing in this codebase starts
+        that chain.
+      </p>
+    </div>
+
+    <div class="finding ok">
+      <div class="cap">Confirmed healthy</div>
+      <h4>Every declared export is owned or legitimately re-exported</h4>
+      <p>
+        Preview mode validates exports across the whole graph, and it passes. Three modules
+        re-export whole modules rather than providers — <code>SystemModule</code> re-exports
+        <code>SystemAuditModule</code> and <code>SystemSettingsModule</code>,
+        <code>AuthModule</code> re-exports <code>TokenRevocationModule</code>,
+        <code>QueueModule</code> re-exports <code>BullModule</code>. All resolve.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">07</span> Full module inventory</h2>
+    <div class="prose">
+      <p>
+        All 35 first-party modules, ordered by layer. <em>Imports</em> lists first-party
+        modules only; dynamic registrations such as <code>BullModule.registerQueue()</code> are
+        noted separately where they matter.
+      </p>
+    </div>
+
+    <div class="records">
+
+      <div class="rec">
+        <div class="hd"><span class="nm">ConfigModule</span><span class="tags"><span class="tag g">Global</span><span class="tag">L0</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>NestConfigModule.forRoot()</dd>
+          <dt>Provides</dt><dd class="none">—</dd>
+          <dt>Exports</dt><dd class="none">— <span style="color:var(--ink-soft)">(ConfigService via global re-export)</span></dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">LoggerModule</span><span class="tags"><span class="tag">L0</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>PinoLoggerModule.forRootAsync()</dd>
+          <dt>Provides</dt><dd class="none">—</dd>
+          <dt>Exports</dt><dd class="none">— <span style="color:var(--ink-soft)">(nestjs-pino registers globally)</span></dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">ExceptionsModule</span><span class="tags"><span class="tag g">Global</span><span class="tag">L0</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd class="none">—</dd>
+          <dt>Provides</dt><dd>ExceptionService, APP_FILTER → GlobalExceptionFilter</dd>
+          <dt>Exports</dt><dd>ExceptionService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">ObservabilityModule</span><span class="tags"><span class="tag">L0</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>SentryCoreModule.forRoot()</dd>
+          <dt>Provides</dt><dd class="none">—</dd>
+          <dt>Exports</dt><dd class="none">—</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">CacheModule</span><span class="tags"><span class="tag g">Global</span><span class="tag">L0</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>NestCacheModule.registerAsync()</dd>
+          <dt>Provides</dt><dd>redisClientProvider, RedisClientLifecycle, RedisThrottlerStorage</dd>
+          <dt>Exports</dt><dd>REDIS_CLIENT, RedisThrottlerStorage, NestCacheModule</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">DatabaseModule</span><span class="tags"><span class="tag g">Global</span><span class="tag">L0</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd class="none">—</dd>
+          <dt>Provides</dt><dd>pgPoolProvider, drizzleProvider, DatabaseConnection</dd>
+          <dt>Exports</dt><dd>DRIZZLE, PG_POOL</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">CryptoModule</span><span class="tags"><span class="tag">L0</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd class="none">—</dd>
+          <dt>Provides</dt><dd>EncryptionService</dd>
+          <dt>Exports</dt><dd>EncryptionService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">QueueModule</span><span class="tags"><span class="tag g">Global</span><span class="tag">L0</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>BullModule.forRootAsync()</dd>
+          <dt>Provides</dt><dd class="none">— <span style="color:var(--ink-soft)">(registers no queue by design)</span></dd>
+          <dt>Exports</dt><dd>BullModule</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">SearchEngineModule</span><span class="tags"><span class="tag g">Global</span><span class="tag">L0</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd class="none">—</dd>
+          <dt>Provides</dt><dd>meiliClientProvider, SEARCH_ENGINE → SearchEngineService</dd>
+          <dt>Exports</dt><dd>SEARCH_ENGINE, MEILI_CLIENT</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">FileManageModule</span><span class="tags"><span class="tag g">Global</span><span class="tag">L0</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd class="none">—</dd>
+          <dt>Provides</dt><dd>minioClientProvider, OBJECT_STORAGE → ObjectStorageService</dd>
+          <dt>Exports</dt><dd>OBJECT_STORAGE, MINIO_CLIENT</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">RetentionRegistryModule</span><span class="tags"><span class="tag">L0</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd class="none">—</dd>
+          <dt>Provides</dt><dd>RetentionPurgeRegistry</dd>
+          <dt>Exports</dt><dd>RetentionPurgeRegistry</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">SystemAuditModule</span><span class="tags"><span class="tag">L0</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd class="none">—</dd>
+          <dt>Provides</dt><dd>SystemAuditRepository, SystemAuditService</dd>
+          <dt>Exports</dt><dd>SystemAuditService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">MastraRepositoriesModule</span><span class="tags"><span class="tag">L0</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd class="none">—</dd>
+          <dt>Provides</dt><dd>ConversationRepository, AgentRunRepository, ApprovalRepository, ActionLogRepository, ScheduleRepository</dd>
+          <dt>Exports</dt><dd>all five</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">SessionCacheModule</span><span class="tags"><span class="tag">L1</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>CacheModule</dd>
+          <dt>Provides</dt><dd>SessionCacheService</dd>
+          <dt>Exports</dt><dd>SessionCacheService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">EmailModule</span><span class="tags"><span class="tag">L1</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>CryptoModule</dd>
+          <dt>Provides</dt><dd>EmailConfigRepository, MailerService, InboxService</dd>
+          <dt>Exports</dt><dd>MailerService, InboxService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">SharedModule</span><span class="tags"><span class="tag">L1</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>RetentionRegistryModule</dd>
+          <dt>Routes</dt><dd>TagController, CommentController, ActivityController</dd>
+          <dt>Provides</dt><dd>EntityAccessRegistry, TagRepository, TagService, CommentRepository, CommentService, AttachmentRepository, ActivityRepository, ActivityService, EntityCascadeService</dd>
+          <dt>Exports</dt><dd>EntityAccessRegistry, TagService, CommentService, ActivityService, EntityCascadeService, AttachmentRepository</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">SearchServiceModule</span><span class="tags"><span class="tag">L1</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>QueueModule + registerQueue(search-indexing)</dd>
+          <dt>Routes</dt><dd>CollectionController, RecordController, SearchQueryController, SearchStatusController</dd>
+          <dt>Provides</dt><dd>IndexRegistry, CollectionRepository, SearchRecordRepository, SearchMetrics, CollectionService, SearchRecordService, SearchStatusService, SearchIndexingProcessor, SearchReconciliationScheduler, SearchPurgeScheduler</dd>
+          <dt>Exports</dt><dd>SearchRecordService, CollectionService, SearchStatusService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">FileProcessorModule</span><span class="tags"><span class="tag">L1</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>QueueModule + registerQueue(file-processing, document-ingest)</dd>
+          <dt>Routes</dt><dd>FileController</dd>
+          <dt>Provides</dt><dd>FileService, FileRepository, FileProcessingProcessor, FileReconciliationScheduler</dd>
+          <dt>Exports</dt><dd>FileService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">SystemSettingsModule</span><span class="tags"><span class="tag">L1</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>CacheModule, SystemAuditModule</dd>
+          <dt>Provides</dt><dd>SystemSettingsRepository, SystemSettingsService</dd>
+          <dt>Exports</dt><dd>SystemSettingsService, SystemSettingsRepository</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">AttachmentsModule</span><span class="tags"><span class="tag">L2</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>SharedModule, FileProcessorModule</dd>
+          <dt>Routes</dt><dd>AttachmentController</dd>
+          <dt>Provides</dt><dd>AttachmentService</dd>
+          <dt>Exports</dt><dd>AttachmentService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">AuthorizationModule</span><span class="tags"><span class="tag">L2</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>CacheModule, SharedModule</dd>
+          <dt>Routes</dt><dd>RbacController</dd>
+          <dt>Provides</dt><dd>PermissionRepository, PermissionCacheService, PermissionResolver, PermissionsGuard, RbacService</dd>
+          <dt>Exports</dt><dd>PermissionResolver, PermissionsGuard, PermissionCacheService, PermissionRepository</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">TokenRevocationModule</span><span class="tags"><span class="tag">L2</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>SessionCacheModule</dd>
+          <dt>Provides</dt><dd>SessionRepository, ServiceCredentialRepository, TokenValidityService, SessionRevocationService</dd>
+          <dt>Exports</dt><dd>all four</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">ContactsModule</span><span class="tags"><span class="tag">L2</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>SharedModule</dd>
+          <dt>Routes</dt><dd>ContactController, ContactCompanyController, ContactVocabularyController</dd>
+          <dt>Provides</dt><dd>ContactRepository, ContactCompanyRepository, ContactVocabularyRepository, ContactGraphRepository, ContactService, ContactCompanyService, ContactVocabularyService, ContactGraphService</dd>
+          <dt>Exports</dt><dd>ContactService, ContactCompanyService, ContactGraphService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">DocumentIngestModule</span><span class="tags"><span class="tag">L2</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>FileProcessorModule, SearchServiceModule, QueueModule + registerQueue(document-ingest)</dd>
+          <dt>Provides</dt><dd>DocumentExtractionService, DocumentIngestProcessor, DocumentsCollectionBootstrap</dd>
+          <dt>Exports</dt><dd class="none">— <span style="color:var(--ink-soft)">(terminal: pure consumer)</span></dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">HealthModule</span><span class="tags"><span class="tag">L2</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>TerminusModule, SearchServiceModule</dd>
+          <dt>Routes</dt><dd>HealthController</dd>
+          <dt>Provides</dt><dd>DatabaseHealthIndicator, RedisHealthIndicator, MinioHealthIndicator, MeiliHealthIndicator</dd>
+          <dt>Exports</dt><dd class="none">—</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">MailboxModule</span><span class="tags"><span class="tag">L2</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>EmailModule, FileProcessorModule, SearchServiceModule, QueueModule + registerQueue(mailbox-sync)</dd>
+          <dt>Routes</dt><dd>MailboxController</dd>
+          <dt>Provides</dt><dd>MailboxRepository, ImapConfigRepository, MailboxIngestService, MailboxService, MailboxSyncProcessor, MailboxSyncScheduler, MailboxReconciliationScheduler</dd>
+          <dt>Exports</dt><dd>MailboxIngestService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">MastraModule</span><span class="tags"><span class="tag">L2</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>SearchServiceModule, EmailModule, MastraRepositoriesModule, SystemAuditModule, QueueModule + registerQueue(agent-run), MastraCoreModule.registerAsync()</dd>
+          <dt>Routes</dt><dd>ChatController, ApprovalController, ScheduleController</dd>
+          <dt>Provides</dt><dd>ConversationService, ConversationMessagesService, AgentRunnerService, ChatStreamService, ApprovalService, ScheduleService, AgentRunProcessor, AgentScheduleScheduler</dd>
+          <dt>Exports</dt><dd class="none">— <span style="color:var(--ink-soft)">(terminal)</span></dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">SystemModule</span><span class="tags"><span class="tag">L2</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>CryptoModule, CacheModule, <span style="color:var(--warn)">EmailModule (unused)</span>, SystemAuditModule, SystemSettingsModule, RetentionRegistryModule, QueueModule + registerQueue(system-retention)</dd>
+          <dt>Routes</dt><dd>SystemAuditController, SmtpConfigController, ImapConfigController, IntegrationCredentialController, SystemSettingsController, FeatureFlagController, RetentionController, SystemEventController</dd>
+          <dt>Provides</dt><dd>SmtpConfigRepository, SmtpConfigService, ImapConfigRepository, ImapConfigService, IntegrationCredentialRepository, IntegrationCredentialService, FeatureFlagRepository, FeatureFlagService, SystemEventRepository, SystemEventService, RetentionRepository, RetentionService, RetentionScheduler, RetentionProcessor</dd>
+          <dt>Exports</dt><dd>SystemAuditModule, SystemSettingsModule, SmtpConfigService, IntegrationCredentialService, FeatureFlagService, SystemEventService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">UsersModule</span><span class="tags"><span class="tag">L3</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>TokenRevocationModule, AuthorizationModule, SystemSettingsModule</dd>
+          <dt>Routes</dt><dd>UsersController, ProfileController, UserProfileAdminController</dd>
+          <dt>Provides</dt><dd>UserRepository, UsersService, PasswordService, ProfileRepository, ProfileService</dd>
+          <dt>Exports</dt><dd>UserRepository, UsersService, PasswordService, ProfileService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">KnowledgeModule</span><span class="tags"><span class="tag">L3</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>SharedModule, SearchServiceModule, SystemModule</dd>
+          <dt>Routes</dt><dd>KnowledgeController, KnowledgeVocabularyController</dd>
+          <dt>Provides</dt><dd>KnowledgeRepository, KnowledgeAclRepository, KnowledgeVocabularyRepository, KnowledgeProjectionService, KnowledgeService, KnowledgeAclService, KnowledgeVocabularyService, KnowledgeCollectionBootstrap, KnowledgeReviewScheduler</dd>
+          <dt>Exports</dt><dd>KnowledgeService, KnowledgeAclService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">ProjectsModule</span><span class="tags"><span class="tag">L3</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>SharedModule, SearchServiceModule, ContactsModule</dd>
+          <dt>Routes</dt><dd>ProjectController, TaskController</dd>
+          <dt>Provides</dt><dd>ProjectRepository, TaskRepository, PlanningRepository, ProjectLinkRepository, ProjectProjectionService, ProjectService, TaskService, PlanningService, ProjectLinkService, ProjectCollectionBootstrap</dd>
+          <dt>Exports</dt><dd>ProjectService, TaskService, ProjectLinkService, ProjectLinkRepository</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">AuthModule</span><span class="tags"><span class="tag">L4</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>UsersModule, EmailModule, TokenRevocationModule, PassportModule, JwtModule.register(), QueueModule + registerQueue(auth-cleanup)</dd>
+          <dt>Routes</dt><dd>AuthController, ServiceCredentialsController</dd>
+          <dt>Provides</dt><dd>AuthService, TokenService, ServiceCredentialService, LocalStrategy, JwtStrategy, PasswordResetService, PasswordResetRepository, AuthCleanupScheduler, AuthCleanupProcessor, ResetCodeHasher, ResetMailer</dd>
+          <dt>Exports</dt><dd>AuthService, TokenService, TokenRevocationModule</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">FinanceModule</span><span class="tags"><span class="tag">L4</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>SharedModule, ContactsModule, ProjectsModule, SystemModule</dd>
+          <dt>Routes</dt><dd>FinanceController, InvoiceController</dd>
+          <dt>Provides</dt><dd>FinanceRepository, LedgerRepository, InvoiceRepository, LedgerService, InvoiceService, RecurringService</dd>
+          <dt>Exports</dt><dd>LedgerService, InvoiceService, RecurringService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">NotificationsModule</span><span class="tags"><span class="tag">L4</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>UsersModule, EmailModule, RetentionRegistryModule, QueueModule + registerQueue(notification-send)</dd>
+          <dt>Routes</dt><dd>NotificationController, NotificationAdminController</dd>
+          <dt>Provides</dt><dd>NotificationRepository, NotificationService, NotificationAdminService, NotificationScheduler, NotificationProcessor</dd>
+          <dt>Exports</dt><dd>NotificationService, NotificationAdminService</dd>
+        </dl>
+      </div>
+
+      <div class="rec">
+        <div class="hd"><span class="nm">AppModule</span><span class="tags"><span class="tag">L5</span></span></div>
+        <dl>
+          <dt>Imports</dt><dd>28 modules — all 7 globals, all feature modules, ThrottlerModule.forRootAsync()</dd>
+          <dt>Provides</dt><dd>APP_PIPE, APP_GUARD ×3 <span style="color:var(--ink-soft)">(4th from AuthorizationModule)</span></dd>
+          <dt>Exports</dt><dd class="none">— <span style="color:var(--ink-soft)">(composition root)</span></dd>
+        </dl>
+      </div>
+
+    </div>
+  </section>
+
+  <section>
+    <h2><span class="num">08</span> Reproducing this</h2>
+    <div class="prose">
+      <p>
+        The first command is already in <code>package.json</code>. The second needs no install
+        beyond <code>npx</code>.
+      </p>
+    </div>
+    <pre># DI container assembles — no cycles, all exports valid, all deps wired.
+# Instantiates nothing, opens no sockets: needs no Postgres/Redis/MinIO/Meili.
+pnpm check:graph
+
+# File-level import cycles across src/, type-only imports included.
+npx madge --circular --extensions ts --ts-config tsconfig.json src</pre>
+    <div class="prose">
+      <p style="margin-top:16px">
+        The declared-module SCC pass and the injection-edge counts in sections 02 and 04 came
+        from Nest's own <code>SerializedGraph</code>, dumped by creating the app with
+        <code>{ preview: true, snapshot: true }</code> and reading
+        <code>app.get(SerializedGraph).toJSON()</code>. That is the container's own record of
+        what it wired, so it cannot drift from runtime the way a static parse can.
+      </p>
+      <p>
+        One caveat on reading that graph raw: its <code>module-to-module</code> edges include a
+        synthetic link from every module to every <code>@Global()</code> module. Run a naive
+        SCC over them and you get one large false cycle spanning Config, Cache, Database,
+        Bull, Logger and the rest — self-loops like <code>ConfigModule → ConfigModule</code>
+        are the tell, since no module can import itself. The cycle result above is computed
+        over declared <code>imports:</code> metadata instead, which is the graph an engineer
+        actually edits.
+      </p>
+    </div>
+  </section>
+
+  <footer>
+    Cybernetics API · api/src · 35 first-party modules · 439 providers · 41 controllers · 694 injection edges · 0 cycles
+  </footer>
+
+</div>

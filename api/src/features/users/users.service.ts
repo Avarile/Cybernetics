@@ -1,7 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import { PasswordService } from '../auth/password.service';
 import { SessionRevocationService } from '../auth/session-revocation.service';
+import { PermissionCacheService } from '../authorization/permission-cache.service';
+import { PermissionRepository } from '../authorization/permission.repository';
 import type { UserRow } from '../../infrastructure/database/schema/identity.schema';
 import type { CreateUserDto } from './dto/create-user.dto';
 import type { UpdateUserDto } from './dto/update-user.dto';
@@ -19,10 +21,14 @@ export interface PublicUser {
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     private readonly repo: UserRepository,
     private readonly passwords: PasswordService,
     private readonly revocation: SessionRevocationService,
+    private readonly permissionCache: PermissionCacheService,
+    private readonly permissions: PermissionRepository,
     private readonly errors: ExceptionService,
   ) {}
 
@@ -37,6 +43,17 @@ export class UsersService {
     };
   }
 
+  /**
+   * Provision an account, and give it the capabilities its role implies.
+   *
+   * The role assignment is not decoration. `users.role` is the coarse JWT claim;
+   * the permission resolver reads a user's grants exclusively from `user_roles`,
+   * so an account created without a row there resolves to the empty set. Every
+   * account provisioned before this landed was inert — `contact.create`,
+   * `knowledge.create`, `project.task.create` and the rest of the documented
+   * "baseline capabilities every human account receives" were received by
+   * nobody until an admin granted the role by hand.
+   */
   async create(dto: CreateUserDto): Promise<PublicUser> {
     const email = dto.email.toLowerCase();
     if (await this.repo.findByEmail(email)) {
@@ -49,7 +66,43 @@ export class UsersService {
       role: dto.role ?? 'user',
       displayName: dto.displayName,
     });
+    await this.syncRoleAssignment(row.id, null, row.role);
     return this.toPublic(row);
+  }
+
+  /**
+   * Keep `user_roles` in step with the coarse `users.role`.
+   *
+   * Additive on create, a swap on change. Only the role that mirrors
+   * `users.role` is touched: roles an administrator granted deliberately —
+   * `project_manager`, `finance_manager` — are somebody else's decision and
+   * are left exactly as they are.
+   *
+   * A missing role row is logged rather than thrown: the account itself is
+   * already committed, and failing the request would leave the caller thinking
+   * nothing happened.
+   */
+  private async syncRoleAssignment(
+    userId: string,
+    previous: UserRow['role'] | null,
+    next: UserRow['role'],
+  ): Promise<void> {
+    if (previous === next) return;
+
+    if (previous) {
+      const stale = await this.permissions.findRoleByKey(previous);
+      if (stale) await this.permissions.revokeRole(userId, stale.id);
+    }
+
+    const role = await this.permissions.findRoleByKey(next);
+    if (!role) {
+      this.logger.error(
+        `No "${next}" role is seeded — user ${userId} has no permissions. Run the RBAC seeder.`,
+      );
+      return;
+    }
+    await this.permissions.grantRole(userId, role.id, null, null);
+    await this.permissionCache.invalidateAll();
   }
 
   async findById(id: string): Promise<PublicUser> {
@@ -77,7 +130,7 @@ export class UsersService {
    * A `displayName` edit is not security-relevant and does not log anyone out.
    */
   async update(id: string, dto: UpdateUserDto): Promise<PublicUser> {
-    await this.findById(id); // 404 if missing
+    const before = await this.findById(id); // 404 if missing
     const patch: Record<string, unknown> = {};
     if (dto.role) patch.role = dto.role;
     if (dto.displayName !== undefined) patch.displayName = dto.displayName;
@@ -87,6 +140,15 @@ export class UsersService {
     if (!row) throw this.errors.create(ErrorCode.USER_NOT_FOUND);
     if (dto.role || dto.password) {
       await this.revocation.revokeAllForUser(id);
+    }
+    if (dto.role) {
+      // The role is a signed claim AND the seed of this user's permission set.
+      // Revoking sessions handles the former; moving the `user_roles` row
+      // handles the latter, and invalidates the cache on its way through.
+      // Flushing the cache alone was not enough: it re-resolved to the same
+      // stale grants, so a demoted admin kept nothing and a promoted user
+      // gained nothing.
+      await this.syncRoleAssignment(id, before.role, row.role);
     }
     return this.toPublic(row);
   }
@@ -100,5 +162,6 @@ export class UsersService {
     await this.findById(id);
     await this.repo.softDelete(id);
     await this.revocation.revokeAllForUser(id);
+    await this.permissionCache.invalidateAll();
   }
 }

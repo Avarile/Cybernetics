@@ -77,9 +77,13 @@ export function validateVisibility(
     return [`ownerField "${ownerField}" is not a declared field`];
   }
   const errors: string[] = [];
-  if (spec.type !== 'string') {
+  // `string[]` as well as `string`: an ACL-scoped collection scopes reads by an
+  // ARRAY of permitted user ids, not a single owner, and Meilisearch matches
+  // `field = value` against an array attribute by containment. `resolveReadScope`
+  // needs no change — the filter it emits is correct for both shapes.
+  if (spec.type !== 'string' && spec.type !== 'string[]') {
     errors.push(
-      `ownerField "${ownerField}" must be of type string (is ${spec.type})`,
+      `ownerField "${ownerField}" must be of type string or string[] (is ${spec.type})`,
     );
   }
   if (!spec.filterable) {

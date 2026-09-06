@@ -1,12 +1,14 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, count, eq, type SQL } from 'drizzle-orm';
+import { and, count, desc, eq, type SQL } from 'drizzle-orm';
 import {
   DRIZZLE,
   type DrizzleDB,
 } from '../../infrastructure/database/drizzle.constants';
 import {
+  systemSettingRevisions,
   systemSettings,
   type NewSystemSettingRow,
+  type SettingValue,
   type SystemSettingRow,
 } from '../../infrastructure/database/schema/system.schema';
 
@@ -47,25 +49,59 @@ export class SystemSettingsRepository {
     return { rows, total: Number(totals[0]?.value ?? 0) };
   }
 
-  /** Insert or update by key (soft-delete-aware). */
+  /**
+   * Insert or update by key, recording the value change.
+   *
+   * The row write and its `system_setting_revisions` entry share one
+   * transaction: a history that can be missing the change it describes is worse
+   * than no history, because it reads as "nobody touched it".
+   *
+   * Storing full old/new values is safe here and only here — `system_settings`
+   * is non-secret by design, which is exactly why `system_audit_log` records
+   * field names alone (it also covers the credential tables).
+   */
   async upsertByKey(
     key: string,
     patch: Omit<NewSystemSettingRow, 'key'>,
+    ctx?: { changedBy?: string | null; reason?: string | null },
   ): Promise<SystemSettingRow> {
-    const existing = await this.findByKey(key);
-    if (existing) {
-      const rows = await this.db
-        .update(systemSettings)
-        .set(patch)
-        .where(eq(systemSettings.id, existing.id))
-        .returning();
-      return rows[0];
-    }
-    const rows = await this.db
-      .insert(systemSettings)
-      .values({ key, ...patch })
-      .returning();
-    return rows[0];
+    return this.db.transaction(async (tx) => {
+      const existing = await this.findByKey(key);
+      const row = existing
+        ? (
+            await tx
+              .update(systemSettings)
+              .set({ ...patch, version: existing.version + 1 })
+              .where(eq(systemSettings.id, existing.id))
+              .returning()
+          )[0]
+        : (
+            await tx
+              .insert(systemSettings)
+              .values({ key, ...patch })
+              .returning()
+          )[0];
+
+      await tx.insert(systemSettingRevisions).values({
+        settingId: row.id,
+        key,
+        oldValueJson: (existing?.valueJson ?? null) as SettingValue | null,
+        newValueJson: row.valueJson,
+        changedBy: ctx?.changedBy ?? null,
+        reason: ctx?.reason ?? null,
+      });
+      return row;
+    });
+  }
+
+  /** Revision history for one setting, newest first. */
+  async listRevisions(key: string, limit: number) {
+    return this.db
+      .select()
+      .from(systemSettingRevisions)
+      .where(eq(systemSettingRevisions.key, key))
+      .orderBy(desc(systemSettingRevisions.createdAt))
+      .limit(limit);
   }
 
   async softDelete(key: string): Promise<boolean> {

@@ -119,9 +119,17 @@ export class SearchRecordService {
       // document-ingest's `ownerUserId: meta.ownerId ?? ''` from landing.)
       if (def.visibility === 'owner_scoped' && def.ownerField) {
         const owner = input.document[def.ownerField];
-        if (typeof owner !== 'string' || owner.length === 0) {
+        // The owner field may be a single id or, for an ACL-scoped collection,
+        // an array of permitted ids. Both must be non-empty for the same
+        // reason: an empty scope is a record nobody but an admin can ever read.
+        const isSingle = typeof owner === 'string' && owner.length > 0;
+        const isList =
+          Array.isArray(owner) &&
+          owner.length > 0 &&
+          owner.every((v) => typeof v === 'string' && v.length > 0);
+        if (!isSingle && !isList) {
           validationErrors.push(
-            `Collection "${collection}" is owner-scoped, so "${def.ownerField}" must be a non-empty string`,
+            `Collection "${collection}" is owner-scoped, so "${def.ownerField}" must be a non-empty string or a non-empty array of strings`,
           );
         }
       }

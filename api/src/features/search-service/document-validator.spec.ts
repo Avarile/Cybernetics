@@ -168,13 +168,44 @@ describe('validateVisibility', () => {
 
   it('rejects a non-string owner field', () => {
     expect(validateVisibility('owner_scoped', 'count', fields)).toEqual([
-      'ownerField "count" must be of type string (is number)',
+      'ownerField "count" must be of type string or string[] (is number)',
     ]);
   });
 
   it('rejects an owner field on a collection that is not owner_scoped', () => {
     expect(validateVisibility('shared', 'ownerUserId', fields)).toEqual([
       'ownerField is only meaningful for an owner_scoped collection (visibility is shared)',
+    ]);
+  });
+});
+
+describe('validateVisibility with an array owner field', () => {
+  const aclFields = [
+    { name: 'title', type: 'string' as const, searchable: true },
+    { name: 'aclUserIds', type: 'string[]' as const, filterable: true },
+  ];
+
+  it('accepts a string[] owner field, for ACL-scoped collections', () => {
+    // Meilisearch matches `aclUserIds = "<uuid>"` against an array attribute by
+    // containment, so the filter resolveReadScope emits works unchanged.
+    expect(validateVisibility('owner_scoped', 'aclUserIds', aclFields)).toEqual(
+      [],
+    );
+  });
+
+  it('still requires the array owner field to be filterable', () => {
+    const notFilterable = [{ name: 'aclUserIds', type: 'string[]' as const }];
+    expect(
+      validateVisibility('owner_scoped', 'aclUserIds', notFilterable),
+    ).toEqual([expect.stringContaining('filterable')]);
+  });
+
+  it('still rejects a type that cannot hold an id', () => {
+    const numeric = [
+      { name: 'ownerRank', type: 'number' as const, filterable: true },
+    ];
+    expect(validateVisibility('owner_scoped', 'ownerRank', numeric)).toEqual([
+      expect.stringContaining('string or string[]'),
     ]);
   });
 });
