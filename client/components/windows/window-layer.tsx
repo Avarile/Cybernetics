@@ -4,7 +4,12 @@ import { Suspense, useEffect } from "react"
 import { useShallow } from "zustand/react/shallow"
 import { Spinner } from "@/components/ui/spinner"
 import { WINDOW_REGISTRY } from "@/lib/windows/registry"
-import { selectOpenWindows, selectTopModal, useWindowStore } from "@/stores/window.store"
+import {
+  MODAL_SCRIM_Z,
+  selectOpenWindows,
+  selectTopModal,
+  useWindowStore,
+} from "@/stores/window.store"
 import { WindowFrame } from "./window-frame"
 
 export function WindowLayer() {
@@ -38,7 +43,15 @@ export function WindowLayer() {
         // always the theme-exempt dark canvas (design §4.3), so a themed scrim
         // washes it to grey in light mode and erases the machine behind the
         // dialog — the opposite of the intended "it's there, just not yours yet".
-        <div className="pointer-events-auto absolute inset-0 bg-black/50 backdrop-blur-sm" />
+        //
+        // The zIndex is load-bearing. Every window carries an explicit zIndex,
+        // so a scrim with `auto` loses to all of them and dims nothing but the
+        // canvas — non-modal windows kept painting over it at full brightness.
+        // MODAL_Z_BASE - 1 puts it under the modal band and over everything else.
+        <div
+          style={{ zIndex: MODAL_SCRIM_Z }}
+          className="pointer-events-auto absolute inset-0 bg-black/50 backdrop-blur-sm"
+        />
       )}
       {windows.map((win) => {
         const descriptor = WINDOW_REGISTRY[win.kind]

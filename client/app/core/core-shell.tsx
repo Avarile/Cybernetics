@@ -5,11 +5,15 @@ import { ShellChrome } from "@/components/shell/shell-chrome"
 import { useSessionBootstrap } from "@/components/shell/use-session-bootstrap"
 import { SystemCoreCanvas } from "@/components/system-core/system-core-canvas"
 import { Dock } from "@/components/windows/dock"
+import { useWindowPersistence } from "@/components/windows/use-window-persistence"
 import { WindowLayer } from "@/components/windows/window-layer"
 import { cn } from "@/lib/utils"
 import { selectIsAuthenticated, useAuthStore } from "@/stores/auth.store"
 
 export function CoreShell() {
+  // Before the session bootstrap, so a restored layout is already in the store
+  // when the auth window decides whether to open over it.
+  useWindowPersistence()
   useSessionBootstrap()
   const authed = useAuthStore(selectIsAuthenticated)
 

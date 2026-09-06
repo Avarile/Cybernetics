@@ -9,7 +9,11 @@ export const WINDOW_STORAGE_KEY = "cyb.windows"
  * Modal windows live in their own, always-higher band, so focusing a non-modal
  * window can never raise it above the auth dialog.
  */
-const MODAL_Z_BASE = 10_000
+export const MODAL_Z_BASE = 10_000
+
+/** Where the modal scrim sits: above every non-modal window, below the modal
+ *  band. Derived so it cannot drift from MODAL_Z_BASE. */
+export const MODAL_SCRIM_Z = MODAL_Z_BASE - 1
 
 const DEFAULT_RECT: Rect = { x: 80, y: 80, w: 900, h: 600 }
 
