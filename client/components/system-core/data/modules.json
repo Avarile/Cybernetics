@@ -15,7 +15,7 @@
       "id": "kernel-scheduler",
       "label": "kernel-scheduler",
       "status": "running",
-      "geometry": { "radius": 0.72, "y": 1.44, "arc": 210, "band": 0.05 },
+      "geometry": { "radius": 0.72, "y": 1.44, "arc": 210, "band": 0.02 },
       "motion": { "speed": 0.1 },
       "meta": { "group": "core" }
     },
@@ -23,7 +23,7 @@
       "id": "identity-auth",
       "label": "identity-auth",
       "status": "running",
-      "geometry": { "radius": 0.86, "y": 1.3, "arc": 130, "band": 0.05 },
+      "geometry": { "radius": 0.86, "y": 1.3, "arc": 130, "band": 0.02 },
       "motion": { "speed": -0.07 },
       "meta": { "group": "security" }
     },
@@ -31,7 +31,7 @@
       "id": "session-registry",
       "label": "session-registry",
       "status": "loading",
-      "geometry": { "radius": 0.89, "y": 1.19, "arc": 95, "band": 0.05 },
+      "geometry": { "radius": 0.89, "y": 1.19, "arc": 95, "band": 0.02 },
       "motion": { "speed": 0.13 },
       "meta": { "group": "network" }
     },
@@ -39,7 +39,7 @@
       "id": "api-gateway",
       "label": "api-gateway",
       "status": "running",
-      "geometry": { "radius": 0.92, "y": 1.05, "arc": 260, "band": 0.05 },
+      "geometry": { "radius": 0.92, "y": 1.05, "arc": 260, "band": 0.02 },
       "motion": { "speed": -0.05 },
       "meta": { "group": "network" }
     },
@@ -47,7 +47,7 @@
       "id": "load-balancer",
       "label": "load-balancer",
       "status": "running",
-      "geometry": { "radius": 0.93, "y": 0.93, "arc": 150, "band": 0.05 },
+      "geometry": { "radius": 0.93, "y": 0.93, "arc": 150, "band": 0.02 },
       "motion": { "speed": 0.06 },
       "meta": { "group": "network" }
     },
@@ -55,7 +55,7 @@
       "id": "message-queue",
       "label": "message-queue",
       "status": "loading",
-      "geometry": { "radius": 0.9, "y": 0.8, "arc": 190, "band": 0.05 },
+      "geometry": { "radius": 0.9, "y": 0.8, "arc": 190, "band": 0.02 },
       "motion": { "speed": -0.11 },
       "meta": { "group": "network" }
     },
@@ -63,7 +63,7 @@
       "id": "event-bus",
       "label": "event-bus",
       "status": "running",
-      "geometry": { "radius": 0.81, "y": 0.68, "arc": 120, "band": 0.05 },
+      "geometry": { "radius": 0.81, "y": 0.68, "arc": 120, "band": 0.02 },
       "motion": { "speed": 0.04 },
       "meta": { "group": "network" }
     },
@@ -71,7 +71,7 @@
       "id": "cache-l1",
       "label": "cache-l1",
       "status": "running",
-      "geometry": { "radius": 0.86, "y": 0.56, "arc": 230, "band": 0.05 },
+      "geometry": { "radius": 0.86, "y": 0.56, "arc": 230, "band": 0.02 },
       "motion": { "speed": -0.15 },
       "meta": { "group": "core" }
     },
@@ -79,7 +79,7 @@
       "id": "cache-l2-distributed",
       "label": "cache-l2-distributed",
       "status": "init",
-      "geometry": { "radius": 0.94, "y": 0.44, "arc": 170, "band": 0.05 },
+      "geometry": { "radius": 0.94, "y": 0.44, "arc": 170, "band": 0.02 },
       "motion": { "speed": 0.09 },
       "meta": { "group": "core" }
     },
@@ -87,7 +87,7 @@
       "id": "db-users",
       "label": "db-users",
       "status": "running",
-      "geometry": { "radius": 0.84, "y": 0.31, "arc": 200, "band": 0.05 },
+      "geometry": { "radius": 0.84, "y": 0.31, "arc": 200, "band": 0.02 },
       "motion": { "speed": -0.06 },
       "meta": { "group": "storage" }
     },
@@ -95,7 +95,7 @@
       "id": "db-orders",
       "label": "db-orders",
       "status": "running",
-      "geometry": { "radius": 0.91, "y": 0.19, "arc": 145, "band": 0.05 },
+      "geometry": { "radius": 0.91, "y": 0.19, "arc": 145, "band": 0.02 },
       "motion": { "speed": 0.08 },
       "meta": { "group": "storage" }
     },
@@ -103,7 +103,7 @@
       "id": "db-ledger",
       "label": "db-ledger",
       "status": "fault",
-      "geometry": { "radius": 0.94, "y": 0.06, "arc": 175, "band": 0.05 },
+      "geometry": { "radius": 0.94, "y": 0.06, "arc": 175, "band": 0.02 },
       "motion": { "speed": -0.09 },
       "meta": { "group": "storage" }
     },
@@ -111,7 +111,7 @@
       "id": "db-inventory",
       "label": "db-inventory",
       "status": "running",
-      "geometry": { "radius": 0.87, "y": -0.06, "arc": 240, "band": 0.05 },
+      "geometry": { "radius": 0.87, "y": -0.06, "arc": 240, "band": 0.02 },
       "motion": { "speed": 0.12 },
       "meta": { "group": "storage" }
     },
@@ -119,7 +119,7 @@
       "id": "db-telemetry",
       "label": "db-telemetry",
       "status": "loading",
-      "geometry": { "radius": 0.88, "y": -0.19, "arc": 110, "band": 0.05 },
+      "geometry": { "radius": 0.88, "y": -0.19, "arc": 110, "band": 0.02 },
       "motion": { "speed": -0.04 },
       "meta": { "group": "storage" }
     },
@@ -127,7 +127,7 @@
       "id": "index-shard-a",
       "label": "index-shard-a",
       "status": "running",
-      "geometry": { "radius": 0.98, "y": -0.31, "arc": 160, "band": 0.05 },
+      "geometry": { "radius": 0.98, "y": -0.31, "arc": 160, "band": 0.02 },
       "motion": { "speed": 0.07 },
       "meta": { "group": "storage" }
     },
@@ -135,7 +135,7 @@
       "id": "index-shard-b",
       "label": "index-shard-b",
       "status": "init",
-      "geometry": { "radius": 0.96, "y": -0.42, "arc": 140, "band": 0.05 },
+      "geometry": { "radius": 0.96, "y": -0.42, "arc": 140, "band": 0.02 },
       "motion": { "speed": -0.1 },
       "meta": { "group": "storage" }
     },
@@ -143,7 +143,7 @@
       "id": "search-engine",
       "label": "search-engine",
       "status": "running",
-      "geometry": { "radius": 0.91, "y": -0.55, "arc": 220, "band": 0.05 },
+      "geometry": { "radius": 0.91, "y": -0.55, "arc": 220, "band": 0.02 },
       "motion": { "speed": 0.05 },
       "meta": { "group": "storage" }
     },
@@ -151,7 +151,7 @@
       "id": "object-storage",
       "label": "object-storage",
       "status": "running",
-      "geometry": { "radius": 0.87, "y": -0.68, "arc": 180, "band": 0.05 },
+      "geometry": { "radius": 0.87, "y": -0.68, "arc": 180, "band": 0.02 },
       "motion": { "speed": -0.08 },
       "meta": { "group": "storage" }
     },
@@ -159,7 +159,7 @@
       "id": "replication-sync",
       "label": "replication-sync",
       "status": "loading",
-      "geometry": { "radius": 0.84, "y": -0.8, "arc": 200, "band": 0.05 },
+      "geometry": { "radius": 0.84, "y": -0.8, "arc": 200, "band": 0.02 },
       "motion": { "speed": 0.11 },
       "meta": { "group": "storage" }
     },
@@ -167,7 +167,7 @@
       "id": "crypto-keyvault",
       "label": "crypto-keyvault",
       "status": "running",
-      "geometry": { "radius": 0.91, "y": -0.92, "arc": 100, "band": 0.05 },
+      "geometry": { "radius": 0.91, "y": -0.92, "arc": 100, "band": 0.02 },
       "motion": { "speed": -0.05 },
       "meta": { "group": "security" }
     },
@@ -175,7 +175,7 @@
       "id": "network-fabric",
       "label": "network-fabric",
       "status": "running",
-      "geometry": { "radius": 0.88, "y": -1.05, "arc": 250, "band": 0.05 },
+      "geometry": { "radius": 0.88, "y": -1.05, "arc": 250, "band": 0.02 },
       "motion": { "speed": 0.09 },
       "meta": { "group": "network" }
     },
@@ -183,7 +183,7 @@
       "id": "audit-log",
       "label": "audit-log",
       "status": "fault",
-      "geometry": { "radius": 0.98, "y": -1.17, "arc": 165, "band": 0.05 },
+      "geometry": { "radius": 0.98, "y": -1.17, "arc": 165, "band": 0.02 },
       "motion": { "speed": -0.07 },
       "meta": { "group": "security" }
     },
@@ -191,7 +191,7 @@
       "id": "metrics-collector",
       "label": "metrics-collector",
       "status": "running",
-      "geometry": { "radius": 0.82, "y": -1.29, "arc": 190, "band": 0.05 },
+      "geometry": { "radius": 0.82, "y": -1.29, "arc": 190, "band": 0.02 },
       "motion": { "speed": 0.06 },
       "meta": { "group": "observability" }
     },
@@ -199,7 +199,7 @@
       "id": "backup-daemon",
       "label": "backup-daemon",
       "status": "init",
-      "geometry": { "radius": 0.89, "y": -1.41, "arc": 130, "band": 0.05 },
+      "geometry": { "radius": 0.89, "y": -1.41, "arc": 130, "band": 0.02 },
       "motion": { "speed": -0.12 },
       "meta": { "group": "storage" }
     },
@@ -207,7 +207,7 @@
       "id": "LLM-db-temp",
       "label": "LLM-db-temp",
       "status": "running",
-      "geometry": { "radius": 0.99, "y": -1.52, "arc": 130, "band": 0.05 },
+      "geometry": { "radius": 0.99, "y": -1.52, "arc": 130, "band": 0.02 },
       "motion": { "speed": -0.12 },
       "meta": { "group": "observability" }
     }
