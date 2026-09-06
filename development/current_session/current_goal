@@ -1,11 +1,25 @@
-# Goal: design feature based data model for this project, to support authentication, authorization, user management, project management, knowledge management, notification management, human relaetionship management, financial management, system-data management(settings, configuration, logs, etc.).
+# Goal of the frontend design
 
-1. Authentication and Authorization: This is already implemented in the current system. We will continue to use the existing authentication and authorization mechanisms to ensure secure access to the system. 
-2. System-Data Management: We will design a data model to manage system settings, configurations, and logs. This will include tables for storing configuration parameters, system logs, and audit trails to track changes made to the system. Those tables are already partially implemented in the current system, and we will extend them as needed to support new features and requirements.
-3. User Management: This will be based on the existing authentication and authorization mechanisms. We will design a data model to manage user profiles, roles, permissions, and user activity logs. This will include tables for storing user information, role definitions, permission mappings, and activity logs to track user actions within the system. Check the existing schema first.
-4. Project Management: Need to design a set of tables to manage projects, tasks, goals, milestones, and project-related documents. This will include tables for storing project details, task assignments, progress tracking, and knowledege reference, contact reference. We will also consider relationships between projects and users to facilitate collaboration and access control.
-5. Knowledge Management: We will design a data model to manage knowledge resources, this set of tables will only include knowledge, knowledge_type, knowledge_category, knowledge_tags, and knowledge_access_control. This will allow us to categorize and organize knowledge resources, as well as control access to them based on user roles and permissions.
-6. Notification Management: We will design a data model to manage notifications, including tables for storing notification templates, notification preferences, and notification history. This will allow us to send notifications to users based, all notifications will be sent through email.
-7. Human Relationship Management: We will design a data model to manage human relationships, including tables for store contact_info, contact_type, contact_company_info, contact_category, contact_tags.
-   
-Give me a comprehensive and professional design, and output to development/current_session/current_design.md
+- Design a comprehensive AI UI based on the existing UIs in `/Users/avarilewang/Documents/codeRepo/cybernetics/cybernetics-agentics/client/src/components/SystemCore`
+  1. UI layer requirements:
+     1. - The 3D System Core UI should be the main interface after user login, all other features will be presented in Pop-up windows on top of the 3D System Core UI.
+     2. - There will be a Pop-up window for users to login and register.
+     3. - There will be a general Pop-up window as a base framework for other features like settings, notifications, user profile management and other features[including contacts, files, ].
+     4. - There will be a general terminal window(use all of the existing ai-elements components) for users to input commands and receive outputs from the AI system, this terminal window will be in a dedicated Pop-up window, this is the main interface for users to interact with the AI system.
+     5. - There will be a live conversation feature, that allows users to have a real-time conversation with the AI system, this feature should be able to be toggled on and off, there should be a voice icon on the bottom right corner of the 3D System Core UI, when clicked, it will open a Pop-up window for live conversation. close the voice icon wont close the live conversation window, the user can close the live conversation window by clicking the close button on the top right corner of the Pop-up window.
+     6. - The UI should have a responsive design to accommodate different screen sizes and devices.
+     7. state management should be designed to handle the different states of the UI, such as loading, error, success states, auth, conversation, and other states that may arise during user interaction with the AI system.
+- Design the state managements accordingly based on the requirements.
+- Connect to the backend module `api/src/features/mastra`.
+- Including the file upload and data processing pipeline(for docx, pdf, markdown, when those file is uploaded, they will be transformed into texts and save to a record). This feature will be add to 
+- Basically, should follow the design of the Claude.
+- Discuss with me if you have any other suggestions.
+- Design the UI in a fashion and neat way
+
+## Output the design to development/current_session/current_design.md
+
+## Template reference
+
+1. Most of the Feature module's UI will be tables, use client/components/data-table.tsx (including the tabs(if required in that feature domain), pagingation, count of rows, selection of rows and actions) as the design reference closely. Within each table components of each feature module, Create, Delete, Update/Edit and Query functions needs to be implements. Create, Edit and Detail view Component will be displayed in another popup
+2. In terms of the ui, try to use the exising components from Shadcn and AI-Element.
+3. Use zustand as state management.
