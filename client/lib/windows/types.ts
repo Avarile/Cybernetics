@@ -45,6 +45,19 @@ export interface WindowInstance {
   modal: boolean
 }
 
+/**
+ * A window body.
+ *
+ * Typed loosely on purpose: `WindowInstance.props` is an untyped bag filled at
+ * the `openWindow` call site, so the registry cannot know a body's prop shape.
+ * Narrowing this to `ComponentType<Record<string, unknown>>` would force every
+ * body to declare all of its props optional, which hides genuine requirements
+ * — ConfirmWindow really does need a `message`. The typing that matters is at
+ * the call site and inside each body.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type WindowBody = ComponentType<any>
+
 export interface WindowDescriptor {
   kind: WindowKind
   title: string
@@ -54,5 +67,5 @@ export interface WindowDescriptor {
   modal?: boolean
   defaultRect?: Partial<Rect>
   minSize?: { w: number; h: number }
-  component: LazyExoticComponent<ComponentType<Record<string, unknown>>>
+  component: LazyExoticComponent<WindowBody>
 }

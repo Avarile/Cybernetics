@@ -49,6 +49,8 @@ export interface DataTableProps<T extends HasId> {
   onEdit?: (row: T) => void
   onDelete?: (rows: T[]) => void
   onOpen?: (row: T) => void
+  /** Bump to force a refetch from outside the table. */
+  refreshToken?: number
 }
 
 /**
@@ -71,8 +73,9 @@ export function DataTable<T extends HasId>({
   onEdit,
   onDelete,
   onOpen,
+  refreshToken = 0,
 }: DataTableProps<T>) {
-  const table = useDomainTable(config)
+  const table = useDomainTable(config, refreshToken)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [hidden, setHidden] = useState<Set<string>>(new Set())
 

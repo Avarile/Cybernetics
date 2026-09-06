@@ -75,7 +75,9 @@ export function WindowLayer() {
                   </div>
                 }
               >
-                <Body {...(win.props ?? {})} kind={win.kind} />
+                {/* __windowId lets a body close itself — the confirm dialog
+                    dismisses on success without the opener holding a handle. */}
+                <Body {...(win.props ?? {})} kind={win.kind} __windowId={win.id} />
               </Suspense>
             </WindowFrame>
           </div>

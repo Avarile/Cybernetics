@@ -30,6 +30,8 @@ export interface DomainTable<T> {
  */
 export function useDomainTable<T extends HasId>(
   config: DomainTableConfig<T>,
+  /** Bump to force a refetch from outside — e.g. after an upload completes. */
+  refreshToken = 0,
 ): DomainTable<T> {
   const { client } = useApi()
   const [query, setQueryState] = useState<TableQuery>(() => initialQuery(config.tabs))
@@ -69,7 +71,7 @@ export function useDomainTable<T extends HasId>(
     return () => {
       cancelled = true
     }
-  }, [client, config.endpoint, config.tabs, query, nonce])
+  }, [client, config.endpoint, config.tabs, query, nonce, refreshToken])
 
   const setQuery = useCallback((patch: Partial<TableQuery>) => {
     setQueryState((q) => {
