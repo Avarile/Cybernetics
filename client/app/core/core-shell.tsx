@@ -2,19 +2,20 @@
 
 import { useCallback, useState } from "react"
 import { ShellChrome } from "@/components/shell/shell-chrome"
+import { useAuthWindow } from "@/components/shell/use-auth-window"
 import { useSessionBootstrap } from "@/components/shell/use-session-bootstrap"
 import { SystemCoreCanvas } from "@/components/system-core/system-core-canvas"
 import { Dock } from "@/components/windows/dock"
-import { useWindowPersistence } from "@/components/windows/use-window-persistence"
 import { WindowLayer } from "@/components/windows/window-layer"
 import { cn } from "@/lib/utils"
 import { selectIsAuthenticated, useAuthStore } from "@/stores/auth.store"
 
 export function CoreShell() {
-  // Before the session bootstrap, so a restored layout is already in the store
-  // when the auth window decides whether to open over it.
-  useWindowPersistence()
+  // Order is load-bearing: effects fire in hook order, and the bootstrap must
+  // have set `loading` before useAuthWindow decides whether to show the gate —
+  // otherwise a returning user gets a flash of the login dialog.
   useSessionBootstrap()
+  useAuthWindow()
   const authed = useAuthStore(selectIsAuthenticated)
 
   // The reference's three viewport controls, same defaults.

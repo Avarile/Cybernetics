@@ -72,6 +72,27 @@ describe("createLegacyAwareStorage", () => {
     expect(localStorage.getItem("old")).toBeNull()
   })
 
+  it("upgrades a legacy payload that shares its key with the envelope", () => {
+    // The legacy and envelope key are deliberately the same string for
+    // `cyb.windows`. A legacy `{version, windows}` payload IS valid JSON, so
+    // a naive `JSON.parse` success is not proof of a real envelope — it must
+    // also carry `state`, or the legacy data is silently dropped instead of
+    // converted.
+    const sameKeyRead = (raw: string | null): Slice | null => {
+      if (!raw) return null
+      const parsed = JSON.parse(raw) as { legacyToken?: string }
+      return parsed.legacyToken ? { token: parsed.legacyToken } : null
+    }
+    localStorage.setItem("shared", JSON.stringify({ legacyToken: "legacy-token" }))
+    const storage = createLegacyAwareStorage<Slice>({
+      version: 1,
+      legacy: { key: "shared", read: sameKeyRead },
+    })
+
+    expect(storage.getItem("shared")).toEqual({ state: { token: "legacy-token" }, version: 1 })
+    expect(JSON.parse(localStorage.getItem("shared")!)).toHaveProperty("state.token", "legacy-token")
+  })
+
   it("round-trips setItem and removeItem", () => {
     const storage = createLegacyAwareStorage<Slice>({ version: 1 })
     storage.setItem("new", { state: { token: "x" }, version: 1 })

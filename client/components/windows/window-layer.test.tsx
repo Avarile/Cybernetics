@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
+import { useViewportStore } from "@/stores/viewport.store"
 import { useWorkspaceStore } from "@/stores/workspace.store"
 import { Dock } from "./dock"
 import { WindowLayer } from "./window-layer"
@@ -12,7 +13,7 @@ const s = () => useWorkspaceStore.getState()
 describe("WindowLayer", () => {
   beforeEach(() => {
     s().closeAll()
-    s().setViewport({ w: 1400, h: 900 })
+    useViewportStore.getState().setViewport({ w: 1400, h: 900 })
   })
 
   it("renders nothing when no windows are open", () => {
@@ -102,7 +103,7 @@ describe("WindowLayer", () => {
 describe("Dock", () => {
   beforeEach(() => {
     s().closeAll()
-    s().setViewport({ w: 1400, h: 900 })
+    useViewportStore.getState().setViewport({ w: 1400, h: 900 })
   })
 
   it("is hidden when nothing is minimised", () => {

@@ -48,7 +48,17 @@ export function createLegacyAwareStorage<P>(
       const existing = raw(name)
       if (existing) {
         try {
-          return JSON.parse(existing) as StorageValue<P>
+          const parsed = JSON.parse(existing)
+          // The legacy and envelope keys are deliberately the same string for
+          // some callers (e.g. `cyb.windows`), and a legacy payload can itself
+          // be valid JSON — so parsing without error is not enough. Only a
+          // real envelope carries `state`; anything else falls through to the
+          // legacy path below rather than being handed to `persist` as-is,
+          // which would silently discard the legacy data (its `state` reads
+          // as `undefined` and the default `merge` just keeps current state).
+          if (parsed !== null && typeof parsed === "object" && "state" in parsed) {
+            return parsed as StorageValue<P>
+          }
         } catch {
           // A hand-edited or truncated envelope. Fall through to the legacy
           // path rather than handing `persist` a broken object.
@@ -67,7 +77,12 @@ export function createLegacyAwareStorage<P>(
       // Deleting it after a swallowed quota failure would destroy the user's
       // one surviving copy of their refresh token and workspace — strictly
       // worse than never upgrading at all.
-      if (write(name, value)) {
+      //
+      // And ONLY when it differs from the envelope key: some callers (e.g.
+      // `cyb.windows`) deliberately reuse the same string for both, so the
+      // write above already retired the legacy payload by overwriting it —
+      // removing "the legacy key" here would delete the envelope it just wrote.
+      if (write(name, value) && options.legacy.key !== name) {
         try {
           localStorage.removeItem(options.legacy.key)
         } catch {

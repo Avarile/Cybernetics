@@ -6,14 +6,15 @@ import {
   serialiseForPersist,
   useWorkspaceStore,
 } from "./workspace.store"
+import { useViewportStore } from "./viewport.store"
 
 const s = () => useWorkspaceStore.getState()
 
-describe("window.store", () => {
+describe("workspace.store", () => {
   beforeEach(() => {
     localStorage.clear()
     s().closeAll()
-    s().setViewport({ w: 1400, h: 900 })
+    useViewportStore.getState().setViewport({ w: 1400, h: 900 })
   })
 
   it("opens a window and returns its id", () => {
@@ -143,5 +144,74 @@ describe("window.store", () => {
 
     const persisted = serialiseForPersist(s().windows)
     expect(persisted.map((w) => w.kind)).toEqual(["terminal"])
+  })
+})
+
+describe("workspace.store persistence", () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useWorkspaceStore.getState().closeAll()
+  })
+
+  it("persists non-modal windows under the new envelope", async () => {
+    useWorkspaceStore.getState().openWindow({ kind: "contacts" })
+    await Promise.resolve()
+
+    const stored = JSON.parse(localStorage.getItem("cyb.windows")!)
+    expect(stored.state.windows).toHaveLength(1)
+    expect(stored.state.windows[0].kind).toBe("contacts")
+  })
+
+  it("never persists a modal window", async () => {
+    useWorkspaceStore.getState().openWindow({ kind: "auth" })
+    await Promise.resolve()
+
+    const stored = JSON.parse(localStorage.getItem("cyb.windows")!)
+    expect(stored.state.windows).toHaveLength(0)
+  })
+
+  it("never persists a transient record window", async () => {
+    useWorkspaceStore.getState().openWindow({ kind: "record-edit", singletonKey: "x" })
+    await Promise.resolve()
+
+    const stored = JSON.parse(localStorage.getItem("cyb.windows")!)
+    expect(stored.state.windows).toHaveLength(0)
+  })
+
+  it("rehydrates a legacy cyb.windows payload and clears the legacy key", async () => {
+    localStorage.setItem(
+      "cyb.windows",
+      JSON.stringify({
+        version: 1,
+        windows: [
+          {
+            id: "w1",
+            kind: "contacts",
+            title: "Contacts",
+            rect: { x: 10, y: 10, w: 400, h: 300 },
+            zIndex: 4,
+            state: "normal",
+            modal: false,
+          },
+        ],
+      }),
+    )
+
+    // The legacy reader runs through the store's own storage adapter on the
+    // first getItem, which rehydrate() triggers.
+    await useWorkspaceStore.persist.rehydrate()
+
+    expect(useWorkspaceStore.getState().windows).toHaveLength(1)
+    expect(useWorkspaceStore.getState().zSeq).toBe(4)
+    // The slot was rewritten as an envelope, so a second read takes the fast path.
+    expect(JSON.parse(localStorage.getItem("cyb.windows")!)).toHaveProperty("state.windows")
+  })
+
+  it("clamps against the viewport store rather than its own copy", () => {
+    useViewportStore.getState().setViewport({ w: 500, h: 400 })
+    const id = useWorkspaceStore.getState().openWindow({ kind: "contacts" })
+    const win = useWorkspaceStore.getState().windows.find((w) => w.id === id)!
+    expect(win.rect.w).toBeLessThanOrEqual(500)
+    expect(win.rect.h).toBeLessThanOrEqual(400)
   })
 })

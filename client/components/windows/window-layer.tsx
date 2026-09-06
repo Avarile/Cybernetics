@@ -4,6 +4,7 @@ import { Suspense, useEffect } from "react"
 import { useShallow } from "zustand/react/shallow"
 import { Spinner } from "@/components/ui/spinner"
 import { WINDOW_REGISTRY } from "@/lib/windows/registry"
+import { useViewportStore } from "@/stores/viewport.store"
 import {
   MODAL_SCRIM_Z,
   selectOpenWindows,
@@ -24,7 +25,7 @@ export function WindowLayer() {
   const minimiseWindow = useWorkspaceStore((st) => st.minimiseWindow)
   const toggleMaximise = useWorkspaceStore((st) => st.toggleMaximise)
   const moveWindow = useWorkspaceStore((st) => st.moveWindow)
-  const setViewport = useWorkspaceStore((st) => st.setViewport)
+  const setViewport = useViewportStore((st) => st.setViewport)
 
   // The store clamps rects against the viewport, so it has to know its size.
   useEffect(() => {
