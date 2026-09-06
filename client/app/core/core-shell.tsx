@@ -1,31 +1,27 @@
 "use client"
 
-import { useCallback, useState } from "react"
 import { ShellChrome } from "@/components/shell/shell-chrome"
-import { useAuthWindow } from "@/components/shell/use-auth-window"
-import { useSessionBootstrap } from "@/components/shell/use-session-bootstrap"
 import { SystemCoreCanvas } from "@/components/system-core/system-core-canvas"
 import { Dock } from "@/components/windows/dock"
 import { WindowLayer } from "@/components/windows/window-layer"
+import { useAuthGate } from "@/features/session/use-auth-gate"
+import { useSession } from "@/features/session/use-session"
+import { useSessionBootstrap } from "@/features/session/use-session-bootstrap"
+import { useStateHydration } from "@/features/state-hydration"
+import { useSceneControls } from "@/features/workspace/use-scene-controls"
 import { cn } from "@/lib/utils"
-import { selectIsAuthenticated, useAuthStore } from "@/stores/auth.store"
 
 export function CoreShell() {
-  // Order is load-bearing: effects fire in hook order, and the bootstrap must
-  // have set `loading` before useAuthWindow decides whether to show the gate —
-  // otherwise a returning user gets a flash of the login dialog.
-  useSessionBootstrap()
-  useAuthWindow()
-  const authed = useAuthStore(selectIsAuthenticated)
+  // Persisted state first: the gate must decide against a restored workspace,
+  // and the bootstrap must see a rehydrated refresh token.
+  const hydrated = useStateHydration()
+  useSessionBootstrap(hydrated)
+  useAuthGate(hydrated)
+
+  const { authed } = useSession()
 
   // The reference's three viewport controls, same defaults.
-  const [panelOpen, setPanelOpen] = useState(true)
-  const [scannerVisible, setScannerVisible] = useState(true)
-  const [resetToken, setResetToken] = useState(0)
-
-  const togglePanel = useCallback(() => setPanelOpen((v) => !v), [])
-  const toggleScanner = useCallback(() => setScannerVisible((v) => !v), [])
-  const resetView = useCallback(() => setResetToken((n) => n + 1), [])
+  const { panelOpen, scannerVisible, resetToken } = useSceneControls()
 
   return (
     <main className="relative h-[100dvh] w-full overflow-hidden bg-[#00001c]">
@@ -52,13 +48,7 @@ export function CoreShell() {
       </div>
 
       <WindowLayer />
-      <ShellChrome
-        panelOpen={panelOpen}
-        scannerVisible={scannerVisible}
-        onTogglePanel={togglePanel}
-        onToggleScanner={toggleScanner}
-        onResetView={resetView}
-      />
+      <ShellChrome />
       <Dock />
     </main>
   )

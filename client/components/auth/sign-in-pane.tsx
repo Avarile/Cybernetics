@@ -4,34 +4,16 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
-import { ApiError } from "@/lib/api/errors"
-import { useApi } from "@/lib/api/provider"
-import { useAuthStore } from "@/stores/auth.store"
+import { useSignIn } from "@/features/session/use-sign-in"
 
 export function SignInPane({ onForgot }: { onForgot: () => void }) {
-  const { auth } = useApi()
+  const { signIn, pending, error } = useSignIn()
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
-  const [pending, setPending] = useState(false)
-  const [error, setError] = useState<string | null>(null)
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
-    setPending(true)
-    setError(null)
-    try {
-      const pair = await auth.login({ email, password })
-      useAuthStore.getState().setTokens(pair)
-      const principal = await auth.me()
-      useAuthStore.getState().setPrincipal(principal)
-    } catch (err) {
-      // Clear rather than leave half a session behind: login may have succeeded
-      // and /auth/me failed, which would otherwise leave tokens with no principal.
-      useAuthStore.getState().clear()
-      setError(err instanceof ApiError ? err.message : "Could not sign in")
-    } finally {
-      setPending(false)
-    }
+    await signIn(email, password)
   }
 
   return (
@@ -43,13 +25,26 @@ export function SignInPane({ onForgot }: { onForgot: () => void }) {
             id="email"
             type="email"
             autoComplete="email"
+            placeholder="m@example.com"
             required
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
         </Field>
         <Field>
-          <FieldLabel htmlFor="password">Password</FieldLabel>
+          <div className="flex items-center">
+            <FieldLabel htmlFor="password">Password</FieldLabel>
+            {/* A button, not the reference's `<a href="#">`: this switches
+                panes in place, and there is no page to navigate to. */}
+            <Button
+              type="button"
+              variant="link"
+              onClick={onForgot}
+              className="ml-auto h-auto w-auto p-0 text-sm font-normal underline-offset-4 hover:underline"
+            >
+              Forgot your password?
+            </Button>
+          </div>
           <Input
             id="password"
             type="password"
@@ -71,16 +66,6 @@ export function SignInPane({ onForgot }: { onForgot: () => void }) {
             {pending ? "Signing in…" : "Sign in"}
           </Button>
         </Field>
-
-        <Button
-          type="button"
-          variant="link"
-          size="sm"
-          onClick={onForgot}
-          className="justify-start px-0"
-        >
-          Forgot your password?
-        </Button>
       </FieldGroup>
     </form>
   )

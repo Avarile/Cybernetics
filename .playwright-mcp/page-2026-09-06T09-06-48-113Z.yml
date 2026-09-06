@@ -1,0 +1,20 @@
+- generic [active] [ref=f10e1]:
+  - main [ref=f10e2]:
+    - dialog "Access" [ref=f10e161]:
+      - generic [ref=f10e162]:
+        - generic [ref=f10e163]:
+          - generic [aria-hidden] [ref=f10e164]: ◆
+          - heading "CYBERNETICS" [level=1] [ref=f10e165]
+          - generic [ref=f10e166]: Reset your password
+          - generic [ref=f10e167]: We'll send a reset code to this address
+        - generic [ref=f10e183]:
+          - group [ref=f10e184]:
+            - generic [ref=f10e185]: Email
+            - textbox "Email" [ref=f10e186]
+          - group [ref=f10e187]:
+            - button "Send reset code" [ref=f10e188]
+          - button "Back to sign in" [ref=f10e189]
+    - generic: ◆ CYBERNETICS
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=f10e34] [cursor=pointer]
+  - alert [ref=f10e38]

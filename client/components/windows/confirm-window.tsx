@@ -3,8 +3,8 @@
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { ApiError } from "@/lib/api/errors"
-import { useApi } from "@/lib/api/provider"
-import { useWorkspaceStore } from "@/stores/workspace.store"
+import { useWindowControls } from "@/features/workspace/use-window-controls"
+import { useRecordMutations } from "@/features/records/use-record-mutations"
 
 export interface ConfirmWindowProps {
   message: string
@@ -13,7 +13,6 @@ export interface ConfirmWindowProps {
   /** Rows to DELETE from `endpoint`. */
   ids?: string[]
   endpoint?: string
-  onDone?: () => void
   /** Window id, injected by WindowLayer so the dialog can close itself. */
   __windowId?: string
 }
@@ -32,44 +31,43 @@ export function ConfirmWindow({
   destructive,
   ids,
   endpoint,
-  onDone,
   __windowId,
 }: ConfirmWindowProps) {
-  const { client } = useApi()
-  const closeWindow = useWorkspaceStore((s) => s.closeWindow)
+  // `__windowId` is only absent when this component is rendered outside a
+  // WindowLayer; `useWindowControls` still needs some id to call the hook
+  // with, and closing a window that doesn't exist is a no-op.
+  const { close: closeWindow } = useWindowControls(__windowId ?? "")
+  // `endpoint` may be undefined (a non-delete confirm dialog); `remove` is
+  // only ever called when both `ids` and `endpoint` are present, but the hook
+  // itself needs some endpoint to call `useApi`/`useInvalidate` against.
+  const { remove } = useRecordMutations(endpoint ?? "")
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   function close() {
-    if (__windowId) closeWindow(__windowId)
+    if (__windowId) closeWindow()
   }
 
   async function confirm() {
     if (!ids?.length || !endpoint) {
-      onDone?.()
       close()
       return
     }
     setPending(true)
     setError(null)
 
-    const results = await Promise.allSettled(
-      ids.map((id) => client.del(`${endpoint}/${id}`)),
-    )
-    const failed = results.filter((r) => r.status === "rejected")
+    const outcome = await remove(ids)
 
     setPending(false)
-    onDone?.()
 
-    if (failed.length === 0) {
+    if (outcome.failed === 0) {
       close()
       return
     }
 
-    const first = failed[0] as PromiseRejectedResult
     setError(
-      `${ids.length - failed.length} of ${ids.length} deleted. ` +
-        (first.reason instanceof ApiError ? first.reason.message : "Some deletions failed."),
+      `${outcome.deleted} of ${ids.length} deleted. ` +
+        (outcome.firstError instanceof ApiError ? outcome.firstError.message : "Some deletions failed."),
     )
   }
 

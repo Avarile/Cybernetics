@@ -1,18 +1,15 @@
 "use client"
 
-import { useState } from "react"
 import { DataTable } from "@/components/data-table/data-table"
-import { useWorkspaceStore } from "@/stores/workspace.store"
+import { useWorkspace } from "@/features/workspace/use-workspace"
 import { contactsConfig, type Contact } from "./contacts.config"
 
 export function ContactsWindow() {
-  const openWindow = useWorkspaceStore((s) => s.openWindow)
-  const [refreshToken, setRefreshToken] = useState(0)
+  const { openWindow } = useWorkspace()
 
   return (
     <DataTable
       config={contactsConfig}
-      refreshToken={refreshToken}
       onOpen={(row: Contact) =>
         openWindow({
           kind: "record-detail",
@@ -41,7 +38,6 @@ export function ContactsWindow() {
         openWindow({
           kind: "confirm",
           title: rows.length === 1 ? "Delete contact" : "Delete contacts",
-          modal: true,
           singletonKey: `confirm:contacts:${rows.map((r) => r.id).join(",")}`,
           props: {
             message: `Delete ${rows.length} contact${rows.length === 1 ? "" : "s"}?`,
@@ -49,7 +45,6 @@ export function ContactsWindow() {
             destructive: true,
             ids: rows.map((r) => r.id),
             endpoint: "/contacts",
-            onDone: () => setRefreshToken((n) => n + 1),
           },
         })
       }

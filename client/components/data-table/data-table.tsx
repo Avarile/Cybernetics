@@ -40,7 +40,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
 import { TablePagination } from "./table-pagination"
 import { TableState } from "./table-state"
-import { useDomainTable } from "./use-domain-table"
+import { useDomainTable } from "@/features/records/use-domain-table"
 import type { DomainTableConfig, HasId } from "./types"
 
 export interface DataTableProps<T extends HasId> {
@@ -49,8 +49,6 @@ export interface DataTableProps<T extends HasId> {
   onEdit?: (row: T) => void
   onDelete?: (rows: T[]) => void
   onOpen?: (row: T) => void
-  /** Bump to force a refetch from outside the table. */
-  refreshToken?: number
 }
 
 /**
@@ -73,9 +71,8 @@ export function DataTable<T extends HasId>({
   onEdit,
   onDelete,
   onOpen,
-  refreshToken = 0,
 }: DataTableProps<T>) {
-  const table = useDomainTable(config, refreshToken)
+  const table = useDomainTable(config)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [hidden, setHidden] = useState<Set<string>>(new Set())
 

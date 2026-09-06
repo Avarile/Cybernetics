@@ -1,0 +1,14 @@
+- generic [active] [ref=f8e1]:
+  - main [ref=f8e2]:
+    - generic:
+      - generic:
+        - generic:
+          - status:
+            - status "Loading"
+            - generic: Loading
+    - dialog "Access" [ref=f8e4]:
+      - status "Loading" [ref=f8e6]
+    - generic: ◆ CYBERNETICS
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=f8e14] [cursor=pointer]
+  - alert [ref=f8e18]

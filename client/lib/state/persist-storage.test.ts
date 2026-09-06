@@ -93,6 +93,56 @@ describe("createLegacyAwareStorage", () => {
     expect(JSON.parse(localStorage.getItem("shared")!)).toHaveProperty("state.token", "legacy-token")
   })
 
+  it("refuses to clobber an un-upgraded but convertible legacy payload sharing the envelope's key", () => {
+    // `skipHydration: true` means a caller (e.g. the workspace store's auth
+    // gate) can call `setState` — and so `setItem` — before anything has ever
+    // called `rehydrate()`. If that write went through unguarded, the user's
+    // still-unconverted legacy layout would be permanently replaced by
+    // whatever the not-yet-hydrated store's empty default state partializes
+    // to. The converter here genuinely CAN convert this payload — that is
+    // what distinguishes it from the self-heal case below. This must fail if
+    // the guard in `setItem` is removed.
+    const sameKeyRead = (raw: string | null): Slice | null => {
+      if (!raw) return null
+      const parsed = JSON.parse(raw) as { legacyToken?: string }
+      return parsed.legacyToken ? { token: parsed.legacyToken } : null
+    }
+    localStorage.setItem("shared", JSON.stringify({ legacyToken: "legacy-token" }))
+    const storage = createLegacyAwareStorage<Slice>({
+      version: 1,
+      legacy: { key: "shared", read: sameKeyRead },
+    })
+
+    storage.setItem("shared", { state: { token: "fresh-but-premature" }, version: 1 })
+
+    expect(localStorage.getItem("shared")).toBe(JSON.stringify({ legacyToken: "legacy-token" }))
+  })
+
+  it("self-heals a same-key slot that is neither an envelope nor convertible", () => {
+    // Truncated write, unknown version, hand-edited garbage — the SAME
+    // converter as above rejects THIS payload. There is nothing worth
+    // protecting here, and refusing to overwrite it would wedge persistence
+    // for that user forever: no envelope, no usable legacy data, and no
+    // future upgrade would ever succeed either. The write must go through.
+    const sameKeyRead = (raw: string | null): Slice | null => {
+      if (!raw) return null
+      const parsed = JSON.parse(raw) as { legacyToken?: string }
+      return parsed.legacyToken ? { token: parsed.legacyToken } : null
+    }
+    localStorage.setItem("shared", JSON.stringify({ somethingElse: true }))
+    const storage = createLegacyAwareStorage<Slice>({
+      version: 1,
+      legacy: { key: "shared", read: sameKeyRead },
+    })
+
+    storage.setItem("shared", { state: { token: "fresh" }, version: 1 })
+
+    expect(JSON.parse(localStorage.getItem("shared")!)).toEqual({
+      state: { token: "fresh" },
+      version: 1,
+    })
+  })
+
   it("round-trips setItem and removeItem", () => {
     const storage = createLegacyAwareStorage<Slice>({ version: 1 })
     storage.setItem("new", { state: { token: "x" }, version: 1 })

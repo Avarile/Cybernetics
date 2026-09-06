@@ -1,0 +1,94 @@
+- generic:
+  - main [aria-hidden]:
+    - generic:
+      - generic:
+        - generic:
+          - generic:
+            - generic:
+              - generic:
+                - generic:
+                  - text: Modules
+                  - generic: (26)
+                - generic: Example data
+              - generic:
+                - button: Add
+                - button [disabled]: Delete
+            - generic:
+              - listbox:
+                - generic: core
+                - option:
+                  - generic: system - controller unit
+                - option:
+                  - generic: kernel-scheduler
+                - option:
+                  - generic: cache-l1
+                - option:
+                  - generic: cache-l2-distributed
+                - generic: network
+                - option:
+                  - generic: session-registry
+                - option:
+                  - generic: api-gateway
+                - option:
+                  - generic: load-balancer
+                - option:
+                  - generic: message-queue
+                - option:
+                  - generic: event-bus
+                - option:
+                  - generic: network-fabric
+                - generic: observability
+                - option:
+                  - generic: metrics-collector
+                - option:
+                  - generic: LLM-db-temp
+                - generic: security
+                - option:
+                  - generic: identity-auth
+                - option:
+                  - generic: crypto-keyvault
+                - option:
+                  - generic: audit-log
+                - generic: storage
+                - option:
+                  - generic: db-users
+                - option:
+                  - generic: db-orders
+                - option:
+                  - generic: db-ledger
+                - option:
+                  - generic: db-inventory
+                - option:
+                  - generic: db-telemetry
+                - option:
+                  - generic: index-shard-a
+                - option:
+                  - generic: index-shard-b
+                - option:
+                  - generic: search-engine
+                - option:
+                  - generic: object-storage
+                - option:
+                  - generic: replication-sync
+                - option:
+                  - generic: backup-daemon
+            - generic:
+              - paragraph: Select a module to edit it.
+            - generic:
+              - button: Copy JSON
+              - button: Reset
+    - generic:
+      - generic [ref=f10e28]: ◆ CYBERNETICS
+      - generic [ref=f10e143]:
+        - toolbar [ref=f10e151]:
+          - button [pressed] [ref=f10e152]
+          - button [pressed] [ref=f10e153]
+          - button [ref=f10e154]
+        - button [ref=f10e155]: Terminal
+        - button [expanded] [ref=f10e156]: admin@cybernetics.local
+    - button [ref=f10e157]
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=f10e34] [cursor=pointer]
+  - alert
+  - menu "admin@cybernetics.local" [active] [ref=f10e158]:
+    - menuitem "Sign out" [ref=f10e159]

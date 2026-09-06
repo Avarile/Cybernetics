@@ -1,0 +1,125 @@
+[     357ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[     401ms] [LOG] [HMR] connected @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[     829ms] [WARNING] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead. @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[    1065ms] [LOG] system_core {modules: 26, materials: 25, labels: 0, geometries: 140, textures: 1} @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[    1115ms] [LOG] system_core {modules: 26, materials: 25, labels: 26, geometries: 166, textures: 27} @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[    4628ms] TypeError: Cannot read properties of undefined (reading 'toLowerCase')
+    at onKeyDown (http://localhost:3100/_next/static/chunks/_0o8d~mr._.js:57:31)
+[   45039ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[   45054ms] [LOG] [HMR] connected @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[   45208ms] [WARNING] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead. @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[   45257ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2510
+[   45257ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2510
+[   45263ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[   45263ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[   45263ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[   45263ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[   45263ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[   45263ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[   45263ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[   45263ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[   45318ms] [LOG] system_core {modules: 26, materials: 25, labels: 0, geometries: 140, textures: 1} @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[   45348ms] [LOG] system_core {modules: 26, materials: 25, labels: 26, geometries: 165, textures: 26} @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  216202ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  216700ms] [LOG] [Fast Refresh] done in 600ms @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  289536ms] [ERROR] WebSocket connection to 'ws://localhost:3100/_next/webpack-hmr?id=QKJfbiQno-Fzaym_U95Hx' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3100/_next/static/chunks/01vs_next_dist_client_10-2.sc._.js:13322
+[  290541ms] [ERROR] WebSocket connection to 'ws://localhost:3100/_next/webpack-hmr?id=QKJfbiQno-Fzaym_U95Hx' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3100/_next/static/chunks/01vs_next_dist_client_10-2.sc._.js:13322
+[  291543ms] [ERROR] WebSocket connection to 'ws://localhost:3100/_next/webpack-hmr?id=QKJfbiQno-Fzaym_U95Hx' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3100/_next/static/chunks/01vs_next_dist_client_10-2.sc._.js:13322
+[  292546ms] [ERROR] WebSocket connection to 'ws://localhost:3100/_next/webpack-hmr?id=QKJfbiQno-Fzaym_U95Hx' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3100/_next/static/chunks/01vs_next_dist_client_10-2.sc._.js:13322
+[  293552ms] [ERROR] WebSocket connection to 'ws://localhost:3100/_next/webpack-hmr?id=QKJfbiQno-Fzaym_U95Hx' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3100/_next/static/chunks/01vs_next_dist_client_10-2.sc._.js:13322
+[  298558ms] [ERROR] WebSocket connection to 'ws://localhost:3100/_next/webpack-hmr?id=QKJfbiQno-Fzaym_U95Hx' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3100/_next/static/chunks/01vs_next_dist_client_10-2.sc._.js:13322
+[  303566ms] [ERROR] WebSocket connection to 'ws://localhost:3100/_next/webpack-hmr?id=QKJfbiQno-Fzaym_U95Hx' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3100/_next/static/chunks/01vs_next_dist_client_10-2.sc._.js:13322
+[  308591ms] [ERROR] WebSocket connection to 'ws://localhost:3100/_next/webpack-hmr?id=QKJfbiQno-Fzaym_U95Hx' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3100/_next/static/chunks/01vs_next_dist_client_10-2.sc._.js:13322
+[  313624ms] [ERROR] WebSocket connection to 'ws://localhost:3100/_next/webpack-hmr?id=QKJfbiQno-Fzaym_U95Hx' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3100/_next/static/chunks/01vs_next_dist_client_10-2.sc._.js:13322
+[  318675ms] [ERROR] WebSocket connection to 'ws://localhost:3100/_next/webpack-hmr?id=QKJfbiQno-Fzaym_U95Hx' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3100/_next/static/chunks/01vs_next_dist_client_10-2.sc._.js:13322
+[  323834ms] [ERROR] WebSocket connection to 'ws://localhost:3100/_next/webpack-hmr?id=QKJfbiQno-Fzaym_U95Hx' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3100/_next/static/chunks/01vs_next_dist_client_10-2.sc._.js:13322
+[  328942ms] [ERROR] WebSocket connection to 'ws://localhost:3100/_next/webpack-hmr?id=QKJfbiQno-Fzaym_U95Hx' failed: Error in connection establishment: net::ERR_CONNECTION_REFUSED @ http://localhost:3100/_next/static/chunks/01vs_next_dist_client_10-2.sc._.js:13322
+[  399945ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  399991ms] [LOG] [HMR] connected @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  400188ms] [WARNING] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead. @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  400258ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2510
+[  400258ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2510
+[  400265ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[  400265ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[  400265ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[  400265ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[  400266ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[  400266ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[  400266ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[  400266ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[  400319ms] [LOG] system_core {modules: 26, materials: 25, labels: 0, geometries: 140, textures: 1} @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  400362ms] [LOG] system_core {modules: 26, materials: 25, labels: 26, geometries: 166, textures: 27} @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  421886ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  422205ms] [WARNING] [Fast Refresh] performing full reload
+
+Fast Refresh will perform a full reload when you edit a file that's imported by modules outside of the React rendering tree.
+You might have a file which exports a React component but also exports a value that is imported by a non-React component file.
+Consider migrating the non-React component export to a separate file and importing it into both files.
+
+It is also possible the parent component of the component you edited is a class component, which disables Fast Refresh.
+Fast Refresh requires at least one parent function component in your React tree. @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  423114ms] [LOG] [Fast Refresh] done in 1194ms @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  423249ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  423263ms] [LOG] [HMR] connected @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  423419ms] [WARNING] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead. @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  423518ms] [LOG] system_core {modules: 26, materials: 25, labels: 0, geometries: 140, textures: 1} @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  423554ms] [LOG] system_core {modules: 26, materials: 25, labels: 26, geometries: 166, textures: 27} @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  515486ms] TypeError: Cannot read properties of undefined (reading 'toLowerCase')
+    at onKeyDown (http://localhost:3100/_next/static/chunks/_052sisp._.js:57:31)
+[  577642ms] TypeError: Cannot read properties of undefined (reading 'toLowerCase')
+    at onKeyDown (http://localhost:3100/_next/static/chunks/_052sisp._.js:57:31)
+[  577643ms] TypeError: Cannot read properties of undefined (reading 'toLowerCase')
+    at onKeyDown (http://localhost:3100/_next/static/chunks/_052sisp._.js:57:31)
+[  633509ms] TypeError: Cannot read properties of undefined (reading 'toLowerCase')
+    at onKeyDown (http://localhost:3100/_next/static/chunks/_052sisp._.js:57:31)
+[  633509ms] TypeError: Cannot read properties of undefined (reading 'toLowerCase')
+    at onKeyDown (http://localhost:3100/_next/static/chunks/_052sisp._.js:57:31)
+[  814699ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  814812ms] [LOG] [Fast Refresh] done in 213ms @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  827605ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[  827742ms] [LOG] [Fast Refresh] done in 70ms @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 2911102ms] TypeError: Cannot read properties of undefined (reading 'toLowerCase')
+    at onKeyDown (http://localhost:3100/_next/static/chunks/_052sisp._.js:57:31)
+[ 2911104ms] TypeError: Cannot read properties of undefined (reading 'toLowerCase')
+    at onKeyDown (http://localhost:3100/_next/static/chunks/_052sisp._.js:57:31)
+[ 2917187ms] TypeError: Cannot read properties of undefined (reading 'toLowerCase')
+    at onKeyDown (http://localhost:3100/_next/static/chunks/_052sisp._.js:57:31)
+[ 2917187ms] TypeError: Cannot read properties of undefined (reading 'toLowerCase')
+    at onKeyDown (http://localhost:3100/_next/static/chunks/_052sisp._.js:57:31)
+[ 2922003ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 2922013ms] [LOG] [HMR] connected @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 2922395ms] [WARNING] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead. @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 2922443ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2510
+[ 2922443ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2510
+[ 2922449ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[ 2922449ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[ 2922449ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[ 2922449ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[ 2922449ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[ 2922449ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[ 2922449ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[ 2922450ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2404
+[ 2922501ms] [LOG] system_core {modules: 26, materials: 25, labels: 0, geometries: 140, textures: 1} @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 2922535ms] [LOG] system_core {modules: 26, materials: 25, labels: 26, geometries: 166, textures: 27} @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 2923712ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2510
+[ 2923712ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2510
+[ 2923714ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2510
+[ 2923714ms] [WARNING] The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page. https://developer.chrome.com/blog/autoplay/#web_audio @ http://localhost:3100/_next/static/chunks/components_system-core_0no-_y3._.js:2510
+[ 3400694ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3400717ms] [LOG] [Fast Refresh] done in 124ms @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3407526ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3407764ms] [LOG] [Fast Refresh] done in 313ms @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3425428ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3425654ms] [LOG] [Fast Refresh] done in 299ms @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3459221ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3459711ms] [LOG] [Fast Refresh] done in 588ms @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3467552ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3467686ms] [LOG] [Fast Refresh] done in 199ms @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3480208ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3480308ms] [LOG] [Fast Refresh] done in 167ms @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3484334ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3484471ms] [LOG] [Fast Refresh] done in 50ms @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3484578ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3484621ms] [LOG] [Fast Refresh] done in 144ms @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3796418ms] [LOG] [Fast Refresh] rebuilding @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[ 3796442ms] [LOG] [Fast Refresh] done in 125ms @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477

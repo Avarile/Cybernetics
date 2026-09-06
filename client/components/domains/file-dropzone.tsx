@@ -1,14 +1,13 @@
 "use client"
 
-import { useCallback, useRef, useState } from "react"
-import { nanoid } from "nanoid"
+import { useRef, useState } from "react"
 import { AlertTriangleIcon, CheckIcon, UploadIcon, XIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
-import { useApi } from "@/lib/api/provider"
-import { INGESTABLE_MIMES, isIngestable, uploadFile } from "@/lib/files/upload"
+import { useFileUploads } from "@/features/files/use-file-uploads"
+import { INGESTABLE_MIMES } from "@/lib/files/upload"
 import { cn } from "@/lib/utils"
-import { isSettled, useUploadStore, type UploadItem } from "@/stores/upload.store"
+import { isSettled, type UploadItem } from "@/stores/upload.store"
 
 const PHASE_LABEL: Record<UploadItem["phase"], string> = {
   queued: "Queued",
@@ -20,44 +19,12 @@ const PHASE_LABEL: Record<UploadItem["phase"], string> = {
   failed: "Failed",
 }
 
-export function FileDropzone({ onUploaded }: { onUploaded: () => void }) {
-  const { client } = useApi()
+export function FileDropzone() {
+  // Presentation state for this one element — it has no business in a store.
   const [dragging, setDragging] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
 
-  const items = useUploadStore((s) => s.items)
-  const add = useUploadStore((s) => s.add)
-  const update = useUploadStore((s) => s.update)
-  const remove = useUploadStore((s) => s.remove)
-  const clearSettled = useUploadStore((s) => s.clearSettled)
-
-  const start = useCallback(
-    async (files: FileList | File[]) => {
-      const list = Array.from(files)
-      await Promise.all(
-        list.map(async (file) => {
-          const localId = nanoid()
-          const mimeType = file.type || "application/octet-stream"
-          add({
-            localId,
-            filename: file.name,
-            size: file.size,
-            mimeType,
-            phase: "queued",
-            percent: 0,
-            ingestable: isIngestable(mimeType),
-          })
-          await uploadFile({
-            client,
-            file,
-            onProgress: (p) => update(localId, p),
-          })
-        }),
-      )
-      onUploaded()
-    },
-    [client, add, update, onUploaded],
-  )
+  const { items, start, remove, clearSettled } = useFileUploads()
 
   return (
     <div className="shrink-0 pb-3">

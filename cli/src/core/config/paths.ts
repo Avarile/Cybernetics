@@ -26,3 +26,14 @@ export function credentialsPath(env: NodeJS.ProcessEnv = process.env): string {
 export function lockPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(configDir(env), 'refresh.lock');
 }
+
+/**
+ * Where a fatally-aborted editor session's buffer is recovered from -- a
+ * single stable name per filetype, on purpose: like git's `COMMIT_EDITMSG`,
+ * the point is that the user (or a script) can always find it at the same
+ * place, not that every crash gets its own file. A later fatal abort
+ * overwrites an earlier, unread one.
+ */
+export function recoveryPath(env: NodeJS.ProcessEnv = process.env, ext = 'md'): string {
+  return join(configDir(env), `recovery.${ext}`);
+}

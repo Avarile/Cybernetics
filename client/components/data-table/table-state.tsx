@@ -2,7 +2,7 @@
 
 import { Button } from "@/components/ui/button"
 import { Skeleton } from "@/components/ui/skeleton"
-import type { TableStatus } from "./use-domain-table"
+import type { TableStatus } from "@/features/records/use-domain-table"
 
 /**
  * The loading / empty / error triad, in one place.
@@ -22,7 +22,7 @@ export function TableState({
   empty: string
   onRetry: () => void
 }) {
-  if (status === "loading" || status === "idle") {
+  if (status === "loading") {
     return (
       <div className="flex flex-col gap-2 py-6">
         {[0, 1, 2, 3].map((i) => (

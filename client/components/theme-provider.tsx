@@ -47,7 +47,12 @@ function ThemeHotkey() {
         return
       }
 
-      if (event.key.toLowerCase() !== "d") {
+      // Optional, because a window-level listener sees events the app never
+      // created. Password managers and automation tooling dispatch bare
+      // `keydown`s with no key data at all, and reading `.toLowerCase()` off
+      // that crashed the whole tree — most visibly right after a sign-out, when
+      // the auth window mounts a password field for them to pounce on.
+      if (event.key?.toLowerCase() !== "d") {
         return
       }
 

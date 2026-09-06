@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { configDir, configPath, credentialsPath, lockPath } from './paths';
+import { configDir, configPath, credentialsPath, lockPath, recoveryPath } from './paths';
 
 describe('config paths', () => {
   it('uses XDG_CONFIG_HOME when set', () => {
@@ -24,5 +24,11 @@ describe('config paths', () => {
     expect(configPath(env)).toBe('/tmp/xdg/cybernetics/config.json');
     expect(credentialsPath(env)).toBe('/tmp/xdg/cybernetics/credentials.json');
     expect(lockPath(env)).toBe('/tmp/xdg/cybernetics/refresh.lock');
+  });
+
+  it('names a stable recovery file per filetype, defaulting to md', () => {
+    const env = { XDG_CONFIG_HOME: '/tmp/xdg' };
+    expect(recoveryPath(env)).toBe('/tmp/xdg/cybernetics/recovery.md');
+    expect(recoveryPath(env, 'yaml')).toBe('/tmp/xdg/cybernetics/recovery.yaml');
   });
 });

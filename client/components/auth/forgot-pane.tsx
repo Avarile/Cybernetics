@@ -2,29 +2,19 @@
 
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
-import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field"
 import { Input } from "@/components/ui/input"
-import { useApi } from "@/lib/api/provider"
+import { useForgotPassword } from "@/features/session/use-forgot-password"
 
 export function ForgotPane({ onBack }: { onBack: () => void }) {
-  const { auth } = useApi()
   const [email, setEmail] = useState("")
-  const [sent, setSent] = useState(false)
-  const [pending, setPending] = useState(false)
+  // Always confirms, whether or not the address exists — the hook owns that
+  // reasoning, and the copy below is written to match it.
+  const { sent, pending, request } = useForgotPassword()
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
-    setPending(true)
-    // The endpoint answers identically for known and unknown addresses, so
-    // there is nothing to branch on — and nothing to leak by always confirming.
-    try {
-      await auth.forgotPassword(email)
-    } catch {
-      // deliberately swallowed: see above
-    } finally {
-      setSent(true)
-      setPending(false)
-    }
+    await request(email)
   }
 
   if (sent) {
@@ -52,7 +42,6 @@ export function ForgotPane({ onBack }: { onBack: () => void }) {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
           />
-          <FieldDescription>We&apos;ll send a reset code to this address.</FieldDescription>
         </Field>
         <Field>
           <Button type="submit" disabled={pending}>

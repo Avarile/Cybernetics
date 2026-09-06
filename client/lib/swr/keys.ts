@@ -32,5 +32,4 @@ export const scopes = {
   allLists: (endpoint: string) => ["list", endpoint] as const,
   allRecords: (endpoint: string) => ["record", endpoint] as const,
   conversations: () => ["conversations"] as const,
-  messages: (id: string) => ["conversation", id] as const,
 }

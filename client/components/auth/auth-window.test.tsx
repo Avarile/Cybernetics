@@ -1,37 +1,75 @@
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { useAuthWindow } from "@/components/shell/use-auth-window"
-import { ApiProvider } from "@/lib/api/provider"
-import { useAuthStore } from "@/stores/auth.store"
+import { useAuthGate } from "@/features/session/use-auth-gate"
+import { useSession } from "@/features/session/use-session"
+import { StateProvider } from "@/lib/swr/provider"
+import { useSessionStore } from "@/stores/session.store"
 import { useWorkspaceStore } from "@/stores/workspace.store"
+import { SWRConfig } from "swr"
 import { AuthWindow } from "./auth-window"
 
 const fetchImpl = vi.fn()
 
+/**
+ * Surfaces the session SWR reads a bare `render()` has no other way to reach:
+ * the principal moved out of the zustand store and into the SWR cache with
+ * Task 13, so a test can no longer read `useSessionStore.getState().principal`.
+ */
+function Probe() {
+  const { principal, authed } = useSession()
+  return (
+    <div>
+      <span data-testid="principal-email">{principal?.email ?? "none"}</span>
+      <span data-testid="authed">{String(authed)}</span>
+    </div>
+  )
+}
+
+// A fresh Map per render: the default SWR cache is a module-level singleton,
+// and it would otherwise leak session reads between test cases.
+//
+// `revalidateOnMount: false`: without it, activating the session key for the
+// first time (null -> ["session"], on sign-in) can itself kick off SWR's own
+// background revalidation against the same persistent `fetchImpl` mock,
+// independently of `useSignIn`'s explicit cache seed — which would mask that
+// seed being deleted entirely. These tests are about `useSignIn`'s own
+// behaviour, not SWR's incidental auto-fetch.
 function renderAuth() {
   return render(
-    <ApiProvider baseUrl="https://api.test" fetchImpl={fetchImpl as unknown as typeof fetch}>
-      <AuthWindow />
-    </ApiProvider>,
+    <SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false }}>
+      <StateProvider baseUrl="https://api.test" fetchImpl={fetchImpl as unknown as typeof fetch}>
+        <AuthWindow />
+        <Probe />
+      </StateProvider>
+    </SWRConfig>,
   )
 }
 
 /**
- * The window-managed dialog, rather than the bare form: `useAuthWindow` is what
- * ties the auth store back to the window store, so only this arrangement can
+ * The window-managed dialog, rather than the bare form: `useAuthGate` is what
+ * ties the session back to the window store, so only this arrangement can
  * catch a login that signs the user in but leaves the modal on screen.
+ *
+ * `true` stands in for `hydrated`: this suite is not exercising the
+ * hydration/bootstrap ordering (that lives in use-auth-gate.test.tsx and
+ * state-hydration.test.tsx), so hydration is treated as already settled.
  */
 function Gate() {
-  useAuthWindow()
+  useAuthGate(true)
   return <AuthWindow />
 }
 
 function renderGate() {
   return render(
-    <ApiProvider baseUrl="https://api.test" fetchImpl={fetchImpl as unknown as typeof fetch}>
-      <Gate />
-    </ApiProvider>,
+    // `revalidateOnMount: false`: see the note on `renderAuth` above — the
+    // gate closing must be driven by `useSignIn`'s explicit seed, not an
+    // incidental SWR auto-fetch that happens to hit the same mock.
+    <SWRConfig value={{ provider: () => new Map(), revalidateOnMount: false }}>
+      <StateProvider baseUrl="https://api.test" fetchImpl={fetchImpl as unknown as typeof fetch}>
+        <Gate />
+      </StateProvider>
+    </SWRConfig>,
   )
 }
 
@@ -54,9 +92,13 @@ function json(body: unknown, status = 200) {
 
 describe("AuthWindow", () => {
   beforeEach(() => {
-    vi.clearAllMocks()
+    // `mockReset`, not `clearAllMocks`: `clearAllMocks` only clears call
+    // history, not a queued `mockResolvedValueOnce`/`mockImplementation` —
+    // which would otherwise leak from one test's fetchImpl setup into the
+    // next test's calls.
+    fetchImpl.mockReset()
     localStorage.clear()
-    useAuthStore.getState().clear()
+    useSessionStore.getState().clear()
     useWorkspaceStore.getState().closeAll()
   })
 
@@ -68,6 +110,9 @@ describe("AuthWindow", () => {
   })
 
   it("signs in and stores the principal", async () => {
+    // Consumed exactly once each: `revalidateOnMount: false` on `renderAuth`
+    // means the second response can only ever be read by useSignIn's own
+    // explicit `auth.me()` call, not an incidental SWR auto-fetch.
     fetchImpl
       .mockResolvedValueOnce(json({ accessToken: "a-1", refreshToken: "r-1", expiresIn: 900 }))
       .mockResolvedValueOnce(json({ id: "u1", kind: "user", role: "admin", email: "a@b.c" }))
@@ -77,10 +122,11 @@ describe("AuthWindow", () => {
     await userEvent.type(screen.getByLabelText(/password/i), "pw")
     await userEvent.click(screen.getByRole("button", { name: /sign in/i }))
 
-    await waitFor(() => {
-      expect(useAuthStore.getState().principal?.email).toBe("a@b.c")
-    })
-    expect(useAuthStore.getState().accessToken).toBe("a-1")
+    // `useSignIn`'s `mutate(keys.session(), await auth.me(), {revalidate:
+    // false})` is the ONLY thing that can have populated this: SWR's own
+    // auto-revalidation is off, so nothing else could have filled the cache.
+    expect(screen.getByTestId("principal-email")).toHaveTextContent("a@b.c")
+    expect(useSessionStore.getState().accessToken).toBe("a-1")
   })
 
   it("shows the API's message when credentials are rejected", async () => {
@@ -107,13 +153,16 @@ describe("AuthWindow", () => {
     await userEvent.click(screen.getByRole("button", { name: /sign in/i }))
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Invalid email or password")
-    expect(useAuthStore.getState().principal).toBeNull()
+    expect(screen.getByTestId("principal-email")).toHaveTextContent("none")
   })
 
   it("leaves no half-session behind when /auth/me fails after a good login", async () => {
     fetchImpl
       .mockResolvedValueOnce(json({ accessToken: "a-1", refreshToken: "r-1", expiresIn: 900 }))
-      .mockResolvedValueOnce(json({ error: { code: "UNKNOWN", message: "boom", statusCode: 500 } }, 500))
+      // `mockImplementation`, not `mockResolvedValue`: a `Response` body can
+      // only be read once, and reusing the SAME instance across more than
+      // one call throws "Body is unusable" on the second read.
+      .mockImplementation(() => json({ error: { code: "UNKNOWN", message: "boom", statusCode: 500 } }, 500))
 
     renderAuth()
     await userEvent.type(screen.getByLabelText(/email/i), "a@b.c")
@@ -121,9 +170,8 @@ describe("AuthWindow", () => {
     await userEvent.click(screen.getByRole("button", { name: /sign in/i }))
 
     await screen.findByRole("alert")
-    const s = useAuthStore.getState()
-    expect(s.accessToken).toBeNull()
-    expect(s.principal).toBeNull()
+    expect(useSessionStore.getState().accessToken).toBeNull()
+    expect(screen.getByTestId("principal-email")).toHaveTextContent("none")
   })
 
   it("hides Register and explains why when the flag is off", () => {
@@ -141,7 +189,8 @@ describe("AuthWindow", () => {
   it("dismisses itself once the sign-in succeeds", async () => {
     fetchImpl
       .mockResolvedValueOnce(json({ accessToken: "a-1", refreshToken: "r-1", expiresIn: 900 }))
-      .mockResolvedValueOnce(json({ id: "u1", kind: "user", role: "admin", email: "a@b.c" }))
+      // `mockImplementation`, not `mockResolvedValue`: see the note above.
+      .mockImplementation(() => json({ id: "u1", kind: "user", role: "admin", email: "a@b.c" }))
 
     renderGate()
     expect(authWindows()).toHaveLength(1)
@@ -168,7 +217,8 @@ describe("AuthWindow", () => {
   it("stays open when /auth/me fails after a good login", async () => {
     fetchImpl
       .mockResolvedValueOnce(json({ accessToken: "a-1", refreshToken: "r-1", expiresIn: 900 }))
-      .mockResolvedValueOnce(json({ error: { code: "UNKNOWN", message: "boom", statusCode: 500 } }, 500))
+      // `mockImplementation`, not `mockResolvedValue`: see the note above.
+      .mockImplementation(() => json({ error: { code: "UNKNOWN", message: "boom", statusCode: 500 } }, 500))
 
     renderGate()
     await submitCredentials("pw")

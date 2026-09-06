@@ -1,0 +1,94 @@
+import type { SettingsService } from '../../core/config/settings.service';
+import type { ClientFactory } from '../../core/http/client.factory';
+import { UsageError } from '../../core/errors';
+import { ProjectsMilestoneRmCommand } from './projects-milestone-rm.command';
+
+describe('ProjectsMilestoneRmCommand', () => {
+  const settings = {
+    resolve: () => ({ profile: 'dev', baseUrl: 'http://api.test' }),
+  } as unknown as SettingsService;
+
+  const PROJECT_ID = 'aaaaaaaa-1111-1111-1111-111111111111';
+  const MILESTONE_ID = 'cccccccc-3333-3333-3333-333333333333';
+
+  let get: jest.Mock;
+  let del: jest.Mock;
+  let clients: ClientFactory;
+  let confirmPrompt: jest.Mock;
+  let isTTY: jest.Mock;
+  let out: string[];
+
+  const make = () => new ProjectsMilestoneRmCommand(settings, clients, confirmPrompt, isTTY);
+
+  beforeEach(() => {
+    get = jest.fn().mockResolvedValue([
+      {
+        id: MILESTONE_ID,
+        projectId: PROJECT_ID,
+        name: 'Beta launch',
+        description: null,
+        status: 'pending',
+        dueDate: null,
+        reachedAt: null,
+        ownerUserId: null,
+        sortOrder: 0,
+        createdAt: '2026-09-01T00:00:00.000Z',
+        updatedAt: '2026-09-01T00:00:00.000Z',
+        isDeleted: false,
+        deletedAt: null,
+      },
+    ]);
+    del = jest.fn().mockResolvedValue(undefined);
+    clients = { create: () => ({ get, del }) } as unknown as ClientFactory;
+    confirmPrompt = jest.fn().mockResolvedValue(true);
+    isTTY = jest.fn().mockReturnValue(true);
+    out = [];
+    jest.spyOn(process.stdout, 'write').mockImplementation((chunk: unknown) => {
+      out.push(String(chunk));
+      return true;
+    });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('--yes removes without prompting', async () => {
+    await make().run([PROJECT_ID, MILESTONE_ID], { yes: true });
+
+    expect(confirmPrompt).not.toHaveBeenCalled();
+    expect(del).toHaveBeenCalledWith(`/projects/milestones/${MILESTONE_ID}`);
+  });
+
+  it('refuses without --yes in a non-TTY session', async () => {
+    isTTY.mockReturnValue(false);
+
+    await expect(make().run([PROJECT_ID, MILESTONE_ID], {})).rejects.toThrow(UsageError);
+    expect(del).not.toHaveBeenCalled();
+  });
+
+  it('prompts for confirmation naming the milestone, then deletes when confirmed', async () => {
+    await make().run([PROJECT_ID, MILESTONE_ID], {});
+
+    expect(confirmPrompt).toHaveBeenCalledTimes(1);
+    const message = confirmPrompt.mock.calls[0][0] as string;
+    expect(message).toContain('Beta launch');
+    expect(del).toHaveBeenCalledWith(`/projects/milestones/${MILESTONE_ID}`);
+  });
+
+  it('aborts without deleting when the user declines', async () => {
+    confirmPrompt.mockResolvedValue(false);
+
+    await make().run([PROJECT_ID, MILESTONE_ID], {});
+
+    expect(del).not.toHaveBeenCalled();
+    expect(out.join('')).toContain('Aborted');
+  });
+
+  it('exits 2 (not a crash) when the milestone id does not belong to this project', async () => {
+    await expect(
+      make().run([PROJECT_ID, 'dddddddd-4444-4444-4444-444444444444'], { yes: true }),
+    ).rejects.toThrow(UsageError);
+    expect(del).not.toHaveBeenCalled();
+  });
+});

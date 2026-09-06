@@ -5,7 +5,8 @@ import { immer } from "zustand/middleware/immer"
 import { createLegacyAwareStorage } from "@/lib/state/persist-storage"
 import { readLegacyWindows } from "@/lib/state/legacy-storage"
 import { cascade, clampToViewport } from "@/lib/windows/geometry"
-import { WINDOW_REGISTRY } from "@/lib/windows/registry"
+import { WINDOW_META } from "@/lib/windows/meta"
+import type { JsonObject } from "@/lib/state/json"
 import { useViewportStore } from "./viewport.store"
 import type { Rect, WindowInstance, WindowKind } from "@/lib/windows/types"
 
@@ -38,9 +39,18 @@ const NEVER_PERSIST: ReadonlySet<WindowKind> = new Set<WindowKind>([
 export interface OpenWindowInput {
   kind: WindowKind
   title?: string
-  props?: Record<string, unknown>
+  props?: JsonObject
   modal?: boolean
-  /** De-duplication identity. Defaults to `kind`, which makes it a singleton. */
+  /**
+   * De-duplication identity: `openWindow` focuses the existing instance whose
+   * key matches instead of opening a second one.
+   *
+   * The default is the kind — a singleton — EXCEPT for a kind whose
+   * `WINDOW_META` declares `singleton: false`, where it is a fresh id and each
+   * call opens another instance. Passing one explicitly gives such a kind a
+   * de-duplication identity of its own; `files-window.tsx` does that with
+   * `confirm:files:<ids>` so one confirm dialog per selection, not per click.
+   */
   singletonKey?: string
   rect?: Partial<Rect>
 }
@@ -83,7 +93,10 @@ function isRect(v: unknown): boolean {
  * Validates a stored instance before it reaches the store.
  *
  * localStorage is user-writable and survives deploys, so a payload here can be
- * stale or hand-edited.
+ * stale or hand-edited. Applied on EVERY rehydrate, through the persist `merge`
+ * below, and not only on the one-time legacy conversion — otherwise the
+ * guarantee would hold for exactly the first load after the upgrade and never
+ * again, since `getItem` hands back a parsed envelope unvalidated.
  */
 export function isRestorable(v: unknown): v is WindowInstance {
   if (typeof v !== "object" || v === null) return false
@@ -98,7 +111,7 @@ export function isRestorable(v: unknown): v is WindowInstance {
     (w.state === "normal" || w.state === "minimised" || w.state === "maximised") &&
     w.modal === false &&
     isRect(w.rect) &&
-    Object.hasOwn(WINDOW_REGISTRY, w.kind as string)
+    Object.hasOwn(WINDOW_META, w.kind as string)
   )
 }
 
@@ -108,11 +121,15 @@ export const useWorkspaceStore = create<WorkspaceState>()(
       windows: [],
       zSeq: 0,
 
-      // Today's body, with two changes and no others: the viewport comes from
-      // the new store, and the final write is an immer mutation. Descriptor
-      // resolution is Task 7's job — do not reach for WINDOW_META here.
+      // Resolves the kind's declared meta (title, modality, geometry) before
+      // falling back to input and then to the store's own defaults, so a
+      // caller only needs to override what's actually different for it.
       openWindow: (input) => {
-        const key = input.singletonKey ?? input.kind
+        const meta = WINDOW_META[input.kind]
+        // Every kind used to be an implicit singleton (singletonKey defaulted
+        // to kind). A kind declared `singleton: false` now gets a unique key
+        // of its own unless the caller supplies one explicitly.
+        const key = input.singletonKey ?? (meta?.singleton === false ? nanoid() : input.kind)
         const existing = get().windows.find((w) => keyOf(w) === key)
 
         if (existing) {
@@ -124,20 +141,24 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         }
 
         const id = nanoid()
-        const modal = input.modal ?? false
+        const modal = input.modal ?? meta?.modal ?? false
         const viewport = useViewportStore.getState()
         const nextZ = get().zSeq + 1
 
-        const base = clampToViewport({ ...DEFAULT_RECT, ...input.rect }, viewport)
+        const base = clampToViewport(
+          { ...DEFAULT_RECT, ...meta?.defaultRect, ...input.rect },
+          viewport,
+        )
         // An explicit x means the caller placed it; only auto-placed windows cascade.
         const rect = input.rect?.x != null ? base : cascade(get().windows.length, base, viewport)
 
         const instance: WindowInstance = {
           id,
           kind: input.kind,
-          title: input.title ?? input.kind,
+          title: input.title ?? meta?.title ?? input.kind,
           props: { ...input.props, __key: key },
           rect,
+          minSize: meta?.minSize,
           zIndex: modal ? MODAL_Z_BASE + nextZ : nextZ,
           state: "normal",
           modal,
@@ -208,6 +229,32 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           read: (raw) => readLegacyWindows(raw, isRestorable),
         },
       }),
+      // The envelope is as untrustworthy as the legacy payload was: a
+      // truncated write, a hand edit, or a deploy that retires a WindowKind all
+      // reach the store through here. Without this, a non-finite `zIndex`
+      // poisons `zSeq` for the session and a ghost window silently occupies its
+      // kind's singleton slot, rendering nothing.
+      merge: (persisted, current) => {
+        const saved = persisted as Partial<PersistedWorkspace> | null | undefined
+        // Empty storage still reaches `merge`: zustand calls it with
+        // `undefined` when `getItem` returns null, and applies the result with
+        // `set(state, true)` — a REPLACE. Falling through would hand back
+        // `windows: []` and wipe anything opened before `rehydrate()` ran,
+        // which `skipHydration` makes an ordinary ordering rather than an
+        // exotic one. The default merge is a no-op on this path; so is this.
+        if (saved == null) return current
+        const windows = (Array.isArray(saved.windows) ? saved.windows : []).filter(isRestorable)
+        return {
+          ...current,
+          windows,
+          // Re-derived from the survivors rather than taken from the envelope:
+          // a persisted `zSeq` can be non-finite or simply far ahead of
+          // anything that survived the filter, and either way every later
+          // `nextZ` is built on it. With no windows left it correctly returns
+          // to 0. This is the same derivation `readLegacyWindows` uses.
+          zSeq: windows.reduce((max, w) => Math.max(max, w.zIndex), 0),
+        }
+      },
     },
   ),
 )

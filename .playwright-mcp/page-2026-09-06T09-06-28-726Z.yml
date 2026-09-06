@@ -1,0 +1,28 @@
+- generic [active] [ref=f10e1]:
+  - main [ref=f10e2]:
+    - dialog "Access" [ref=f10e161]:
+      - generic [ref=f10e162]:
+        - generic [ref=f10e163]:
+          - generic [aria-hidden] [ref=f10e164]: ◆
+          - heading "CYBERNETICS" [level=1] [ref=f10e165]
+          - generic [ref=f10e166]: Sign in to your account
+          - generic [ref=f10e167]: Enter your email below to sign in to your account
+        - generic [ref=f10e168]:
+          - generic [ref=f10e170]:
+            - group [ref=f10e171]:
+              - generic [ref=f10e172]: Email
+              - textbox "Email" [ref=f10e173]:
+                - /placeholder: m@example.com
+                - text: admin@cybernetics.local
+            - group [ref=f10e174]:
+              - generic [ref=f10e175]:
+                - generic [ref=f10e176]: Password
+                - button "Forgot your password?" [ref=f10e177]
+              - textbox "Password" [ref=f10e178]: y30uVIZBjuAsTVqnghu6PUs
+            - group [ref=f10e179]:
+              - button "Sign in" [ref=f10e180]
+          - paragraph [ref=f10e181]: Accounts are provisioned by an administrator.
+    - generic: ◆ CYBERNETICS
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=f10e34] [cursor=pointer]
+  - alert [ref=f10e38]

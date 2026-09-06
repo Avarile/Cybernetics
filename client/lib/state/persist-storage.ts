@@ -43,26 +43,28 @@ export function createLegacyAwareStorage<P>(
     }
   }
 
+  /** Only a real persist envelope carries `state`. */
+  function isEnvelope(text: string): boolean {
+    try {
+      const parsed = JSON.parse(text)
+      return parsed !== null && typeof parsed === "object" && "state" in parsed
+    } catch {
+      return false
+    }
+  }
+
   return {
     getItem: (name) => {
       const existing = raw(name)
-      if (existing) {
-        try {
-          const parsed = JSON.parse(existing)
-          // The legacy and envelope keys are deliberately the same string for
-          // some callers (e.g. `cyb.windows`), and a legacy payload can itself
-          // be valid JSON — so parsing without error is not enough. Only a
-          // real envelope carries `state`; anything else falls through to the
-          // legacy path below rather than being handed to `persist` as-is,
-          // which would silently discard the legacy data (its `state` reads
-          // as `undefined` and the default `merge` just keeps current state).
-          if (parsed !== null && typeof parsed === "object" && "state" in parsed) {
-            return parsed as StorageValue<P>
-          }
-        } catch {
-          // A hand-edited or truncated envelope. Fall through to the legacy
-          // path rather than handing `persist` a broken object.
-        }
+      // The legacy and envelope keys are deliberately the same string for some
+      // callers (e.g. `cyb.windows`), and a legacy payload can itself be valid
+      // JSON — so parsing without error is not proof of a real envelope. Only
+      // a real envelope carries `state`; anything else falls through to the
+      // legacy path below rather than being handed to `persist` as-is, which
+      // would silently discard the legacy data (its `state` reads as
+      // `undefined` and the default `merge` just keeps current state).
+      if (existing && isEnvelope(existing)) {
+        return JSON.parse(existing) as StorageValue<P>
       }
 
       if (!options.legacy) return null
@@ -93,6 +95,30 @@ export function createLegacyAwareStorage<P>(
     },
 
     setItem: (name, value) => {
+      // Never clobber a legacy payload that has not been upgraded yet.
+      // `skipHydration` means a store can be MUTATED before its first
+      // `getItem` — e.g. the auth gate opens on mount long before anything
+      // calls `rehydrate()` — and for a same-key caller like `cyb.windows`
+      // that write would replace the user's only copy of their layout with
+      // an empty envelope, permanently.
+      //
+      // The refusal has a cost, currently unreachable but worth naming: the
+      // session store reuses one key too (`cyb.refresh`), so an early write
+      // there would be dropped while the slot still held a convertible legacy
+      // token, and that user's session would stop persisting for the rest of
+      // the page's life. It self-heals on the next load, because `getItem`
+      // runs first and converts. Nothing writes to the session store before
+      // `useStateHydration` runs, which is the only reason this cannot fire —
+      // so anything that adds an earlier write must move that write after
+      // rehydration, not relax the guard.
+      if (options.legacy?.key === name) {
+        const existing = raw(name)
+        // Only protect data the converter can still USE. A slot holding
+        // something neither envelope nor convertible (truncated write, unknown
+        // version, hand-edited) has nothing worth saving, and refusing to
+        // overwrite it would wedge persistence for that user permanently.
+        if (existing && !isEnvelope(existing) && options.legacy.read(existing) !== null) return
+      }
       write(name, value)
     },
 

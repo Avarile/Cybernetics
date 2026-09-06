@@ -11,6 +11,7 @@
     "test": "jest",
     "test:watch": "jest --watch",
     "codegen": "ts-node src/codegen/generate.ts",
+    "codegen:check": "pnpm codegen && git diff --exit-code src/generated/",
     "verify": "pnpm typecheck && pnpm test"
   },
   "dependencies": {

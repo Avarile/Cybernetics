@@ -1,7 +1,8 @@
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { ApiProvider } from "@/lib/api/provider"
+import { StateProvider } from "@/lib/swr/provider"
+import { SWRConfig } from "swr"
 import { DataTable } from "./data-table"
 import type { DomainTableConfig } from "./types"
 
@@ -57,12 +58,18 @@ const ROWS: Row[] = [
   { id: "2", name: "Beta", status: "archived" },
 ]
 
-function renderTable(props: Partial<React.ComponentProps<typeof DataTable<Row>>> = {}) {
-  return render(
-    <ApiProvider baseUrl="https://api.test" fetchImpl={fetchImpl as unknown as typeof fetch}>
-      <DataTable config={CONFIG} {...props} />
-    </ApiProvider>,
+function tableTree(props: Partial<React.ComponentProps<typeof DataTable<Row>>> = {}) {
+  return (
+    <SWRConfig value={{ provider: () => new Map() }}>
+      <StateProvider baseUrl="https://api.test" fetchImpl={fetchImpl as unknown as typeof fetch}>
+        <DataTable config={CONFIG} {...props} />
+      </StateProvider>
+    </SWRConfig>
   )
+}
+
+function renderTable(props: Partial<React.ComponentProps<typeof DataTable<Row>>> = {}) {
+  return render(tableTree(props))
 }
 
 /** The path+query of every list request made so far. */
@@ -227,15 +234,99 @@ describe("DataTable", () => {
   it("hides row actions entirely for a read-only domain", async () => {
     fetchImpl.mockResolvedValue(page(ROWS))
     render(
-      <ApiProvider baseUrl="https://api.test" fetchImpl={fetchImpl as unknown as typeof fetch}>
-        <DataTable
-          config={{ ...CONFIG, canEdit: false, canDelete: false, canCreate: false }}
-        />
-      </ApiProvider>,
+      <SWRConfig value={{ provider: () => new Map() }}>
+        <StateProvider baseUrl="https://api.test" fetchImpl={fetchImpl as unknown as typeof fetch}>
+          <DataTable
+            config={{ ...CONFIG, canEdit: false, canDelete: false, canCreate: false }}
+          />
+        </StateProvider>
+      </SWRConfig>,
     )
     await screen.findByText("Alpha")
     expect(screen.queryByRole("button", { name: "Row actions" })).not.toBeInTheDocument()
     expect(screen.queryByRole("button", { name: /new/i })).not.toBeInTheDocument()
+  })
+
+  it("issues one request per distinct query and none per re-render", async () => {
+    fetchImpl.mockResolvedValue(page(ROWS))
+    const { rerender } = renderTable()
+    await screen.findByText("Alpha")
+
+    // Same config, same query — SWR should serve both re-renders from cache.
+    rerender(tableTree())
+    rerender(tableTree())
+    await screen.findByText("Alpha")
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it("returns to page one when a filter narrows the list", async () => {
+    fetchImpl.mockResolvedValue(page(ROWS, 57))
+    renderTable()
+    await screen.findByText("Alpha")
+
+    await userEvent.click(screen.getByRole("button", { name: /go to next page/i }))
+    await waitFor(() => {
+      expect(requestedUrls().some((u) => u.includes("page=2"))).toBe(true)
+    })
+
+    // The select trigger's accessible name doesn't resolve in jsdom (its label
+    // lives in a Radix-rendered `SelectValue`, not an aria-label), so target
+    // the trigger button by its visible text instead of role+name. The text
+    // itself has `pointer-events: none`, so click its button ancestor.
+    const statusTrigger = screen.getByText("Status: any").closest("button")
+    if (!statusTrigger) throw new Error("status select trigger not found")
+    await userEvent.click(statusTrigger)
+    await userEvent.click(await screen.findByRole("option", { name: "Archived" }))
+
+    await waitFor(() => {
+      expect(requestedUrls().some((u) => u.includes("status=archived"))).toBe(true)
+    })
+    expect(requestedUrls().at(-1)).toContain("page=1")
+  })
+
+  it("discards an out-of-order response and shows the latest query's rows", async () => {
+    // Regression test for the deleted `requestSeq` ref: the old hook discarded
+    // a late response by hand. The claim now is that SWR keys a response to
+    // the query that asked for it, so a slow response for an earlier query
+    // can never land in a newer query's slot. This test fires two distinct
+    // queries before either resolves, resolves them out of order, and checks
+    // the table shows the later query's rows regardless.
+    let resolveStale!: (r: Response) => void
+    let resolveFresh!: (r: Response) => void
+    const pendingStale = new Promise<Response>((res) => {
+      resolveStale = res
+    })
+    const pendingFresh = new Promise<Response>((res) => {
+      resolveFresh = res
+    })
+
+    fetchImpl.mockImplementation((url: string) => {
+      if (url.endsWith("search=ab")) return pendingFresh
+      if (url.endsWith("search=a")) return pendingStale
+      return Promise.resolve(page(ROWS))
+    })
+
+    renderTable()
+    await screen.findByText("Alpha")
+
+    // One userEvent.type call fires both queries in sequence, back to back,
+    // well before either's response arrives.
+    await userEvent.type(screen.getByPlaceholderText("Search…"), "ab")
+
+    // The newer query (search=ab) resolves first.
+    resolveFresh(page([{ id: "9", name: "Zulu", status: "active" }], 1))
+    expect(await screen.findByText("Zulu")).toBeInTheDocument()
+
+    // The stale query (search=a) resolves late — it must not clobber the
+    // table now that a newer query is current. There is no positive event to
+    // wait for here (correct behaviour is that nothing changes), so give its
+    // promise chain a real turn of the event loop before asserting — the same
+    // technique `lib/swr/provider.test.tsx` uses to prove a retry never fires.
+    resolveStale(page([{ id: "8", name: "Yankee", status: "active" }], 1))
+    await new Promise((r) => setTimeout(r, 250))
+    expect(screen.queryByText("Yankee")).not.toBeInTheDocument()
+    expect(screen.getByText("Zulu")).toBeInTheDocument()
   })
 })
 

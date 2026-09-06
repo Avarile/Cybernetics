@@ -1,4 +1,5 @@
 import { create } from "zustand"
+import { immer } from "zustand/middleware/immer"
 import type { UploadPhase, UploadProgress } from "@/lib/files/upload"
 
 export interface UploadItem {
@@ -30,35 +31,44 @@ const SETTLED: ReadonlySet<UploadPhase> = new Set<UploadPhase>(["indexed", "fail
 
 export const isSettled = (phase: UploadPhase): boolean => SETTLED.has(phase)
 
-export const useUploadStore = create<UploadStoreState>((set) => ({
-  items: [],
+export const useUploadStore = create<UploadStoreState>()(
+  immer((set) => ({
+    items: [],
 
-  add: (item) => set((s) => ({ items: [...s.items, item] })),
+    add: (item) =>
+      set((state) => {
+        state.items.push(item)
+      }),
 
-  update: (localId, progress) =>
-    set((s) => ({
-      items: s.items.map((i) =>
-        i.localId === localId
-          ? {
-              ...i,
-              phase: progress.phase,
-              percent: progress.percent,
-              // Never unset a fileId once initiate has handed one over: later
-              // progress frames for the polling phases omit it.
-              fileId: progress.fileId ?? i.fileId,
-              error: progress.error,
-              deduplicated: progress.deduplicated ?? i.deduplicated,
-            }
-          : i,
-      ),
-    })),
+    update: (localId, progress) =>
+      set((state) => {
+        const item = state.items.find((i) => i.localId === localId)
+        if (!item) return
+        item.phase = progress.phase
+        item.percent = progress.percent
+        // Never unset a fileId once initiate has handed one over: later
+        // progress frames for the polling phases omit it.
+        // `!== undefined`, not truthiness: this must match the old
+        // `progress.fileId ?? i.fileId` exactly, and stay symmetric with the
+        // `deduplicated` check below.
+        if (progress.fileId !== undefined) item.fileId = progress.fileId
+        item.error = progress.error
+        if (progress.deduplicated !== undefined) item.deduplicated = progress.deduplicated
+      }),
 
-  remove: (localId) => set((s) => ({ items: s.items.filter((i) => i.localId !== localId) })),
+    remove: (localId) =>
+      set((state) => {
+        state.items = state.items.filter((i) => i.localId !== localId)
+      }),
 
-  clearSettled: () => set((s) => ({ items: s.items.filter((i) => !isSettled(i.phase)) })),
+    clearSettled: () =>
+      set((state) => {
+        state.items = state.items.filter((i) => !isSettled(i.phase))
+      }),
 
-  reset: () => set({ items: [] }),
-}))
-
-export const selectActiveUploads = (s: UploadStoreState): UploadItem[] =>
-  s.items.filter((i) => !isSettled(i.phase))
+    reset: () =>
+      set((state) => {
+        state.items = []
+      }),
+  })),
+)

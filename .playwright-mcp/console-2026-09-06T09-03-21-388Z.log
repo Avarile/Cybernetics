@@ -1,0 +1,5 @@
+[     110ms] [INFO] %cDownload the React DevTools for a better development experience: https://react.dev/link/react-devtools font-weight:bold @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[     123ms] [LOG] [HMR] connected @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[     305ms] [WARNING] THREE.Clock: This module has been deprecated. Please use THREE.Timer instead. @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[     400ms] [LOG] system_core {modules: 26, materials: 25, labels: 0, geometries: 140, textures: 1} @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477
+[     440ms] [LOG] system_core {modules: 26, materials: 25, labels: 26, geometries: 166, textures: 27} @ http://localhost:3100/_next/static/chunks/01vs_next_dist_0z7rf41._.js:2477

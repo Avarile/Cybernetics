@@ -1,7 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
-import { useShallow } from "zustand/react/shallow"
+import { useState } from "react"
 import {
   Conversation,
   ConversationContent,
@@ -19,17 +18,15 @@ import {
 } from "@/components/ai-elements/prompt-input"
 import { Suggestion } from "@/components/ai-elements/suggestion"
 import { Skeleton } from "@/components/ui/skeleton"
+import { useAgentChat } from "@/features/agent/use-agent-chat"
+import { useConversations } from "@/features/agent/use-conversations"
+import { IN_FLIGHT_ID, useMessages } from "@/features/agent/use-messages"
+import { useTurn } from "@/features/agent/use-turn"
+import { ApiError } from "@/lib/api/errors"
 import { MESSAGE_MAX_LENGTH } from "@/lib/agent/types"
-import {
-  IN_FLIGHT_ID,
-  buildVisibleMessages,
-  selectPendingApproval,
-  useConversationStore,
-} from "@/stores/conversation.store"
 import { ApprovalPanel } from "./approval-panel"
 import { ConversationRail } from "./conversation-rail"
 import { MessageParts } from "./message-parts"
-import { useAgentChat } from "./use-agent-chat"
 
 const SUGGESTIONS = [
   "What changed in the last 24 hours?",
@@ -37,33 +34,18 @@ const SUGGESTIONS = [
   "Find documents about Q3 revenue",
 ]
 
-export function TerminalWindow() {
-  const { loadConversations, openConversation, sendMessage, decideApproval, stop } =
-    useAgentChat()
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof ApiError ? error.message : fallback
+}
 
-  const conversations = useConversationStore(useShallow((s) => s.conversations))
-  const conversationsStatus = useConversationStore((s) => s.conversationsStatus)
-  const conversationsError = useConversationStore((s) => s.conversationsError)
-  const activeId = useConversationStore((s) => s.activeId)
-  const messagesStatus = useConversationStore((s) => s.messagesStatus)
-  const messagesError = useConversationStore((s) => s.messagesError)
-  // Subscribed separately, then derived. buildVisibleMessages creates a new
-  // message object for the in-flight turn, so subscribing *through* it would
-  // fail zustand v5's getSnapshot identity check and re-render forever — even
-  // wrapped in useShallow, which compares array items by reference.
-  const storedMessages = useConversationStore(useShallow((s) => s.messages))
-  const turn = useConversationStore((s) => s.turn)
-  const messages = useMemo(
-    () => buildVisibleMessages(storedMessages, turn),
-    [storedMessages, turn],
-  )
-  const approval = useConversationStore(selectPendingApproval)
+export function TerminalWindow() {
+  const { openConversation, sendMessage, decideApproval, stop } = useAgentChat()
+
+  const { conversations, isLoading: railLoading, error: railError } = useConversations()
+  const { messages, isLoading: messagesLoading, error: messagesError } = useMessages()
+  const { activeId, turn, approval } = useTurn()
 
   const [deciding, setDeciding] = useState(false)
-
-  useEffect(() => {
-    void loadConversations()
-  }, [loadConversations])
 
   const streaming = turn?.status === "streaming"
   const status = streaming ? "streaming" : turn?.status === "failed" ? "error" : "ready"
@@ -89,8 +71,8 @@ export function TerminalWindow() {
       <div className="hidden md:block">
         <ConversationRail
           conversations={conversations}
-          status={conversationsStatus}
-          error={conversationsError}
+          status={railLoading ? "loading" : railError ? "error" : "ready"}
+          error={railError ? errorMessage(railError, "Could not load conversations") : null}
           activeId={activeId}
           onSelect={(id) => void openConversation(id)}
           onNew={() => void openConversation(null)}
@@ -100,20 +82,20 @@ export function TerminalWindow() {
       <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <Conversation className="min-h-0 flex-1">
           <ConversationContent className="gap-4">
-            {messagesStatus === "loading" && (
+            {messagesLoading && (
               <div className="flex flex-col gap-3">
                 <Skeleton className="h-4 w-2/3" />
                 <Skeleton className="h-4 w-1/2" />
               </div>
             )}
 
-            {messagesStatus === "error" && (
+            {messagesError && (
               <p role="alert" className="text-sm text-destructive">
-                {messagesError ?? "Could not load this conversation"}
+                {errorMessage(messagesError, "Could not load this conversation")}
               </p>
             )}
 
-            {messages.length === 0 && messagesStatus !== "loading" && (
+            {messages.length === 0 && !messagesLoading && (
               // `children` REPLACES the default title/description block rather
               // than sitting beside it, so the heading is rendered here too.
               <ConversationEmptyState>

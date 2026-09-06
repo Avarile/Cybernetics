@@ -16,18 +16,11 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
-import { useApi } from "@/lib/api/provider"
+import { useSignOut } from "@/features/session/use-sign-out"
+import { useSession } from "@/features/session/use-session"
+import { useSceneControls } from "@/features/workspace/use-scene-controls"
+import { useWorkspace } from "@/features/workspace/use-workspace"
 import { cn } from "@/lib/utils"
-import { selectIsAuthenticated, useAuthStore } from "@/stores/auth.store"
-import { useWorkspaceStore } from "@/stores/workspace.store"
-
-export interface ShellChromeProps {
-  panelOpen: boolean
-  scannerVisible: boolean
-  onTogglePanel: () => void
-  onToggleScanner: () => void
-  onResetView: () => void
-}
 
 /**
  * The scene controls sit over a viewport that is a fixed dark stage in both
@@ -39,26 +32,11 @@ const SCENE_BUTTON =
   "size-7 rounded-md p-0 text-white/45 hover:bg-white/10 hover:text-white " +
   "focus-visible:ring-white/50 focus-visible:ring-offset-0"
 
-export function ShellChrome({
-  panelOpen,
-  scannerVisible,
-  onTogglePanel,
-  onToggleScanner,
-  onResetView,
-}: ShellChromeProps) {
-  const { auth } = useApi()
-  const principal = useAuthStore((s) => s.principal)
-  const authed = useAuthStore(selectIsAuthenticated)
-  const openWindow = useWorkspaceStore((s) => s.openWindow)
-
-  async function signOut() {
-    const refresh = useAuthStore.getState().refreshToken
-    if (refresh) await auth.logout(refresh).catch(() => undefined)
-    useAuthStore.getState().clear()
-    // No explicit reopen: useAuthWindow brings the gate back as soon as the
-    // cleared store says we are signed out.
-    useWorkspaceStore.getState().closeAll()
-  }
+export function ShellChrome() {
+  const { principal, authed } = useSession()
+  const { openWindow } = useWorkspace()
+  const { panelOpen, scannerVisible, togglePanel, toggleScanner, resetView } = useSceneControls()
+  const signOut = useSignOut()
 
   return (
     <>
@@ -86,7 +64,7 @@ export function ShellChrome({
                     size="icon"
                     aria-label="Toggle module panel"
                     aria-pressed={panelOpen}
-                    onClick={onTogglePanel}
+                    onClick={togglePanel}
                     className={cn(SCENE_BUTTON, panelOpen && "text-white")}
                   >
                     <PanelRightIcon className="size-3.5" />
@@ -102,7 +80,7 @@ export function ShellChrome({
                     size="icon"
                     aria-label="Scanner deck"
                     aria-pressed={scannerVisible}
-                    onClick={onToggleScanner}
+                    onClick={toggleScanner}
                     className={cn(SCENE_BUTTON, scannerVisible && "text-white")}
                   >
                     <RadarIcon className="size-3.5" />
@@ -117,7 +95,7 @@ export function ShellChrome({
                     variant="ghost"
                     size="icon"
                     aria-label="Reset view"
-                    onClick={onResetView}
+                    onClick={resetView}
                     className={SCENE_BUTTON}
                   >
                     <RotateCcwIcon className="size-3.5" />

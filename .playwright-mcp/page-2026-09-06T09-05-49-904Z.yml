@@ -1,0 +1,61 @@
+- generic [active] [ref=f10e1]:
+  - main [ref=f10e2]:
+    - generic [ref=f10e43]:
+      - generic [ref=f10e44]:
+        - generic [ref=f10e45]:
+          - generic [ref=f10e46]:
+            - text: Modules
+            - generic [ref=f10e47]: (26)
+          - generic [ref=f10e48]: Example data
+        - generic [ref=f10e51]:
+          - button "Add" [ref=f10e52]
+          - button "Delete" [disabled]
+      - listbox "Modules" [ref=f10e54]:
+        - generic [ref=f10e55]: core
+        - option "system - controller unit" [ref=f10e56]
+        - option "kernel-scheduler" [ref=f10e59]
+        - option "cache-l1" [ref=f10e62]
+        - option "cache-l2-distributed" [ref=f10e65]
+        - generic [ref=f10e68]: network
+        - option "session-registry" [ref=f10e69]
+        - option "api-gateway" [ref=f10e72]
+        - option "load-balancer" [ref=f10e75]
+        - option "message-queue" [ref=f10e78]
+        - option "event-bus" [ref=f10e81]
+        - option "network-fabric" [ref=f10e84]
+        - generic [ref=f10e87]: observability
+        - option "metrics-collector" [ref=f10e88]
+        - option "LLM-db-temp" [ref=f10e91]
+        - generic [ref=f10e94]: security
+        - option "identity-auth" [ref=f10e95]
+        - option "crypto-keyvault" [ref=f10e98]
+        - option "audit-log" [ref=f10e101]
+        - generic [ref=f10e104]: storage
+        - option "db-users" [ref=f10e105]
+        - option "db-orders" [ref=f10e108]
+        - option "db-ledger" [ref=f10e111]
+        - option "db-inventory" [ref=f10e114]
+        - option "db-telemetry" [ref=f10e117]
+        - option "index-shard-a" [ref=f10e120]
+        - option "index-shard-b" [ref=f10e123]
+        - option "search-engine" [ref=f10e126]
+        - option "object-storage" [ref=f10e129]
+        - option "replication-sync" [ref=f10e132]
+        - option "backup-daemon" [ref=f10e135]
+      - paragraph [ref=f10e139]: Select a module to edit it.
+      - generic [ref=f10e140]:
+        - button "Copy JSON" [ref=f10e141]
+        - button "Reset" [ref=f10e142]
+    - generic:
+      - generic [ref=f10e28]: ◆ CYBERNETICS
+      - generic [ref=f10e143]:
+        - toolbar "System core" [ref=f10e144]:
+          - button "Toggle module panel" [pressed] [ref=f10e145]
+          - button "Scanner deck" [pressed] [ref=f10e146]
+          - button "Reset view" [ref=f10e147]
+        - button "Terminal" [ref=f10e148]
+        - button "admin@cybernetics.local" [ref=f10e149]
+    - button "Live conversation" [ref=f10e150]
+  - region "Notifications alt+T"
+  - button "Open Next.js Dev Tools" [ref=f10e34] [cursor=pointer]
+  - alert [ref=f10e38]

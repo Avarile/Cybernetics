@@ -4,7 +4,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  renameSync,
+  statSync,
   unlinkSync,
   writeSync,
 } from 'node:fs';
@@ -74,10 +74,13 @@ export class RefreshLock {
         this.held = true;
         return;
       }
-      if (this.reapIfStale()) continue;
+      // Checked on every looping path -- including a successful reap's
+      // `continue` -- so sustained contention can't spin past timeoutMs
+      // without ever consulting the deadline.
       if (Date.now() >= deadline) {
         throw new LockTimeoutError(this.path, this.opts.timeoutMs);
       }
+      if (this.reapIfStale()) continue;
       await sleep(this.opts.pollMs);
     }
   }
@@ -143,62 +146,82 @@ export class RefreshLock {
   }
 
   /**
-   * Atomically claims whatever currently sits at `this.path` and discards it
-   * only if it is still the exact record `judged` names (or, when `judged`
-   * is null, still equally unparseable). If the file has changed underneath
-   * us -- another reaper won the race for the record we judged, and a fresh,
-   * live lock has since been created in its place -- the claimed file is
-   * restored rather than deleted, and this reports that we did not win.
+   * Claims whatever currently sits at `this.path` and discards it only if
+   * it is still the exact record `judged` names (or, when `judged` is
+   * null, still equally unparseable). Otherwise nothing is deleted.
    *
-   * The claim (`renameSync`) is atomic: at most one racing reaper's rename
-   * can succeed against a given source path. Every other racer's rename
-   * fails with ENOENT because the source is already gone, so a losing
-   * reaper never acts on a file it didn't itself just remove from
-   * `this.path` -- it only ever retries. This is what keeps two reapers that
-   * both judged the same stale record from one of them deleting whatever a
-   * third process created in the path's place.
+   * The claim is `linkSync`, not `renameSync`: a hard link gives this call
+   * a second name for the same inode without ever removing `this.path`'s
+   * own directory entry. That matters because a claim that *does* empty
+   * `this.path` -- even briefly -- opens a window for some other creator to
+   * legitimately land a fresh lock there while we're mid-claim, and any
+   * subsequent conflict-resolution step (e.g. restoring what we took) can
+   * then race that creator and lose, destroying its lock with no retry and
+   * no signal to it. Never emptying the path removes that window entirely:
+   * there is nothing to restore, because nothing was ever taken away.
+   *
+   * Before the final delete, `this.path`'s inode is compared against the
+   * inode we linked: if someone replaced `this.path` since (unlinked it and
+   * created a new file there) the two will differ, and deleting by name
+   * alone would remove that new file instead of the one we verified.
    */
   private reapRecord(judged: LockRecord | null): boolean {
     const tempPath = `${this.path}.reap.${process.pid}.${reapCounter++}`;
     try {
-      renameSync(this.path, tempPath);
+      linkSync(this.path, tempPath);
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        // Someone else already reaped or released it first; retry.
+        // Already gone -- someone else already reaped or released it; retry.
         return true;
       }
       throw err;
     }
 
-    let claimed: LockRecord | null;
     try {
-      claimed = JSON.parse(readFileSync(tempPath, 'utf-8')) as LockRecord;
-    } catch {
-      claimed = null;
-    }
+      let claimed: LockRecord | null;
+      try {
+        claimed = JSON.parse(readFileSync(tempPath, 'utf-8')) as LockRecord;
+      } catch {
+        claimed = null;
+      }
 
-    const matches =
-      judged === null
-        ? claimed === null
-        : claimed !== null && claimed.pid === judged.pid && claimed.at === judged.at;
+      const matches =
+        judged === null
+          ? claimed === null
+          : claimed !== null && claimed.pid === judged.pid && claimed.at === judged.at;
 
-    if (matches) {
-      unlinkSync(tempPath);
+      if (!matches) return false; // Not the file we judged; delete nothing.
+
+      let pathIno: number | bigint;
+      let tempIno: number | bigint;
+      try {
+        pathIno = statSync(this.path).ino;
+        tempIno = statSync(tempPath).ino;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') return false;
+        throw err;
+      }
+      if (pathIno !== tempIno) return false; // Replaced since; delete nothing.
+
+      try {
+        unlinkSync(this.path);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+          // Another reaper's linkSync raced ours to the same inode, passed
+          // the same checks, and already unlinked it. We did not win;
+          // deleting nothing here is correct, not an error.
+          return false;
+        }
+        throw err;
+      }
       return true;
-    }
-
-    // Not the file we judged -- someone else's fresh lock landed here
-    // between our read and our claim. Put it back. `linkSync` fails loudly
-    // (EEXIST) instead of silently clobbering, in case a third process has
-    // since taken the path too.
-    try {
-      linkSync(tempPath, this.path);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
     } finally {
-      unlinkSync(tempPath);
+      try {
+        unlinkSync(tempPath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
     }
-    return false;
   }
 }
 

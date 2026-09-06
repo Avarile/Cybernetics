@@ -6,13 +6,23 @@ import { ConfigStore, DEFAULT_CONFIG } from './config.store';
 describe('ConfigStore', () => {
   let dir: string;
   let env: NodeJS.ProcessEnv;
+  let prevUmask: number;
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'cyb-cfg-'));
     env = { XDG_CONFIG_HOME: dir };
+    // config.json is written at 0644, but the actual mode a write ends up
+    // with is that minus whatever the process umask masks off. A stricter
+    // umask than the default 022 (e.g. 027, common on hardened machines)
+    // would yield 0640 and fail the assertion below despite the code being
+    // correct -- pin it so the test verifies our code, not the environment.
+    prevUmask = process.umask(0o022);
   });
 
-  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+  afterEach(() => {
+    process.umask(prevUmask);
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   it('returns the default config when no file exists', () => {
     expect(new ConfigStore(env).read()).toEqual(DEFAULT_CONFIG);

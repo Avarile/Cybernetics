@@ -1,10 +1,10 @@
 import { Geist, Geist_Mono } from "next/font/google"
 
 import "./globals.css"
+import { Providers } from "./providers"
 import { ThemeProvider } from "@/components/theme-provider"
 import { Toaster } from "@/components/ui/sonner"
 import { TooltipProvider } from "@/components/ui/tooltip"
-import { ApiProvider } from "@/lib/api/provider"
 import { cn } from "@/lib/utils"
 
 const fontSans = Geist({
@@ -32,10 +32,10 @@ export default function RootLayout({
     >
       <body>
         <ThemeProvider>
-          <ApiProvider>
+          <Providers>
             <TooltipProvider>{children}</TooltipProvider>
             <Toaster />
-          </ApiProvider>
+          </Providers>
         </ThemeProvider>
       </body>
     </html>

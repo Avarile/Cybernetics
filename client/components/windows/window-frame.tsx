@@ -49,6 +49,7 @@ export function WindowFrame({
 
   const { liveRect, isInteracting, dragProps, resizeProps } = useDragResize({
     rect: win.rect,
+    minSize: win.minSize,
     disabled: isMobile || isMaximised,
     onCommit: onMove,
   })
