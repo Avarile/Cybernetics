@@ -82,13 +82,27 @@ export const VOLUME = {
   attachments: 60,
 } as const;
 
+/**
+ * Scale every count by `DATA_GEN_SCALE` (a fraction, default 1).
+ *
+ * Exists so a payload change can be smoke-tested against the real API in a
+ * minute rather than half an hour — the shape of the corpus is identical, only
+ * its size changes. Every count floors at 1, so no entity silently drops out
+ * of a scaled run and hides a broken payload.
+ */
+export function scaled(n: number): number {
+  const factor = Number(process.env.DATA_GEN_SCALE ?? 1);
+  if (!Number.isFinite(factor) || factor <= 0 || factor >= 1) return n;
+  return Math.max(1, Math.round(n * factor));
+}
+
 /** Total create calls, used to print an honest ETA before the run starts. */
 export function plannedRequests(): number {
   let total = 0;
   for (const value of Object.values(VOLUME)) {
-    if (typeof value === 'number') total += value;
-    else total += value.admin + value.user;
+    if (typeof value === 'number') total += scaled(value);
+    else total += scaled(value.admin) + scaled(value.user);
   }
   // Files and extra users cost a second call each (complete, role grant).
-  return total + VOLUME.files + VOLUME.extraUsers;
+  return total + scaled(VOLUME.files) + scaled(VOLUME.extraUsers);
 }

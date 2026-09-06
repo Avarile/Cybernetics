@@ -1,6 +1,6 @@
 import { create, type GenContext } from '../context';
 import * as f from '../fake';
-import { VOLUME } from '../volume';
+import { scaled, VOLUME } from '../volume';
 
 /**
  * The ledger, budgets, recurring schedules, the rate archive and invoicing.
@@ -46,7 +46,7 @@ export async function run(ctx: GenContext): Promise<void> {
     'payable',
     'other',
   ] as const;
-  for (let i = 0; i < VOLUME.accounts; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.accounts); i += 1) {
     const id = await create(ctx, 'financial_accounts', {
       name: `account ${i}`,
       method: 'POST',
@@ -91,7 +91,7 @@ async function fxRates(ctx: GenContext): Promise<void> {
     ['USD', 'GBP'],
     ['GBP', 'EUR'],
   ];
-  for (let i = 0; i < VOLUME.fxRates; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.fxRates); i += 1) {
     const [base, quote] = PAIRS[i % PAIRS.length];
     const drift = 1 + Math.sin(i / 7) * 0.05;
     await create(ctx, 'fx_rates', {
@@ -118,7 +118,7 @@ async function transactions(ctx: GenContext): Promise<void> {
   const KINDS = ['income', 'expense', 'expense', 'transfer'] as const;
   const created: string[] = [];
 
-  for (let i = 0; i < VOLUME.transactions; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.transactions); i += 1) {
     const kind = f.pick(KINDS, i);
     const accountId = f.pick(pools.accountIds, i);
     let counterAccountId: string | undefined;
@@ -180,7 +180,7 @@ async function transactions(ctx: GenContext): Promise<void> {
 
 async function budgetsAndRecurring(ctx: GenContext): Promise<void> {
   const { pools, stamp } = ctx;
-  for (let i = 0; i < VOLUME.budgets; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.budgets); i += 1) {
     await create(ctx, 'budgets', {
       name: `budget ${i}`,
       method: 'POST',
@@ -211,7 +211,7 @@ async function budgetsAndRecurring(ctx: GenContext): Promise<void> {
     'quarterly',
     'yearly',
   ] as const;
-  for (let i = 0; i < VOLUME.recurring; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.recurring); i += 1) {
     await create(ctx, 'recurring_transactions', {
       name: `recurring ${i}`,
       method: 'POST',
@@ -245,7 +245,7 @@ async function invoices(ctx: GenContext): Promise<void> {
   const { pools } = ctx;
   if (pools.contactIds.length === 0 && pools.companyIds.length === 0) return;
 
-  for (let i = 0; i < VOLUME.invoices; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.invoices); i += 1) {
     const id = await create(ctx, 'invoices', {
       name: `invoice ${i}`,
       method: 'POST',
@@ -271,7 +271,7 @@ async function invoices(ctx: GenContext): Promise<void> {
 
   if (pools.invoiceIds.length === 0) return;
 
-  for (let i = 0; i < VOLUME.invoiceLines; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.invoiceLines); i += 1) {
     await create(ctx, 'invoice_line_items', {
       name: `invoice line ${i}`,
       method: 'POST',
@@ -317,7 +317,7 @@ async function invoices(ctx: GenContext): Promise<void> {
   }
 
   const METHODS = ['bank_transfer', 'card', 'cash', 'cheque', 'other'] as const;
-  for (let i = 0; i < VOLUME.payments; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.payments); i += 1) {
     const invoiceId = f.pick(pools.invoiceIds, i);
     // An invoice must be issued before it can be paid.
     if (i % 3 === 0) {

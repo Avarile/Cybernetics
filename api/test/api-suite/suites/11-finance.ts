@@ -818,4 +818,119 @@ async function reports(ctx: Ctx): Promise<void> {
     query: { from: isoDate(0), to: isoDate(120) },
     expect: 403,
   });
+
+  // ------------------------------------------------------------- fx rate archive
+  //
+  // Append-only historical reference data (design §12.1). Recording a rate does
+  // not make the ledger convert with it — transactions carry a caller-supplied
+  // `fxRate` — so these assert the archive, not a conversion.
+
+  await client.call({
+    name: 'a standard user cannot record an exchange rate',
+    method: 'POST',
+    path: '/finance/fx-rates',
+    actor: 'user',
+    body: {
+      baseCode: 'AUD',
+      quoteCode: 'USD',
+      rate: '0.6500000000',
+      asOf: isoDate(0),
+    },
+    expect: 403,
+  });
+
+  await client.call({
+    name: 'admin records an exchange rate',
+    method: 'POST',
+    path: '/finance/fx-rates',
+    actor: 'admin',
+    body: {
+      baseCode: 'AUD',
+      quoteCode: 'USD',
+      rate: '0.6543210000',
+      asOf: isoDate(0),
+      source: 'api-suite',
+    },
+    expect: [200, 201],
+    assert: (b) =>
+      b?.baseCode === 'AUD' && b?.quoteCode === 'USD'
+        ? undefined
+        : `recorded ${b?.baseCode}/${b?.quoteCode}`,
+  });
+
+  await client.call({
+    name: 'a rate above zero is required',
+    method: 'POST',
+    path: '/finance/fx-rates',
+    actor: 'admin',
+    body: {
+      baseCode: 'AUD',
+      quoteCode: 'USD',
+      rate: '0',
+      asOf: isoDate(0),
+    },
+    expect: [400, 422],
+  });
+
+  await client.call({
+    name: 'a currency code must be three characters',
+    method: 'POST',
+    path: '/finance/fx-rates',
+    actor: 'admin',
+    body: {
+      baseCode: 'AUDD',
+      quoteCode: 'USD',
+      rate: '0.6500000000',
+      asOf: isoDate(0),
+    },
+    expect: [400, 422],
+  });
+
+  // Same pair, same date: the unique index means this must correct the day's
+  // observation rather than add a second one.
+  await client.call({
+    name: 'recording the same pair and date again corrects it',
+    method: 'POST',
+    path: '/finance/fx-rates',
+    actor: 'admin',
+    body: {
+      baseCode: 'AUD',
+      quoteCode: 'USD',
+      rate: '0.6600000000',
+      asOf: isoDate(0),
+      source: 'api-suite-corrected',
+    },
+    expect: [200, 201],
+    assert: (b) =>
+      String(b?.rate).startsWith('0.66')
+        ? undefined
+        : `rate was ${b?.rate} after the correction`,
+  });
+
+  await client.call({
+    name: 'admin reads the rate archive filtered by pair',
+    method: 'GET',
+    path: '/finance/fx-rates',
+    actor: 'admin',
+    query: { baseCode: 'AUD', quoteCode: 'USD' },
+    expect: 200,
+    assert: (b) => {
+      const rows: any[] = Array.isArray(b) ? b : (b?.data ?? []);
+      if (rows.length === 0) return 'the rate just recorded is not listed';
+      const today = rows.filter(
+        (r) => String(r.asOf).slice(0, 10) === isoDate(0),
+      );
+      return today.length === 1
+        ? undefined
+        : `expected exactly one AUD/USD row for today, got ${today.length}`;
+    },
+  });
+
+  await client.call({
+    name: 'a user holding finance.read may read the archive',
+    method: 'GET',
+    path: '/finance/fx-rates',
+    actor: 'user',
+    expect: [200, 403],
+  });
 }

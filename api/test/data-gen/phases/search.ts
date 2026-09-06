@@ -1,6 +1,6 @@
 import { create, type GenContext } from '../context';
 import * as f from '../fake';
-import { VOLUME } from '../volume';
+import { scaled, VOLUME } from '../volume';
 
 /**
  * Search collections and the records projected into them.
@@ -15,7 +15,7 @@ export async function run(ctx: GenContext): Promise<void> {
 
   const VISIBILITIES = ['private', 'shared', 'owner_scoped'] as const;
 
-  for (let i = 0; i < VOLUME.collections; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.collections); i += 1) {
     const visibility = f.pick(VISIBILITIES, i);
     const name = `gen_${f.topic(i).replace(/\s+/g, '_')}_${i}_${stamp}`
       .toLowerCase()
@@ -67,8 +67,8 @@ export async function run(ctx: GenContext): Promise<void> {
   ].filter(Boolean);
   let written = 0;
   let i = 0;
-  while (written < VOLUME.searchRecords) {
-    const size = Math.min(BATCH, VOLUME.searchRecords - written);
+  while (written < scaled(VOLUME.searchRecords)) {
+    const size = Math.min(BATCH, scaled(VOLUME.searchRecords) - written);
     const collection = f.pick(pools.collectionNames, i);
     const records = Array.from({ length: size }, (_, n) => {
       const idx = written + n;

@@ -1,6 +1,6 @@
 import { create, type GenContext } from '../context';
 import * as f from '../fake';
-import { VOLUME } from '../volume';
+import { scaled, VOLUME } from '../volume';
 
 /**
  * Comments and attachments across every entity type that accepts them.
@@ -24,23 +24,27 @@ export async function run(ctx: GenContext): Promise<void> {
 
   if (targets.length === 0) return;
 
-  const roots: string[] = [];
-  for (let i = 0; i < VOLUME.comments; i += 1) {
+  // Roots are tracked per entity, not globally: a reply must belong to the same
+  // entity as its parent, and threading against a random earlier comment is a
+  // 404 ("Parent comment does not belong to this entity").
+  const rootsByEntity = new Map<string, string[]>();
+  for (let i = 0; i < scaled(VOLUME.comments); i += 1) {
     const target = targets[i % targets.length];
-    // Every fourth comment replies to an earlier one, so the thread shape is
-    // real rather than a flat list.
+    const entityId = f.pick(target.ids, i);
+    const threadKey = `${target.type}:${entityId}`;
+    const roots = rootsByEntity.get(threadKey) ?? [];
     const asReply = i % 4 === 3 && roots.length > 0;
     const id = await create(ctx, 'comments', {
       name: `comment ${i}`,
       method: 'POST',
       path: '/comments',
-      actor: i % 2 === 0 ? 'admin' : 'user',
+      // As the owner where we know one: a private contact or knowledge record
+      // is genuinely invisible to the other principal, and the API says 404.
+      actor: pools.owner.get(entityId) ?? 'admin',
       body: {
         entityType: target.type,
-        entityId: f.pick(target.ids, i),
-        body: asReply
-          ? `Agreed — ${f.paragraph(i, 1)}`
-          : `${f.paragraph(i, 2)}`,
+        entityId,
+        body: asReply ? `Agreed — ${f.paragraph(i, 1)}` : f.paragraph(i, 2),
         ...(asReply ? { parentCommentId: f.pick(roots, i) } : {}),
         // Mentions are re-checked against the parent entity before dispatch,
         // so a mention of someone who cannot read it is dropped, not leaked.
@@ -48,7 +52,10 @@ export async function run(ctx: GenContext): Promise<void> {
       },
       expect: [201, 200, 403],
     });
-    if (id && !asReply) roots.push(id);
+    if (id && !asReply) {
+      roots.push(id);
+      rootsByEntity.set(threadKey, roots);
+    }
   }
 
   if (pools.fileIds.length === 0) return;
@@ -61,18 +68,19 @@ export async function run(ctx: GenContext): Promise<void> {
     'invoice',
   ] as const;
   const KINDS = ['document', 'image', 'receipt', 'contract', 'other'] as const;
-  for (let i = 0; i < VOLUME.attachments; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.attachments); i += 1) {
     const type = f.pick(ATTACHABLE, i);
     const pool = targets.find((t) => t.type === type);
     if (!pool) continue;
+    const attachEntityId = f.pick(pool.ids, i);
     await create(ctx, 'entity_attachments', {
       name: `attachment ${i}`,
       method: 'POST',
       path: '/attachments',
-      actor: i % 2 === 0 ? 'admin' : 'user',
+      actor: pools.owner.get(attachEntityId) ?? 'admin',
       body: {
         entityType: type,
-        entityId: f.pick(pool.ids, i),
+        entityId: attachEntityId,
         fileId: f.pick(pools.fileIds, i),
         kind: f.pick(KINDS, i),
         label: `Supporting material for ${f.topic(i)}`,

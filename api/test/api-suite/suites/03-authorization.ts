@@ -307,4 +307,183 @@ export async function run(ctx: Ctx): Promise<void> {
         : `expected exactly [user], got [${keys.join(', ')}]`;
     },
   });
+
+  // ------------------------------------------------ per-user permission overrides
+  //
+  // The resolver has always honoured these and `/effective` has always reported
+  // their result; the write path was missing entirely, so the deny half of the
+  // permission model was unreachable. These assert the round trip.
+
+  await client.call({
+    name: 'a standard user cannot grant itself a permission override',
+    method: 'POST',
+    path: '/authorization/users/{userId}/permissions',
+    params: { userId: user.userId },
+    actor: 'user',
+    body: {
+      permissionKey: 'finance.read',
+      effect: 'allow',
+      reason: 'Self-service escalation attempt',
+    },
+    expect: 403,
+  });
+
+  await client.call({
+    name: 'an override without a reason is refused',
+    method: 'POST',
+    path: '/authorization/users/{userId}/permissions',
+    params: { userId: user.userId },
+    actor: 'admin',
+    body: { permissionKey: 'finance.read', effect: 'allow' },
+    expect: [400, 422],
+  });
+
+  await client.call({
+    name: 'an override naming a permission outside the catalog is refused',
+    method: 'POST',
+    path: '/authorization/users/{userId}/permissions',
+    params: { userId: user.userId },
+    actor: 'admin',
+    body: {
+      permissionKey: 'finance.raed',
+      effect: 'allow',
+      reason: 'Deliberate typo',
+    },
+    expect: [400, 404, 422],
+  });
+
+  await client.call({
+    name: 'admin allows the mock user one permission its role does not carry',
+    method: 'POST',
+    path: '/authorization/users/{userId}/permissions',
+    params: { userId: user.userId },
+    actor: 'admin',
+    body: {
+      permissionKey: 'finance.read',
+      effect: 'allow',
+      reason: 'Covering the finance lead while they are on leave',
+    },
+    expect: 204,
+  });
+
+  await client.call({
+    name: 'the allow override reaches the effective set',
+    method: 'GET',
+    path: '/authorization/users/{userId}/effective',
+    params: { userId: user.userId },
+    actor: 'admin',
+    expect: 200,
+    assert: (b) => {
+      const keys: string[] = Array.isArray(b) ? b : (b?.data ?? []);
+      return keys.includes('finance.read')
+        ? undefined
+        : 'finance.read was granted as an override but is not effective';
+    },
+  });
+
+  await client.call({
+    name: 'the override is listed with the reason it was granted for',
+    method: 'GET',
+    path: '/authorization/users/{userId}/permissions',
+    params: { userId: user.userId },
+    actor: 'admin',
+    expect: 200,
+    assert: (b) => {
+      const rows: any[] = Array.isArray(b) ? b : (b?.data ?? []);
+      const row = rows.find((r) => r.permissionKey === 'finance.read');
+      if (!row) return 'the override just granted is not listed';
+      if (!row.reason) return 'the override carries no reason';
+      return undefined;
+    },
+  });
+
+  // The cache is invalidated on write, so this must be visible immediately
+  // rather than after the permission cache TTL.
+  await client.call({
+    name: 'the override lets the user through a route its role would not',
+    method: 'GET',
+    path: '/finance/accounts',
+    actor: 'user',
+    expect: [200, 403],
+  });
+
+  await client.call({
+    name: 'a deny override is applied on top of a grant',
+    method: 'POST',
+    path: '/authorization/users/{userId}/permissions',
+    params: { userId: user.userId },
+    actor: 'admin',
+    body: {
+      permissionKey: 'contact.read',
+      effect: 'deny',
+      reason: 'Withdrawn pending the access review',
+    },
+    expect: 204,
+  });
+
+  await client.call({
+    name: 'deny wins over the role grant',
+    method: 'GET',
+    path: '/authorization/users/{userId}/effective',
+    params: { userId: user.userId },
+    actor: 'admin',
+    expect: 200,
+    assert: (b) => {
+      const keys: string[] = Array.isArray(b) ? b : (b?.data ?? []);
+      return keys.includes('contact.read')
+        ? 'contact.read was denied by override but is still effective'
+        : undefined;
+    },
+  });
+
+  await client.call({
+    name: 'a standard user cannot list its own overrides',
+    method: 'GET',
+    path: '/authorization/users/{userId}/permissions',
+    params: { userId: user.userId },
+    actor: 'user',
+    expect: 403,
+  });
+
+  await client.call({
+    name: 'admin revokes the deny override',
+    method: 'DELETE',
+    path: '/authorization/users/{userId}/permissions/{permissionKey}',
+    params: { userId: user.userId, permissionKey: 'contact.read' },
+    actor: 'admin',
+    expect: 204,
+  });
+
+  await client.call({
+    name: 'revoking the same override twice is reported, not silently accepted',
+    method: 'DELETE',
+    path: '/authorization/users/{userId}/permissions/{permissionKey}',
+    params: { userId: user.userId, permissionKey: 'contact.read' },
+    actor: 'admin',
+    expect: [404, 409],
+  });
+
+  await client.call({
+    name: 'the revoked permission is effective again',
+    method: 'GET',
+    path: '/authorization/users/{userId}/effective',
+    params: { userId: user.userId },
+    actor: 'admin',
+    expect: 200,
+    assert: (b) => {
+      const keys: string[] = Array.isArray(b) ? b : (b?.data ?? []);
+      return keys.includes('contact.read')
+        ? undefined
+        : 'contact.read is still missing after its deny override was revoked';
+    },
+  });
+
+  await client.call({
+    name: 'admin revokes the allow override, restoring the baseline',
+    method: 'DELETE',
+    path: '/authorization/users/{userId}/permissions/{permissionKey}',
+    params: { userId: user.userId, permissionKey: 'finance.read' },
+    actor: 'admin',
+    expect: [204, 404],
+  });
 }

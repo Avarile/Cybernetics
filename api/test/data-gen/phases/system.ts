@@ -1,6 +1,6 @@
 import { create, type GenContext } from '../context';
 import * as f from '../fake';
-import { VOLUME } from '../volume';
+import { scaled, VOLUME } from '../volume';
 
 /**
  * Operator surface: settings, flags, transports, suppressions and templates.
@@ -14,7 +14,7 @@ export async function run(ctx: GenContext): Promise<void> {
   client.beginSuite('system');
 
   const TYPES = ['string', 'number', 'boolean', 'json'] as const;
-  for (let i = 0; i < VOLUME.settings; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.settings); i += 1) {
     const type = f.pick(TYPES, i);
     const value =
       type === 'string'
@@ -40,7 +40,7 @@ export async function run(ctx: GenContext): Promise<void> {
     });
   }
 
-  for (let i = 0; i < VOLUME.featureFlags; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.featureFlags); i += 1) {
     await create(ctx, 'feature_flags', {
       name: `feature flag ${i}`,
       method: 'PUT',
@@ -64,7 +64,7 @@ export async function run(ctx: GenContext): Promise<void> {
     });
   }
 
-  for (let i = 0; i < VOLUME.smtpConfigs; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.smtpConfigs); i += 1) {
     await create(ctx, 'smtp_configs', {
       name: `smtp ${i}`,
       method: 'POST',
@@ -84,7 +84,7 @@ export async function run(ctx: GenContext): Promise<void> {
     });
   }
 
-  for (let i = 0; i < VOLUME.imapConfigs; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.imapConfigs); i += 1) {
     await create(ctx, 'imap_configs', {
       name: `imap ${i}`,
       method: 'POST',
@@ -102,7 +102,7 @@ export async function run(ctx: GenContext): Promise<void> {
     });
   }
 
-  for (let i = 0; i < VOLUME.integrations; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.integrations); i += 1) {
     await create(ctx, 'integration_credentials', {
       name: `integration ${i}`,
       method: 'POST',
@@ -131,7 +131,7 @@ export async function run(ctx: GenContext): Promise<void> {
     'manual',
     'invalid',
   ] as const;
-  for (let i = 0; i < VOLUME.suppressions; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.suppressions); i += 1) {
     const reason = f.pick(REASONS, i);
     await create(ctx, 'notification_suppressions', {
       name: `suppression ${i}`,
@@ -161,7 +161,7 @@ export async function run(ctx: GenContext): Promise<void> {
     ? events.body.map((e: any) => e.key).filter(Boolean)
     : [];
 
-  for (let i = 0; i < VOLUME.templates && eventKeys.length; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.templates) && eventKeys.length; i += 1) {
     const key = f.pick(eventKeys, i);
     await create(ctx, 'notification_templates', {
       name: `template ${key}`,

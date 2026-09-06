@@ -1,6 +1,6 @@
-import { create, type GenContext } from '../context';
+import { create, tagsFor, type GenContext } from '../context';
 import * as f from '../fake';
-import { VOLUME } from '../volume';
+import { scaled, VOLUME } from '../volume';
 
 /**
  * Projects and everything hanging off them.
@@ -22,8 +22,9 @@ export async function run(ctx: GenContext): Promise<void> {
     'completed',
   ] as const;
   const PRIORITIES = ['low', 'medium', 'high', 'urgent'] as const;
+  const projectTags = tagsFor(pools, 'project');
 
-  for (let i = 0; i < VOLUME.projects; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.projects); i += 1) {
     const id = await create(ctx, 'projects', {
       name: `project ${i}`,
       method: 'POST',
@@ -41,9 +42,7 @@ export async function run(ctx: GenContext): Promise<void> {
         budgetAmount: f.money(25_000 + i * 3_500, 2),
         currency: pools.currency,
         color: `#${(0x2244aa + i * 7919).toString(16).slice(0, 6)}`,
-        ...(pools.tagIds.length
-          ? { tagIds: [f.pick(pools.tagIds, i * 3)] }
-          : {}),
+        ...(projectTags.length ? { tagIds: [f.pick(projectTags, i * 3)] } : {}),
       },
       expect: 201,
     });
@@ -71,7 +70,7 @@ export async function run(ctx: GenContext): Promise<void> {
   }
   for (
     let i = 0;
-    i < VOLUME.projectMembers && pools.extraUserIds.length;
+    i < scaled(VOLUME.projectMembers) && pools.extraUserIds.length;
     i += 1
   ) {
     await create(ctx, 'project_members', {
@@ -89,7 +88,7 @@ export async function run(ctx: GenContext): Promise<void> {
   }
 
   const M_STATUSES = ['pending', 'in_progress', 'reached', 'missed'] as const;
-  for (let i = 0; i < VOLUME.milestones; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.milestones); i += 1) {
     const id = await create(ctx, 'milestones', {
       name: `milestone ${i}`,
       method: 'POST',
@@ -110,7 +109,7 @@ export async function run(ctx: GenContext): Promise<void> {
 
   // Objectives first; key results attach to them, which the DTO enforces.
   const objectives: string[] = [];
-  for (let i = 0; i < VOLUME.goals; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.goals); i += 1) {
     const asKeyResult = i % 3 === 2 && objectives.length > 0;
     const id = await create(ctx, 'goals', {
       name: `goal ${i}`,
@@ -161,13 +160,14 @@ async function tasks(ctx: GenContext): Promise<void> {
     'cancelled',
   ] as const;
   const PRIORITIES = ['low', 'medium', 'high', 'urgent'] as const;
+  const taskTags = tagsFor(pools, 'task');
   const assignees = [ctx.adminUserId, mockUserId, ...pools.extraUserIds].filter(
     Boolean,
   );
 
-  const total = VOLUME.tasks.admin + VOLUME.tasks.user;
+  const total = scaled(VOLUME.tasks.admin) + scaled(VOLUME.tasks.user);
   for (let i = 0; i < total; i += 1) {
-    const actor = i < VOLUME.tasks.admin ? 'admin' : 'user';
+    const actor = i < scaled(VOLUME.tasks.admin) ? 'admin' : 'user';
     const projectId = f.pick(pools.projectIds, i);
     const id = await create(ctx, 'tasks', {
       name: `task ${i}`,
@@ -187,14 +187,13 @@ async function tasks(ctx: GenContext): Promise<void> {
         ...(pools.milestoneIds.length && i % 3 === 0
           ? { milestoneId: f.pick(pools.milestoneIds, i) }
           : {}),
-        ...(pools.tagIds.length
-          ? { tagIds: [f.pick(pools.tagIds, i * 7)] }
-          : {}),
+        ...(taskTags.length ? { tagIds: [f.pick(taskTags, i * 7)] } : {}),
       },
       expect: 201,
     });
     if (id) {
       pools.taskIds.push(id);
+      pools.owner.set(id, actor);
       pools.tasksByProject.get(projectId)?.push(id);
     }
   }
@@ -211,7 +210,11 @@ async function tasks(ctx: GenContext): Promise<void> {
   ] as const;
   let made = 0;
   for (const [, ids] of pools.tasksByProject) {
-    for (let i = 1; i < ids.length && made < VOLUME.taskDependencies; i += 3) {
+    for (
+      let i = 1;
+      i < ids.length && made < scaled(VOLUME.taskDependencies);
+      i += 3
+    ) {
       await create(ctx, 'task_dependencies', {
         name: `dependency ${made}`,
         method: 'POST',
@@ -229,7 +232,7 @@ async function tasks(ctx: GenContext): Promise<void> {
     }
   }
 
-  for (let i = 0; i < VOLUME.taskWatchers; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.taskWatchers); i += 1) {
     await create(ctx, 'task_watchers', {
       name: `watcher ${i}`,
       method: 'POST',
@@ -241,7 +244,7 @@ async function tasks(ctx: GenContext): Promise<void> {
     });
   }
 
-  for (let i = 0; i < VOLUME.timeEntries; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.timeEntries); i += 1) {
     const id = await create(ctx, 'time_entries', {
       name: `time entry ${i}`,
       method: 'POST',
@@ -276,7 +279,7 @@ async function links(ctx: GenContext): Promise<void> {
       'sponsor',
       'other',
     ] as const;
-    for (let i = 0; i < VOLUME.projectContactLinks; i += 1) {
+    for (let i = 0; i < scaled(VOLUME.projectContactLinks); i += 1) {
       await create(ctx, 'project_contact_links', {
         name: `project contact link ${i}`,
         method: 'POST',
@@ -301,7 +304,7 @@ async function links(ctx: GenContext): Promise<void> {
       'deliverable',
       'background',
     ] as const;
-    for (let i = 0; i < VOLUME.projectKnowledgeLinks; i += 1) {
+    for (let i = 0; i < scaled(VOLUME.projectKnowledgeLinks); i += 1) {
       await create(ctx, 'project_knowledge_links', {
         name: `project knowledge link ${i}`,
         method: 'POST',

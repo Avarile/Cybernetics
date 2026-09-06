@@ -1,6 +1,6 @@
 import { create, type GenContext } from '../context';
 import * as f from '../fake';
-import { VOLUME } from '../volume';
+import { scaled, VOLUME } from '../volume';
 
 /**
  * Vocabularies, tags, files, extra accounts and the per-user permission
@@ -21,24 +21,27 @@ export async function run(ctx: GenContext): Promise<void> {
     'task',
     'shared',
   ] as const;
-  for (let i = 0; i < VOLUME.tags; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.tags); i += 1) {
+    const scope = f.pick(TAG_SCOPES, i);
     const id = await create(ctx, 'tags', {
       name: `tag ${i}`,
       method: 'POST',
       path: '/tags',
-      actor: i % 3 === 0 ? 'user' : 'admin',
+      // Admin-only by route policy: POST /tags is @Roles('admin'), so the
+      // non-admin half of the corpus consumes tags rather than defining them.
+      actor: 'admin',
       body: {
         key: `gen-${f.topic(i).replace(/\s+/g, '-')}-${i}-${stamp}`.toLowerCase(),
         label: `${f.topic(i)} ${i}`,
-        scope: f.pick(TAG_SCOPES, i),
+        scope,
         color: `#${(0x334455 + i * 4099).toString(16).slice(0, 6)}`,
         description: `Generated tag for ${f.topic(i)}.`,
       },
     });
-    if (id) pools.tagIds.push(id);
+    if (id) (pools.tagsByScope[scope] ??= []).push(id);
   }
 
-  for (let i = 0; i < VOLUME.contactTypes; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.contactTypes); i += 1) {
     const id = await create(ctx, 'contact_types', {
       name: `contact type ${i}`,
       method: 'POST',
@@ -54,7 +57,7 @@ export async function run(ctx: GenContext): Promise<void> {
     if (id) pools.contactTypeIds.push(id);
   }
 
-  for (let i = 0; i < VOLUME.contactCategories; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.contactCategories); i += 1) {
     const id = await create(ctx, 'contact_categories', {
       name: `contact category ${i}`,
       method: 'POST',
@@ -69,7 +72,7 @@ export async function run(ctx: GenContext): Promise<void> {
     if (id) pools.contactCategoryIds.push(id);
   }
 
-  for (let i = 0; i < VOLUME.knowledgeTypes; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.knowledgeTypes); i += 1) {
     const id = await create(ctx, 'knowledge_types', {
       name: `knowledge type ${i}`,
       method: 'POST',
@@ -86,7 +89,7 @@ export async function run(ctx: GenContext): Promise<void> {
     if (id) pools.knowledgeTypeIds.push(id);
   }
 
-  for (let i = 0; i < VOLUME.knowledgeCategories; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.knowledgeCategories); i += 1) {
     const id = await create(ctx, 'knowledge_categories', {
       name: `knowledge category ${i}`,
       method: 'POST',
@@ -112,7 +115,7 @@ async function files(ctx: GenContext): Promise<void> {
   const { client, stamp, pools } = ctx;
   const { createHash } = await import('node:crypto');
 
-  for (let i = 0; i < VOLUME.files; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.files); i += 1) {
     const actor = i % 2 === 0 ? 'admin' : 'user';
     const content = Buffer.from(
       `Generated fixture ${i} for run ${stamp}.\n${f.paragraph(i, 4)}\n`,
@@ -168,7 +171,7 @@ async function files(ctx: GenContext): Promise<void> {
 /** Extra accounts, so membership and assignment have more than two people. */
 async function accounts(ctx: GenContext): Promise<void> {
   const { stamp, pools } = ctx;
-  for (let i = 0; i < VOLUME.extraUsers; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.extraUsers); i += 1) {
     const id = await create(ctx, 'users', {
       name: `extra user ${i}`,
       method: 'POST',
@@ -223,7 +226,7 @@ async function overrides(ctx: GenContext): Promise<void> {
   if (keys.length === 0) return;
 
   const targets = [mockUserId, ...pools.extraUserIds].filter(Boolean);
-  for (let i = 0; i < VOLUME.permissionOverrides; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.permissionOverrides); i += 1) {
     const userId = f.pick(targets, i);
     const permissionKey = f.pick(keys, i * 3 + 1);
     const effect = i % 3 === 0 ? 'deny' : 'allow';
@@ -248,39 +251,33 @@ async function overrides(ctx: GenContext): Promise<void> {
 }
 
 async function preferences(ctx: GenContext): Promise<void> {
-  const KEYS = [
-    'ui.theme',
-    'ui.density',
-    'ui.locale',
-    'list.pageSize',
-    'digest.frequency',
-    'board.defaultView',
-    'timezone.display',
-    'editor.mode',
-    'table.striped',
-    'notifications.sound',
+  // `type` is required and cross-checked against `value`, so the two travel
+  // together rather than being derived at the call site.
+  const PREFS: Array<{ key: string; value: unknown; type: string }> = [
+    { key: 'ui.theme', value: 'dark', type: 'string' },
+    { key: 'ui.density', value: 'compact', type: 'string' },
+    { key: 'ui.locale', value: 'en-AU', type: 'string' },
+    { key: 'list.pageSize', value: 50, type: 'number' },
+    { key: 'digest.frequency', value: 'daily', type: 'string' },
+    { key: 'board.defaultView', value: 'board', type: 'string' },
+    { key: 'table.striped', value: true, type: 'boolean' },
+    { key: 'notifications.sound', value: false, type: 'boolean' },
+    {
+      key: 'editor.settings',
+      value: { mode: 'markdown', wrap: true },
+      type: 'json',
+    },
+    { key: 'timezone.display', value: 'Australia/Sydney', type: 'string' },
   ];
-  const VALUES: unknown[] = [
-    'dark',
-    'compact',
-    'en-AU',
-    50,
-    'daily',
-    'board',
-    'local',
-    'markdown',
-    true,
-    false,
-  ];
-  for (let i = 0; i < VOLUME.preferences; i += 1) {
-    const value = VALUES[i % VALUES.length];
+  for (let i = 0; i < scaled(VOLUME.preferences); i += 1) {
+    const pref = PREFS[i % PREFS.length];
     await create(ctx, 'user_preferences', {
-      name: `preference ${KEYS[i % KEYS.length]}`,
+      name: `preference ${pref.key}`,
       method: 'PUT',
       path: '/me/preferences/{key}',
-      params: { key: KEYS[i % KEYS.length] },
+      params: { key: pref.key },
       actor: i % 2 === 0 ? 'admin' : 'user',
-      body: { value },
+      body: { value: pref.value, type: pref.type },
       expect: [200, 201, 204],
     });
   }

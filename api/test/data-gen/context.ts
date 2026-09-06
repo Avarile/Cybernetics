@@ -10,7 +10,14 @@ import type { CallOptions } from '../api-suite/harness/types';
  * that through signatures obscures more than it documents.
  */
 export interface Pools {
-  tagIds: string[];
+  /**
+   * Tag ids grouped by the scope they were created with.
+   *
+   * Grouped rather than flat because the API enforces scope on assignment: a
+   * `knowledge`-scoped tag on a contact is a 400, not a silent no-op. Picking
+   * from a flat pool made almost every tagged create fail.
+   */
+  tagsByScope: Record<string, string[]>;
   contactTypeIds: string[];
   contactCategoryIds: string[];
   knowledgeTypeIds: string[];
@@ -19,6 +26,15 @@ export interface Pools {
   extraUserIds: string[];
   companyIds: string[];
   contactIds: string[];
+  /**
+   * Who created each record, by id.
+   *
+   * Sub-resource writes are issued as the owner rather than as an arbitrary
+   * principal: a private contact created by the admin is genuinely invisible to
+   * the mock user, and the API answers 404 rather than leaking its existence.
+   * Ignoring that produced failures that were the access rules working.
+   */
+  owner: Map<string, 'admin' | 'user'>;
   knowledgeIds: string[];
   projectIds: string[];
   milestoneIds: string[];
@@ -45,7 +61,7 @@ export interface GenContext {
 
 export function emptyPools(): Pools {
   return {
-    tagIds: [],
+    tagsByScope: {},
     contactTypeIds: [],
     contactCategoryIds: [],
     knowledgeTypeIds: [],
@@ -54,6 +70,7 @@ export function emptyPools(): Pools {
     extraUserIds: [],
     companyIds: [],
     contactIds: [],
+    owner: new Map(),
     knowledgeIds: [],
     projectIds: [],
     milestoneIds: [],
@@ -164,4 +181,38 @@ export async function create(
   ctx.report.ok(entity);
   const body: any = res.body;
   return body?.id ?? body?.key ?? body?.name ?? undefined;
+}
+
+/**
+ * Tags an entity of `scope` may actually carry.
+ *
+ * `shared` is always included: that is what the scope exists to express — a
+ * tag usable anywhere, versus one that belongs to a single entity type.
+ */
+export function tagsFor(pools: Pools, scope: string): string[] {
+  return [
+    ...(pools.tagsByScope[scope] ?? []),
+    ...(pools.tagsByScope.shared ?? []),
+  ];
+}
+
+/**
+ * Up to `count` DISTINCT tag ids from `pool`.
+ *
+ * Distinct matters: the junction tables carry a unique index on
+ * (entity_id, tag_id), so passing the same tag twice in one create is a 409,
+ * not a no-op. Picking two indices out of a small scoped pool collided
+ * silently until it didn't.
+ */
+export function pickTags(
+  pool: string[],
+  count: number,
+  seed: number,
+): string[] {
+  const out: string[] = [];
+  for (let n = 0; n < pool.length && out.length < count; n += 1) {
+    const candidate = pool[(seed + n * 7) % pool.length];
+    if (!out.includes(candidate)) out.push(candidate);
+  }
+  return out;
 }

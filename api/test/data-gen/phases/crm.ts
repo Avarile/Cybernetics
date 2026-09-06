@@ -1,6 +1,6 @@
-import { create, type GenContext } from '../context';
+import { create, pickTags, tagsFor, type GenContext } from '../context';
 import * as f from '../fake';
-import { VOLUME } from '../volume';
+import { scaled, VOLUME } from '../volume';
 
 /**
  * Companies, contacts and the graph around them.
@@ -13,6 +13,7 @@ export async function run(ctx: GenContext): Promise<void> {
   const { client, stamp, pools } = ctx;
   client.beginSuite('crm');
 
+  const contactTags = tagsFor(pools, 'contact');
   const SIZES = ['micro', 'small', 'medium', 'large', 'enterprise'] as const;
   const STATUSES = [
     'active',
@@ -22,9 +23,10 @@ export async function run(ctx: GenContext): Promise<void> {
     'archived',
   ] as const;
 
-  const totalCompanies = VOLUME.companies.admin + VOLUME.companies.user;
+  const totalCompanies =
+    scaled(VOLUME.companies.admin) + scaled(VOLUME.companies.user);
   for (let i = 0; i < totalCompanies; i += 1) {
-    const actor = i < VOLUME.companies.admin ? 'admin' : 'user';
+    const actor = i < scaled(VOLUME.companies.admin) ? 'admin' : 'user';
     const id = await create(ctx, 'contact_companies', {
       name: `company ${i}`,
       method: 'POST',
@@ -66,9 +68,10 @@ export async function run(ctx: GenContext): Promise<void> {
     'website',
     'inbound_email',
   ] as const;
-  const totalContacts = VOLUME.contacts.admin + VOLUME.contacts.user;
+  const totalContacts =
+    scaled(VOLUME.contacts.admin) + scaled(VOLUME.contacts.user);
   for (let i = 0; i < totalContacts; i += 1) {
-    const actor = i < VOLUME.contacts.admin ? 'admin' : 'user';
+    const actor = i < scaled(VOLUME.contacts.admin) ? 'admin' : 'user';
     const id = await create(ctx, 'contacts', {
       name: `contact ${i}`,
       method: 'POST',
@@ -107,19 +110,16 @@ export async function run(ctx: GenContext): Promise<void> {
         ...(pools.contactCategoryIds.length
           ? { categoryId: f.pick(pools.contactCategoryIds, i * 3) }
           : {}),
-        // Populates contact_tags through the same call.
-        ...(pools.tagIds.length
-          ? {
-              tagIds: [
-                f.pick(pools.tagIds, i),
-                f.pick(pools.tagIds, i * 5 + 2),
-              ],
-            }
-          : {}),
+        // Populates contact_tags through the same call. Scope-filtered: the
+        // API rejects a tag scoped to another entity type outright.
+        ...(contactTags.length ? { tagIds: pickTags(contactTags, 2, i) } : {}),
       },
       expect: 201,
     });
-    if (id) pools.contactIds.push(id);
+    if (id) {
+      pools.contactIds.push(id);
+      pools.owner.set(id, actor);
+    }
   }
 
   if (pools.contactIds.length === 0) return;
@@ -136,14 +136,15 @@ export async function run(ctx: GenContext): Promise<void> {
     'whatsapp',
     'other',
   ] as const;
-  for (let i = 0; i < VOLUME.channels; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.channels); i += 1) {
     const kind = f.pick(CHANNEL_KINDS, i);
+    const contactId = f.pick(pools.contactIds, i);
     await create(ctx, 'contact_channels', {
       name: `channel ${kind} ${i}`,
       method: 'POST',
       path: '/contacts/{id}/channels',
-      params: { id: f.pick(pools.contactIds, i) },
-      actor: i % 2 === 0 ? 'admin' : 'user',
+      params: { id: contactId },
+      actor: pools.owner.get(contactId) ?? 'admin',
       body: {
         kind,
         value: channelValue(kind, i, ctx.stamp),
@@ -163,13 +164,14 @@ export async function run(ctx: GenContext): Promise<void> {
     'task',
     'other',
   ] as const;
-  for (let i = 0; i < VOLUME.interactions; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.interactions); i += 1) {
+    const interactionContactId = f.pick(pools.contactIds, i * 3);
     await create(ctx, 'contact_interactions', {
       name: `interaction ${i}`,
       method: 'POST',
       path: '/contacts/{id}/interactions',
-      params: { id: f.pick(pools.contactIds, i * 3) },
-      actor: i % 2 === 0 ? 'admin' : 'user',
+      params: { id: interactionContactId },
+      actor: pools.owner.get(interactionContactId) ?? 'admin',
       body: {
         kind: f.pick(INTERACTION_KINDS, i),
         occurredAt: f.isoDateTime(-(i % 120)),
@@ -185,7 +187,7 @@ export async function run(ctx: GenContext): Promise<void> {
   // Relationships need two distinct contacts; the modulo walk guarantees it.
   for (
     let i = 0;
-    i < VOLUME.relationships && pools.contactIds.length > 1;
+    i < scaled(VOLUME.relationships) && pools.contactIds.length > 1;
     i += 1
   ) {
     const fromIdx = i % pools.contactIds.length;
@@ -196,7 +198,9 @@ export async function run(ctx: GenContext): Promise<void> {
       method: 'POST',
       path: '/contacts/{id}/relationships',
       params: { id: pools.contactIds[fromIdx] },
-      actor: i % 2 === 0 ? 'admin' : 'user',
+      // An edge needs read access to BOTH endpoints, which may have different
+      // owners; admin is the only principal guaranteed to see both.
+      actor: 'admin',
       body: {
         toContactId: pools.contactIds[toIdx],
         type: f.pick(

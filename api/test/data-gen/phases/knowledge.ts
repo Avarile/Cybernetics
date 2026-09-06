@@ -1,6 +1,6 @@
-import { create, type GenContext } from '../context';
+import { create, pickTags, tagsFor, type GenContext } from '../context';
 import * as f from '../fake';
-import { VOLUME } from '../volume';
+import { scaled, VOLUME } from '../volume';
 
 /**
  * Knowledge records, their ACL grants and their links to contacts.
@@ -14,12 +14,13 @@ export async function run(ctx: GenContext): Promise<void> {
   const { client, stamp, pools } = ctx;
   client.beginSuite('knowledge');
 
+  const knowledgeTags = tagsFor(pools, 'knowledge');
   const FORMATS = ['markdown', 'html', 'plain', 'link'] as const;
   const VISIBILITIES = ['private', 'restricted', 'internal'] as const;
-  const total = VOLUME.knowledge.admin + VOLUME.knowledge.user;
+  const total = scaled(VOLUME.knowledge.admin) + scaled(VOLUME.knowledge.user);
 
   for (let i = 0; i < total; i += 1) {
-    const actor = i < VOLUME.knowledge.admin ? 'admin' : 'user';
+    const actor = i < scaled(VOLUME.knowledge.admin) ? 'admin' : 'user';
     const format = f.pick(FORMATS, i);
     const id = await create(ctx, 'knowledge', {
       name: `knowledge ${i}`,
@@ -47,19 +48,17 @@ export async function run(ctx: GenContext): Promise<void> {
         ...(pools.knowledgeCategoryIds.length
           ? { categoryId: f.pick(pools.knowledgeCategoryIds, i * 3) }
           : {}),
-        // Fills knowledge_tags through the create call.
-        ...(pools.tagIds.length
-          ? {
-              tagIds: [
-                f.pick(pools.tagIds, i * 2),
-                f.pick(pools.tagIds, i * 9 + 5),
-              ],
-            }
+        // Fills knowledge_tags through the create call, scope-filtered.
+        ...(knowledgeTags.length
+          ? { tagIds: pickTags(knowledgeTags, 2, i) }
           : {}),
       },
       expect: 201,
     });
-    if (id) pools.knowledgeIds.push(id);
+    if (id) {
+      pools.knowledgeIds.push(id);
+      pools.owner.set(id, actor);
+    }
   }
 
   if (pools.knowledgeIds.length === 0) return;
@@ -87,7 +86,7 @@ export async function run(ctx: GenContext): Promise<void> {
 
   const grantees = [ctx.mockUserId, ...pools.extraUserIds].filter(Boolean);
   const PERMISSIONS = ['read', 'comment', 'write', 'manage'] as const;
-  for (let i = 0; i < VOLUME.knowledgeGrants; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.knowledgeGrants); i += 1) {
     // Every third grant is to all authenticated users, which takes no grantee
     // id — the DTO refuses one, mirroring the CHECK constraint.
     const granteeType = i % 3 === 0 ? 'authenticated' : 'user';
@@ -117,7 +116,7 @@ export async function run(ctx: GenContext): Promise<void> {
     'expert',
     'mentioned',
   ] as const;
-  for (let i = 0; i < VOLUME.knowledgeContactLinks; i += 1) {
+  for (let i = 0; i < scaled(VOLUME.knowledgeContactLinks); i += 1) {
     await create(ctx, 'knowledge_contact_links', {
       name: `knowledge contact link ${i}`,
       method: 'POST',
