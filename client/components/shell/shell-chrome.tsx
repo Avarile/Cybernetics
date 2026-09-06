@@ -19,7 +19,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useApi } from "@/lib/api/provider"
 import { cn } from "@/lib/utils"
 import { selectIsAuthenticated, useAuthStore } from "@/stores/auth.store"
-import { useWindowStore } from "@/stores/window.store"
+import { useWorkspaceStore } from "@/stores/workspace.store"
 
 export interface ShellChromeProps {
   panelOpen: boolean
@@ -49,14 +49,15 @@ export function ShellChrome({
   const { auth } = useApi()
   const principal = useAuthStore((s) => s.principal)
   const authed = useAuthStore(selectIsAuthenticated)
-  const openWindow = useWindowStore((s) => s.openWindow)
+  const openWindow = useWorkspaceStore((s) => s.openWindow)
 
   async function signOut() {
     const refresh = useAuthStore.getState().refreshToken
     if (refresh) await auth.logout(refresh).catch(() => undefined)
     useAuthStore.getState().clear()
-    useWindowStore.getState().closeAll()
-    useWindowStore.getState().openWindow({ kind: "auth", title: "Access", modal: true })
+    // No explicit reopen: useAuthWindow brings the gate back as soon as the
+    // cleared store says we are signed out.
+    useWorkspaceStore.getState().closeAll()
   }
 
   return (

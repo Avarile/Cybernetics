@@ -8,23 +8,23 @@ import {
   MODAL_SCRIM_Z,
   selectOpenWindows,
   selectTopModal,
-  useWindowStore,
-} from "@/stores/window.store"
+  useWorkspaceStore,
+} from "@/stores/workspace.store"
 import { WindowFrame } from "./window-frame"
 
 export function WindowLayer() {
   // useShallow is required, not stylistic: selectOpenWindows filters and sorts,
   // so it returns a NEW array reference on every call. Under zustand v5 that
   // fails the getSnapshot identity check and re-renders forever.
-  const windows = useWindowStore(useShallow(selectOpenWindows))
-  const topModal = useWindowStore(selectTopModal)
+  const windows = useWorkspaceStore(useShallow(selectOpenWindows))
+  const topModal = useWorkspaceStore(selectTopModal)
 
-  const closeWindow = useWindowStore((st) => st.closeWindow)
-  const focusWindow = useWindowStore((st) => st.focusWindow)
-  const minimiseWindow = useWindowStore((st) => st.minimiseWindow)
-  const toggleMaximise = useWindowStore((st) => st.toggleMaximise)
-  const moveWindow = useWindowStore((st) => st.moveWindow)
-  const setViewport = useWindowStore((st) => st.setViewport)
+  const closeWindow = useWorkspaceStore((st) => st.closeWindow)
+  const focusWindow = useWorkspaceStore((st) => st.focusWindow)
+  const minimiseWindow = useWorkspaceStore((st) => st.minimiseWindow)
+  const toggleMaximise = useWorkspaceStore((st) => st.toggleMaximise)
+  const moveWindow = useWorkspaceStore((st) => st.moveWindow)
+  const setViewport = useWorkspaceStore((st) => st.setViewport)
 
   // The store clamps rects against the viewport, so it has to know its size.
   useEffect(() => {
@@ -58,6 +58,53 @@ export function WindowLayer() {
         // A kind declared but not yet registered simply does not render.
         if (!descriptor) return null
         const Body = descriptor.component
+
+        const body = (
+          <Suspense
+            fallback={
+              <div className="flex h-full items-center justify-center">
+                <Spinner />
+              </div>
+            }
+          >
+            {/* __windowId lets a body close itself — the confirm dialog
+                dismisses on success without the opener holding a handle. */}
+            <Body {...(win.props ?? {})} kind={win.kind} __windowId={win.id} />
+          </Suspense>
+        )
+
+        // A chromeless window is centred here rather than placed by rect, and
+        // gets no frame at all. The auth gate is the case: its body is already
+        // a Card, so a frame around it is a box in a box, and its title bar
+        // would offer a close button for a dialog that must not be dismissed.
+        //
+        // Centring is `min-h-full` inside a scrollable `inset-0` parent, not
+        // `place-items-center`: on a short viewport (a phone in landscape) a
+        // tall card then scrolls instead of being clipped at both ends. The
+        // same classes also make it responsive without `useIsMobile`, so the
+        // full-height mobile Sheet in WindowFrame never applies to a login.
+        if (descriptor.chrome === "none") {
+          return (
+            <div
+              key={win.id}
+              style={{ zIndex: win.zIndex }}
+              className="absolute inset-0 overflow-y-auto"
+            >
+              <div className="flex min-h-full items-center justify-center p-4 sm:p-6 md:p-10">
+                <div
+                  role="dialog"
+                  aria-modal={win.modal || undefined}
+                  aria-label={win.title}
+                  onPointerDown={() => focusWindow(win.id)}
+                  className="pointer-events-auto w-full max-w-sm"
+                >
+                  {body}
+                </div>
+              </div>
+            </div>
+          )
+        }
+
         return (
           <div key={win.id} className="pointer-events-auto">
             <WindowFrame
@@ -68,17 +115,7 @@ export function WindowLayer() {
               onToggleMaximise={() => toggleMaximise(win.id)}
               onMove={(rect) => moveWindow(win.id, rect)}
             >
-              <Suspense
-                fallback={
-                  <div className="flex h-full items-center justify-center">
-                    <Spinner />
-                  </div>
-                }
-              >
-                {/* __windowId lets a body close itself — the confirm dialog
-                    dismisses on success without the opener holding a handle. */}
-                <Body {...(win.props ?? {})} kind={win.kind} __windowId={win.id} />
-              </Suspense>
+              {body}
             </WindowFrame>
           </div>
         )

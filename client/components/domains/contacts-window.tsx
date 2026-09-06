@@ -2,11 +2,11 @@
 
 import { useState } from "react"
 import { DataTable } from "@/components/data-table/data-table"
-import { useWindowStore } from "@/stores/window.store"
+import { useWorkspaceStore } from "@/stores/workspace.store"
 import { contactsConfig, type Contact } from "./contacts.config"
 
 export function ContactsWindow() {
-  const openWindow = useWindowStore((s) => s.openWindow)
+  const openWindow = useWorkspaceStore((s) => s.openWindow)
   const [refreshToken, setRefreshToken] = useState(0)
 
   return (

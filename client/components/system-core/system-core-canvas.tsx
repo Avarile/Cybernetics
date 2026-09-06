@@ -4,7 +4,7 @@ import dynamic from "next/dynamic"
 import { useCallback, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
-import { useWindowStore } from "@/stores/window.store"
+import { useWorkspaceStore } from "@/stores/workspace.store"
 import Boundary from "./Boundary"
 import Panel from "./Panel"
 import useLive from "./hooks/useLive"
@@ -66,7 +66,7 @@ export function SystemCoreCanvas({
     catalog: live.catalog,
     catalogRevision: live.catalogRevision,
   })
-  const openWindow = useWindowStore((s) => s.openWindow)
+  const openWindow = useWorkspaceStore((s) => s.openWindow)
 
   // The list toggles selection on re-click; picking from the list should always
   // land on the module clicked.

@@ -1,12 +1,12 @@
 import { beforeEach, describe, expect, it } from "vitest"
 import type { WindowInstance } from "@/lib/windows/types"
-import { useWindowStore } from "@/stores/window.store"
+import { useWorkspaceStore } from "@/stores/workspace.store"
 import {
   readPersistedWindows,
   serialisePersistedWindows,
 } from "./use-window-persistence"
 
-const s = () => useWindowStore.getState()
+const s = () => useWorkspaceStore.getState()
 
 function instance(over: Partial<WindowInstance> = {}): WindowInstance {
   return {

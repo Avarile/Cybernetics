@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useMemo, type ReactNode } from "react"
 import { useAuthStore } from "@/stores/auth.store"
+import { useWorkspaceStore } from "@/stores/workspace.store"
 import { createApiClient, type ApiClient } from "./client"
 import { createAuthApi, type AuthApi } from "./endpoints/auth"
 
@@ -34,7 +35,14 @@ export function ApiProvider({
       getRefreshToken: () =>
         useAuthStore.getState().refreshToken ?? useAuthStore.getState().readPersistedRefresh(),
       onTokens: (pair) => useAuthStore.getState().setTokens(pair),
-      onAuthFailure: () => useAuthStore.getState().clear(),
+      // Design §5.3: on refresh failure, clear both tokens and close every
+      // window. Tearing down the workspace without this left the user on a
+      // dimmed, inert canvas with no way back in short of a reload —
+      // useAuthWindow now raises the gate off the cleared store.
+      onAuthFailure: () => {
+        useAuthStore.getState().clear()
+        useWorkspaceStore.getState().closeAll()
+      },
       fetchImpl,
     })
     return { client, auth: createAuthApi(client) }

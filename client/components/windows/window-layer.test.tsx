@@ -1,13 +1,13 @@
 import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
-import { useWindowStore } from "@/stores/window.store"
+import { useWorkspaceStore } from "@/stores/workspace.store"
 import { Dock } from "./dock"
 import { WindowLayer } from "./window-layer"
 
 vi.mock("@/hooks/use-mobile", () => ({ useIsMobile: () => false }))
 
-const s = () => useWindowStore.getState()
+const s = () => useWorkspaceStore.getState()
 
 describe("WindowLayer", () => {
   beforeEach(() => {
@@ -65,6 +65,30 @@ describe("WindowLayer", () => {
     s().openWindow({ kind: "terminal", title: "Terminal" })
     const { container } = render(<WindowLayer />)
     expect(container.querySelector(".bg-black\\/50")).toBeNull()
+  })
+
+  it("renders a chromeless window as a bare centred dialog", () => {
+    // The auth gate: still a labelled dialog for assistive tech, but with no
+    // frame around it — and crucially no Close, so the gate cannot be waved
+    // away without signing in. Synchronous queries only: the body is `lazy`,
+    // and awaiting it would mount AuthWindow outside an ApiProvider.
+    s().openWindow({ kind: "auth", title: "Access", modal: true })
+    const { container } = render(<WindowLayer />)
+
+    expect(screen.getByRole("dialog", { name: "Access" })).toBeInTheDocument()
+    for (const name of [/close/i, /minimise/i, /maximise/i]) {
+      expect(screen.queryByRole("button", { name })).not.toBeInTheDocument()
+    }
+    expect(container.querySelector('[data-testid^="resize-"]')).toBeNull()
+  })
+
+  it("still frames a normal window", () => {
+    // Guards the branch above from swallowing every kind.
+    s().openWindow({ kind: "terminal", title: "Terminal" })
+    const { container } = render(<WindowLayer />)
+
+    expect(screen.getByRole("button", { name: /close/i })).toBeInTheDocument()
+    expect(container.querySelector('[data-testid="resize-se"]')).not.toBeNull()
   })
 
   it("skips a kind that has no registry entry rather than crashing", () => {

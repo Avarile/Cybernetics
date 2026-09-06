@@ -4,10 +4,10 @@ import {
   selectOpenWindows,
   selectTopModal,
   serialiseForPersist,
-  useWindowStore,
-} from "./window.store"
+  useWorkspaceStore,
+} from "./workspace.store"
 
-const s = () => useWindowStore.getState()
+const s = () => useWorkspaceStore.getState()
 
 describe("window.store", () => {
   beforeEach(() => {

@@ -15,7 +15,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Textarea } from "@/components/ui/textarea"
 import { ApiError } from "@/lib/api/errors"
 import { useApi } from "@/lib/api/provider"
-import { useWindowStore } from "@/stores/window.store"
+import { useWorkspaceStore } from "@/stores/workspace.store"
 import { RECORD_FORMS } from "./record-forms"
 import { omitBlank, type FormFieldSpec } from "./record-form"
 
@@ -41,7 +41,7 @@ export function RecordWindow({
   __windowId,
 }: RecordWindowProps) {
   const { client } = useApi()
-  const closeWindow = useWindowStore((s) => s.closeWindow)
+  const closeWindow = useWorkspaceStore((s) => s.closeWindow)
   const spec = RECORD_FORMS[domain]
 
   const [values, setValues] = useState<Record<string, string>>({})

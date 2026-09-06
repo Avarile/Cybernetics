@@ -61,7 +61,7 @@ function keyOf(w: WindowInstance): string {
   return (w.props?.__key as string | undefined) ?? w.kind
 }
 
-export const useWindowStore = create<WindowStoreState>((set, get) => ({
+export const useWorkspaceStore = create<WindowStoreState>((set, get) => ({
   windows: [],
   zSeq: 0,
   viewport: { w: 1440, h: 900 },

@@ -4,7 +4,7 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { ApiError } from "@/lib/api/errors"
 import { useApi } from "@/lib/api/provider"
-import { useWindowStore } from "@/stores/window.store"
+import { useWorkspaceStore } from "@/stores/workspace.store"
 
 export interface ConfirmWindowProps {
   message: string
@@ -36,7 +36,7 @@ export function ConfirmWindow({
   __windowId,
 }: ConfirmWindowProps) {
   const { client } = useApi()
-  const closeWindow = useWindowStore((s) => s.closeWindow)
+  const closeWindow = useWorkspaceStore((s) => s.closeWindow)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
 

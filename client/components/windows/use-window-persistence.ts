@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef } from "react"
-import { WINDOW_STORAGE_KEY, serialiseForPersist, useWindowStore } from "@/stores/window.store"
+import { WINDOW_STORAGE_KEY, serialiseForPersist, useWorkspaceStore } from "@/stores/workspace.store"
 import { WINDOW_REGISTRY } from "@/lib/windows/registry"
 import type { WindowInstance } from "@/lib/windows/types"
 
@@ -75,12 +75,12 @@ export function useWindowPersistence(): void {
 
     const restored = readPersistedWindows(localStorage.getItem(WINDOW_STORAGE_KEY))
     if (restored.length > 0) {
-      useWindowStore.getState().hydrate(restored)
+      useWorkspaceStore.getState().hydrate(restored)
     }
 
     // Subscribed after hydration so the restore itself does not immediately
     // write back a half-applied state.
-    return useWindowStore.subscribe((state) => {
+    return useWorkspaceStore.subscribe((state) => {
       try {
         localStorage.setItem(WINDOW_STORAGE_KEY, serialisePersistedWindows(state.windows))
       } catch {

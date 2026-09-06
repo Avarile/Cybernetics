@@ -4,13 +4,13 @@ import { useCallback, useMemo, useState } from "react"
 import { DownloadIcon } from "lucide-react"
 import { DataTable } from "@/components/data-table/data-table"
 import { useApi } from "@/lib/api/provider"
-import { useWindowStore } from "@/stores/window.store"
+import { useWorkspaceStore } from "@/stores/workspace.store"
 import { FileDropzone } from "./file-dropzone"
 import { filesConfig, type FileRow } from "./files.config"
 
 export function FilesWindow() {
   const { client } = useApi()
-  const openWindow = useWindowStore((s) => s.openWindow)
+  const openWindow = useWorkspaceStore((s) => s.openWindow)
   const [refreshToken, setRefreshToken] = useState(0)
 
   const refresh = useCallback(() => setRefreshToken((n) => n + 1), [])
