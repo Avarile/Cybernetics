@@ -33,11 +33,13 @@ export function createLegacyAwareStorage<P>(
     }
   }
 
-  function write(key: string, value: StorageValue<P>): void {
+  function write(key: string, value: StorageValue<P>): boolean {
     try {
       localStorage.setItem(key, JSON.stringify(value))
+      return true
     } catch {
-      /* quota, or a privacy mode that refuses writes */
+      // Quota, or a privacy mode that refuses writes.
+      return false
     }
   }
 
@@ -56,19 +58,28 @@ export function createLegacyAwareStorage<P>(
       if (!options.legacy) return null
 
       const converted = options.legacy.read(raw(options.legacy.key))
-      if (!converted) return null
+      // `=== null`, not falsy: the contract is `P | null`, and a converter may
+      // legitimately produce a falsy-but-valid slice.
+      if (converted === null) return null
 
       const value: StorageValue<P> = { state: converted, version: options.version }
-      write(name, value)
-      try {
-        localStorage.removeItem(options.legacy.key)
-      } catch {
-        /* see write() */
+      // Retire the legacy key ONLY once its replacement is actually on disk.
+      // Deleting it after a swallowed quota failure would destroy the user's
+      // one surviving copy of their refresh token and workspace — strictly
+      // worse than never upgrading at all.
+      if (write(name, value)) {
+        try {
+          localStorage.removeItem(options.legacy.key)
+        } catch {
+          /* see write() */
+        }
       }
       return value
     },
 
-    setItem: (name, value) => write(name, value),
+    setItem: (name, value) => {
+      write(name, value)
+    },
 
     removeItem: (name) => {
       try {
