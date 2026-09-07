@@ -1,6 +1,9 @@
 import { buildTemplate, templateFields } from '../../core/editor/template';
 import type { EditorDocument } from '../../core/editor/frontmatter';
+import { resolveKeyBackedValue } from '../../core/resolve/key-backed-submit';
+import { KEY_BACKED_FIELDS, type VocabularyIndex } from '../../core/resolve/vocabulary';
 import { schemas } from '../../generated/schemas';
+import type { VocabConfig } from '../vocabulary/vocabulary-crud';
 
 /**
  * `GET /contacts/{id}` response shape (`PublicContact` in
@@ -123,22 +126,67 @@ function toEditableFields(record: ContactRecord): Record<string, unknown> {
 }
 
 /**
+ * Resolves `record`'s key-backed ids (`typeId`, `categoryId`, `tagIds`,
+ * `companyId`) to the keys the buffer renders, via the shared
+ * `VocabularyIndex` (Task 1) -- `toKey`/`toKeys` never throw, falling back
+ * to the raw id when it doesn't resolve (a record pointing at a deleted
+ * vocabulary row must still be editable). Keyed by *buffer* name
+ * (`type`/`category`/`tags`/`company`), ready to spread into
+ * `buildTemplate`'s `current` and to serve as `buildContactPatch`'s "before"
+ * snapshot -- computed once by the caller (`contacts-get`/`-edit.command.ts`)
+ * and passed to both, so a company (never cached by `VocabularyIndex`) is
+ * fetched once per invocation, not once per call site.
+ */
+export async function resolveContactKeyBacked(
+  record: ContactRecord,
+  vocab: VocabularyIndex,
+): Promise<Record<string, unknown>> {
+  const raw = record as unknown as Record<string, unknown>;
+  const resolved: Record<string, unknown> = {};
+
+  for (const field of KEY_BACKED_FIELDS.contact) {
+    const value = raw[field.dtoField];
+    if (field.many) {
+      const ids = Array.isArray(value) ? (value as string[]) : [];
+      resolved[field.bufferField] = ids.length > 0 ? await vocab.toKeys(field, ids) : [];
+    } else {
+      resolved[field.bufferField] = value ? await vocab.toKey(field, value as string) : null;
+    }
+  }
+
+  return resolved;
+}
+
+/**
  * Builds the frontmatter document for `record`: the same buffer `edit` opens
  * pre-filled, so `get` (which just prints this) and `edit` show the same
  * shape.
+ *
+ * `keyBackedCurrent` is `resolveContactKeyBacked`'s output -- already
+ * resolved to keys, buffer-named. This function stays synchronous:
+ * `buildTemplate` (Task 4) does no HTTP and reads `current[bufferField]`
+ * directly, so all the async resolution work happens once, before this is
+ * called, not on every render.
  */
-export function buildContactDocument(record: ContactRecord): string {
+export function buildContactDocument(record: ContactRecord, keyBackedCurrent: Record<string, unknown>): string {
   return buildTemplate({
     schema: CONTACTS_EDIT_SCHEMA,
-    current: toEditableFields(record),
+    current: { ...toEditableFields(record), ...keyBackedCurrent },
     bodyField: 'notes',
     header: CONTACTS_TEMPLATE_HEADER,
+    keyBacked: KEY_BACKED_FIELDS.contact,
   });
 }
 
 /**
  * Diffs the submitted document against the fetched record, field by field,
- * and returns only what changed — never the whole record.
+ * and returns only what changed — never the whole record. Key-backed fields
+ * are compared at the *buffer* level (against `keyBackedCurrent`, the same
+ * values the buffer was rendered with) so an untouched field costs no
+ * resolution call at all; only a field the user actually edited is resolved
+ * to an id via `vocab`, and a bad key there surfaces as an `ApiError`
+ * (`resolveKeyBackedValue`, `core/resolve/key-backed-submit.ts`) rather than
+ * a bare `UsageError` that would kill the command.
  *
  * Unlike knowledge, no field here ever carries `format: 'date-time'` in the
  * generated schema (`birthday`/`nextFollowUpAt` come from `z.coerce.date()`,
@@ -147,16 +195,34 @@ export function buildContactDocument(record: ContactRecord): string {
  * before/after normalization to mirror from `knowledge.helpers.ts`: a plain
  * `JSON.stringify` comparison is all either domain's diff actually exercises.
  */
-export function buildContactPatch(
+export async function buildContactPatch(
   record: ContactRecord,
   doc: EditorDocument,
-): Record<string, unknown> {
-  const fields = templateFields(CONTACTS_EDIT_SCHEMA, 'notes').filter((key) => key !== 'notes');
+  keyBackedCurrent: Record<string, unknown>,
+  vocab: VocabularyIndex,
+): Promise<Record<string, unknown>> {
+  const fields = templateFields(CONTACTS_EDIT_SCHEMA, 'notes', KEY_BACKED_FIELDS.contact).filter(
+    (key) => key !== 'notes',
+  );
+  const keyBackedByBuffer = new Map(KEY_BACKED_FIELDS.contact.map((field) => [field.bufferField, field]));
 
   const before = toEditableFields(record);
   const patch: Record<string, unknown> = {};
 
   for (const key of fields) {
+    const keyBackedField = keyBackedByBuffer.get(key);
+
+    if (keyBackedField) {
+      const emptyValue = keyBackedField.many ? [] : null;
+      const beforeValue = keyBackedCurrent[key] ?? emptyValue;
+      const afterValue = key in doc.fields ? doc.fields[key] : emptyValue;
+
+      if (JSON.stringify(beforeValue) !== JSON.stringify(afterValue)) {
+        patch[keyBackedField.dtoField] = await resolveKeyBackedValue(keyBackedField, afterValue, vocab);
+      }
+      continue;
+    }
+
     const beforeValue = before[key] ?? null;
     const afterValue = key in doc.fields ? doc.fields[key] : null;
 
@@ -183,3 +249,26 @@ export function buildContactPatch(
  * `/contacts/{id}/interactions`, which returns the same envelope shape.
  */
 export { morePagesNote } from '../../core/render/pagination-note';
+
+/**
+ * `contacts type`'s config for the shared vocabulary CRUD implementation
+ * (`src/commands/vocabulary/vocabulary-crud.ts`) — see `contacts-type.command.ts`.
+ */
+export const CONTACT_TYPE_VOCAB_CONFIG: VocabConfig = {
+  label: 'contact type',
+  basePath: '/contact-vocabulary/types',
+  createSchema: schemas['CreateContactTypeDto'],
+  updateSchema: schemas['UpdateContactTypeDto'],
+};
+
+/** `contacts category`'s config — see `contacts-category.command.ts`. */
+export const CONTACT_CATEGORY_VOCAB_CONFIG: VocabConfig = {
+  label: 'contact category',
+  basePath: '/contact-vocabulary/categories',
+  createSchema: schemas['CreateCategoryDto'],
+  updateSchema: schemas['UpdateCategoryDto'],
+  header: [
+    'parentId nests this category under another; omit it for a root category.',
+    'Categories nest at most 5 deep, and a move that would create a cycle is rejected.',
+  ],
+};

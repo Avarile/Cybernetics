@@ -1,4 +1,5 @@
 import { buildTemplate, templateFields } from './template';
+import type { KeyBackedField } from '../resolve/vocabulary';
 
 // A small hand-written schema fixture, shaped like the real generated DTOs
 // but deliberately not depending on src/generated/schemas.ts (which changes).
@@ -171,5 +172,173 @@ describe('buildTemplate — date-time rendering', () => {
 
     const line = findLine(text, 'reviewDueAt:')!;
     expect(line).toContain('2024-03-15T13:45:00.000Z');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Key-backed fields (Task 4). A separate hand-written schema fixture, shaped
+// like CreateContactDto/UpdateContactDto's id fields, kept apart from `schema`
+// above so none of the pre-existing tests shift meaning.
+//
+// Design choice, stated here because it departs from the plan's illustrative
+// interface: `buildTemplate` stays SYNCHRONOUS. Rather than an injected
+// `resolveKeys: (field, ids) => Promise<string[]>` callback, the caller
+// resolves ids to keys itself (via `VocabularyIndex.toKey`/`toKeys` --
+// core/resolve/vocabulary.ts, Task 1) *before* calling `buildTemplate`, and
+// hands the already-resolved value in `current[bufferField]`.
+// `current[dtoField]` (the raw id) is never read for a key-backed field.
+// This keeps template.ts free of `await` and leaves its ~19 other call sites
+// (companies, finance, invoices, projects, tags, tasks, vocabulary-crud --
+// none of which ever pass `keyBacked`) completely untouched, instead of
+// making `buildTemplate` async and threading `await` through every one of
+// them for a capability only two callers use. See
+// commands/contacts/contacts.helpers.ts and commands/knowledge/knowledge.helpers.ts
+// for where the actual (async, HTTP-backed) resolution happens.
+// ---------------------------------------------------------------------------
+const vocabSchema = {
+  type: 'object',
+  properties: {
+    title: { type: 'string', maxLength: 500 },
+    typeId: { type: 'string', format: 'uuid' },
+    categoryId: { type: 'string', format: 'uuid' },
+    tagIds: { type: 'array', items: { type: 'string', format: 'uuid' } },
+    companyId: { type: 'string', format: 'uuid' },
+  },
+  required: ['title'],
+};
+
+const TYPE_FIELD: KeyBackedField = { bufferField: 'type', dtoField: 'typeId', many: false, kind: 'contact-type' };
+const CATEGORY_FIELD: KeyBackedField = {
+  bufferField: 'category',
+  dtoField: 'categoryId',
+  many: false,
+  kind: 'contact-category',
+};
+const TAGS_FIELD: KeyBackedField = {
+  bufferField: 'tags',
+  dtoField: 'tagIds',
+  many: true,
+  kind: 'tag',
+  scope: 'contact',
+};
+const COMPANY_FIELD: KeyBackedField = { bufferField: 'company', dtoField: 'companyId', many: false, kind: 'company' };
+const VOCAB_KEY_BACKED: KeyBackedField[] = [TYPE_FIELD, CATEGORY_FIELD, TAGS_FIELD, COMPANY_FIELD];
+
+describe('templateFields — key-backed rename', () => {
+  it('reports buffer names instead of dtoField names when keyBacked is given', () => {
+    const fields = templateFields(vocabSchema, undefined, VOCAB_KEY_BACKED);
+
+    expect(fields.sort()).toEqual(['title', 'type', 'category', 'tags', 'company'].sort());
+    expect(fields).not.toContain('typeId');
+    expect(fields).not.toContain('categoryId');
+    expect(fields).not.toContain('tagIds');
+    expect(fields).not.toContain('companyId');
+  });
+
+  it('reports dtoField names unchanged when keyBacked is omitted (regression guard)', () => {
+    const fields = templateFields(vocabSchema);
+
+    expect(fields).toContain('typeId');
+    expect(fields).not.toContain('type');
+  });
+});
+
+describe('buildTemplate — key-backed fields, create (no current)', () => {
+  it('renders a scalar key-backed field renamed, empty, commented out, with a kind + ls-command comment', () => {
+    const text = buildTemplate({ schema: vocabSchema, keyBacked: VOCAB_KEY_BACKED });
+
+    const line = findLine(text, '# type:');
+    expect(line).toBeDefined();
+    expect(line).toContain('key — see: cyb contacts type ls');
+  });
+
+  it('never renders the raw dtoField name for a key-backed field', () => {
+    const text = buildTemplate({ schema: vocabSchema, keyBacked: VOCAB_KEY_BACKED });
+
+    expect(findLine(text, 'typeId:')).toBeUndefined();
+    expect(findLine(text, '# typeId:')).toBeUndefined();
+  });
+
+  it('renders a `many` key-backed field renamed, as an empty list, with a "keys" comment naming its scope', () => {
+    const text = buildTemplate({ schema: vocabSchema, keyBacked: VOCAB_KEY_BACKED });
+
+    const line = findLine(text, '# tags:');
+    expect(line).toBeDefined();
+    expect(line).toContain('[]');
+    expect(line).toContain('keys — see: cyb tags ls --scope contact');
+  });
+
+  it('renders the company field with its own ls command, not a type/category one', () => {
+    const text = buildTemplate({ schema: vocabSchema, keyBacked: VOCAB_KEY_BACKED });
+
+    const line = findLine(text, '# company:');
+    expect(line).toContain('key — see: cyb companies ls');
+  });
+});
+
+describe('buildTemplate — key-backed fields, edit (current present)', () => {
+  it('renders the resolved key from current[bufferField], uncommented, renamed from dtoField', () => {
+    const text = buildTemplate({
+      schema: vocabSchema,
+      current: { title: 'x', type: 'customer' },
+      keyBacked: VOCAB_KEY_BACKED,
+    });
+
+    const line = findLine(text, 'type:')!;
+    expect(line.startsWith('type:')).toBe(true);
+    expect(line).toContain('customer');
+    expect(line).toContain('key — see: cyb contacts type ls');
+  });
+
+  it('renders a `many` field as a flow list of already-resolved keys', () => {
+    const text = buildTemplate({
+      schema: vocabSchema,
+      current: { title: 'x', tags: ['security', 'urgent'] },
+      keyBacked: VOCAB_KEY_BACKED,
+    });
+
+    // formatScalar's flow-style yaml stringify (shared with every other
+    // array-typed field this module renders) puts spaces inside the
+    // brackets for a non-empty list -- `[]` is the only bracket form with
+    // no spacing, which the create-path test above already covers.
+    const line = findLine(text, 'tags:')!;
+    expect(line).toContain('[ security, urgent ]');
+  });
+
+  it('renders whatever value it is handed for an unresolved id, unmodified -- the raw-id fallback is VocabularyIndex.toKey\'s job, not template.ts\'s', () => {
+    const text = buildTemplate({
+      schema: vocabSchema,
+      current: { title: 'x', type: 'some-deleted-id-that-never-round-tripped' },
+      keyBacked: VOCAB_KEY_BACKED,
+    });
+
+    const line = findLine(text, 'type:')!;
+    expect(line).toContain('some-deleted-id-that-never-round-tripped');
+  });
+
+  it('reads current[bufferField] only -- current[dtoField] (the raw id) is ignored for a key-backed field', () => {
+    const text = buildTemplate({
+      schema: vocabSchema,
+      current: { title: 'x', typeId: 'aaaaaaaa-1111-1111-1111-111111111111', type: 'customer' },
+      keyBacked: VOCAB_KEY_BACKED,
+    });
+
+    const line = findLine(text, 'type:')!;
+    expect(line).toContain('customer');
+    expect(line).not.toContain('aaaaaaaa');
+  });
+});
+
+describe('buildTemplate — no keyBacked (regression guard)', () => {
+  it('renders typeId etc. exactly as before -- untouched by unrelated dtoField names', () => {
+    const text = buildTemplate({
+      schema: vocabSchema,
+      current: { title: 'x', typeId: 'aaaaaaaa-1111-1111-1111-111111111111' },
+    });
+
+    const line = findLine(text, 'typeId:')!;
+    expect(line.startsWith('typeId:')).toBe(true);
+    expect(line).toContain('aaaaaaaa-1111-1111-1111-111111111111');
+    expect(line).toContain('uuid');
   });
 });

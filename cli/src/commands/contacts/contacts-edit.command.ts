@@ -4,7 +4,8 @@ import { SettingsService } from '../../core/config/settings.service';
 import { EditorService } from '../../core/editor/editor.service';
 import { ClientFactory } from '../../core/http/client.factory';
 import { AddressResolver, contactByEmailOrName } from '../../core/resolve/resolver';
-import { buildContactDocument, buildContactPatch, type ContactRecord } from './contacts.helpers';
+import { VocabularyIndex } from '../../core/resolve/vocabulary';
+import { buildContactDocument, buildContactPatch, resolveContactKeyBacked, type ContactRecord } from './contacts.helpers';
 
 interface EditOptions {
   profile?: string;
@@ -38,12 +39,17 @@ export class ContactsEditCommand extends CommandRunner {
 
     const id = await new AddressResolver(client).resolve(addr, contactByEmailOrName);
     const record = await client.get<ContactRecord>(`/contacts/${id}`);
+    // One VocabularyIndex per invocation (design spec §3), shared across
+    // every key-backed field for both rendering the buffer and resolving
+    // the submitted patch, so e.g. a company (never cached) is fetched once.
+    const vocab = new VocabularyIndex(client);
+    const keyBackedCurrent = await resolveContactKeyBacked(record, vocab);
 
     await this.editor.run({
-      initial: buildContactDocument(record),
+      initial: buildContactDocument(record, keyBackedCurrent),
       filetype: 'md',
       submit: async (doc) => {
-        const patch = buildContactPatch(record, doc);
+        const patch = await buildContactPatch(record, doc, keyBackedCurrent, vocab);
 
         if (Object.keys(patch).length === 0) {
           process.stdout.write('No changes to save.\n');

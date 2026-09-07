@@ -5,7 +5,13 @@ import { EditorService } from '../../core/editor/editor.service';
 import { ApiError, ExitCode } from '../../core/errors';
 import { ClientFactory } from '../../core/http/client.factory';
 import { AddressResolver, knowledgeBySlug } from '../../core/resolve/resolver';
-import { buildKnowledgeDocument, buildKnowledgePatch, type KnowledgeRecord } from './knowledge.helpers';
+import { VocabularyIndex } from '../../core/resolve/vocabulary';
+import {
+  buildKnowledgeDocument,
+  buildKnowledgePatch,
+  resolveKnowledgeKeyBacked,
+  type KnowledgeRecord,
+} from './knowledge.helpers';
 
 interface EditOptions {
   profile?: string;
@@ -39,12 +45,17 @@ export class KnowledgeEditCommand extends CommandRunner {
 
     const id = await new AddressResolver(client).resolve(addr, knowledgeBySlug);
     const record = await client.get<KnowledgeRecord>(`/knowledge/${id}`);
+    // One VocabularyIndex per invocation (design spec §3), shared across
+    // every key-backed field for both rendering the buffer and resolving
+    // the submitted patch.
+    const vocab = new VocabularyIndex(client);
+    const keyBackedCurrent = await resolveKnowledgeKeyBacked(record, vocab);
 
     await this.editor.run({
-      initial: buildKnowledgeDocument(record),
+      initial: buildKnowledgeDocument(record, keyBackedCurrent),
       filetype: 'md',
       submit: async (doc) => {
-        const patch = buildKnowledgePatch(record, doc);
+        const patch = await buildKnowledgePatch(record, doc, keyBackedCurrent, vocab);
 
         if (Object.keys(patch).length === 0) {
           process.stdout.write('No changes to save.\n');

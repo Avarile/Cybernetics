@@ -1,9 +1,7 @@
 import { CommandRunner, Option, SubCommand } from 'nest-commander';
 import { SettingsService } from '../../core/config/settings.service';
 import { ClientFactory } from '../../core/http/client.factory';
-import { AddressResolver, knowledgeBySlug } from '../../core/resolve/resolver';
-import { VocabularyIndex } from '../../core/resolve/vocabulary';
-import { buildKnowledgeDocument, resolveKnowledgeKeyBacked, type KnowledgeRecord } from './knowledge.helpers';
+import { buildCompanyDocument, type CompanyRecord } from './companies.helpers';
 
 interface GetOptions {
   profile?: string;
@@ -11,8 +9,8 @@ interface GetOptions {
   json?: boolean;
 }
 
-@SubCommand({ name: 'get', arguments: '<addr>', description: 'Show a knowledge record' })
-export class KnowledgeGetCommand extends CommandRunner {
+@SubCommand({ name: 'get', arguments: '<id>', description: 'Show a company' })
+export class CompaniesGetCommand extends CommandRunner {
   constructor(
     private readonly settings: SettingsService,
     private readonly clients: ClientFactory,
@@ -36,12 +34,11 @@ export class KnowledgeGetCommand extends CommandRunner {
   }
 
   async run(params: string[], options: GetOptions): Promise<void> {
-    const [addr] = params;
+    const [id] = params;
     const resolved = this.settings.resolve(options);
     const client = this.clients.create(resolved);
 
-    const id = await new AddressResolver(client).resolve(addr, knowledgeBySlug);
-    const record = await client.get<KnowledgeRecord>(`/knowledge/${id}`);
+    const record = await client.get<CompanyRecord>(`/companies/${id}`);
 
     if (options.json) {
       process.stdout.write(`${JSON.stringify(record, null, 2)}\n`);
@@ -50,9 +47,7 @@ export class KnowledgeGetCommand extends CommandRunner {
 
     // Same shape `edit` opens the buffer with, so a user who wants to change
     // what they see here already knows what the editor will look like.
-    const vocab = new VocabularyIndex(client);
-    const keyBackedCurrent = await resolveKnowledgeKeyBacked(record, vocab);
-    const text = buildKnowledgeDocument(record, keyBackedCurrent);
+    const text = buildCompanyDocument(record);
     process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
   }
 }

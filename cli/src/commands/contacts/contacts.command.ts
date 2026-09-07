@@ -1,5 +1,6 @@
 import { Command, CommandRunner } from 'nest-commander';
 import { ContactsAddCommand } from './contacts-add.command';
+import { ContactsCategoryAddCommand, ContactsCategoryCommand, ContactsCategoryEditCommand, ContactsCategoryLsCommand, ContactsCategoryRmCommand } from './contacts-category.command';
 import { ContactsChannelAddCommand } from './contacts-channel-add.command';
 import { ContactsChannelLsCommand } from './contacts-channel-ls.command';
 import { ContactsChannelRmCommand } from './contacts-channel-rm.command';
@@ -10,6 +11,7 @@ import { ContactsInteractionsCommand } from './contacts-interactions.command';
 import { ContactsLogCommand } from './contacts-log.command';
 import { ContactsLsCommand } from './contacts-ls.command';
 import { ContactsRmCommand } from './contacts-rm.command';
+import { ContactsTypeAddCommand, ContactsTypeCommand, ContactsTypeEditCommand, ContactsTypeLsCommand, ContactsTypeRmCommand } from './contacts-type.command';
 
 @Command({
   name: 'contacts',
@@ -23,6 +25,8 @@ import { ContactsRmCommand } from './contacts-rm.command';
     ContactsChannelCommand,
     ContactsLogCommand,
     ContactsInteractionsCommand,
+    ContactsTypeCommand,
+    ContactsCategoryCommand,
   ],
 })
 export class ContactsCommand extends CommandRunner {
@@ -33,6 +37,11 @@ export class ContactsCommand extends CommandRunner {
 
 export {
   ContactsAddCommand,
+  ContactsCategoryAddCommand,
+  ContactsCategoryCommand,
+  ContactsCategoryEditCommand,
+  ContactsCategoryLsCommand,
+  ContactsCategoryRmCommand,
   ContactsChannelAddCommand,
   ContactsChannelCommand,
   ContactsChannelLsCommand,
@@ -43,4 +52,9 @@ export {
   ContactsLogCommand,
   ContactsLsCommand,
   ContactsRmCommand,
+  ContactsTypeAddCommand,
+  ContactsTypeCommand,
+  ContactsTypeEditCommand,
+  ContactsTypeLsCommand,
+  ContactsTypeRmCommand,
 };

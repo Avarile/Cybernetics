@@ -1,6 +1,9 @@
 import { buildTemplate, templateFields } from '../../core/editor/template';
 import type { EditorDocument } from '../../core/editor/frontmatter';
+import { resolveKeyBackedValue } from '../../core/resolve/key-backed-submit';
+import { KEY_BACKED_FIELDS, type VocabularyIndex } from '../../core/resolve/vocabulary';
 import { schemas } from '../../generated/schemas';
+import type { VocabConfig } from '../vocabulary/vocabulary-crud';
 
 /**
  * Ordinary pagination beyond this page — same fact every other domain
@@ -132,16 +135,52 @@ function toEditableFields(record: KnowledgeRecord): Record<string, unknown> {
 }
 
 /**
+ * Resolves `record`'s key-backed ids (`typeId`, `categoryId`, `tagIds` --
+ * knowledge has no `companyId`) to the keys the buffer renders, via the
+ * shared `VocabularyIndex` (Task 1) -- `toKey`/`toKeys` never throw, falling
+ * back to the raw id when it doesn't resolve. Keyed by *buffer* name
+ * (`type`/`category`/`tags`), ready to spread into `buildTemplate`'s
+ * `current` and to serve as `buildKnowledgePatch`'s "before" snapshot --
+ * computed once by the caller (`knowledge-get`/`-edit.command.ts`) and
+ * passed to both.
+ */
+export async function resolveKnowledgeKeyBacked(
+  record: KnowledgeRecord,
+  vocab: VocabularyIndex,
+): Promise<Record<string, unknown>> {
+  const raw = record as unknown as Record<string, unknown>;
+  const resolved: Record<string, unknown> = {};
+
+  for (const field of KEY_BACKED_FIELDS.knowledge) {
+    const value = raw[field.dtoField];
+    if (field.many) {
+      const ids = Array.isArray(value) ? (value as string[]) : [];
+      resolved[field.bufferField] = ids.length > 0 ? await vocab.toKeys(field, ids) : [];
+    } else {
+      resolved[field.bufferField] = value ? await vocab.toKey(field, value as string) : null;
+    }
+  }
+
+  return resolved;
+}
+
+/**
  * Builds the frontmatter document for `record`: the same buffer `edit` opens
  * pre-filled, so `get` (which just prints this) and `edit` show the same
  * shape.
+ *
+ * `keyBackedCurrent` is `resolveKnowledgeKeyBacked`'s output -- already
+ * resolved to keys, buffer-named. This function stays synchronous, same as
+ * `contacts.helpers.ts`'s `buildContactDocument`: `buildTemplate` (Task 4)
+ * does no HTTP and reads `current[bufferField]` directly.
  */
-export function buildKnowledgeDocument(record: KnowledgeRecord): string {
+export function buildKnowledgeDocument(record: KnowledgeRecord, keyBackedCurrent: Record<string, unknown>): string {
   return buildTemplate({
     schema: KNOWLEDGE_EDIT_SCHEMA,
-    current: toEditableFields(record),
+    current: { ...toEditableFields(record), ...keyBackedCurrent },
     bodyField: 'body',
     header: KNOWLEDGE_TEMPLATE_HEADER,
+    keyBacked: KEY_BACKED_FIELDS.knowledge,
   });
 }
 
@@ -150,19 +189,44 @@ export function buildKnowledgeDocument(record: KnowledgeRecord): string {
  * and returns only what changed — never the whole record. `expectedVersion`
  * is deliberately not this function's concern: it isn't a content field, it's
  * added by the caller from `record.version` regardless of what else changed.
+ *
+ * Key-backed fields are compared at the *buffer* level (against
+ * `keyBackedCurrent`) so an untouched field costs no resolution call; only a
+ * field the user actually edited is resolved to an id via `vocab`, and a bad
+ * key there surfaces as an `ApiError` (`resolveKeyBackedValue`,
+ * `core/resolve/key-backed-submit.ts`) rather than a bare `UsageError` that
+ * would kill the command.
  */
-export function buildKnowledgePatch(
+export async function buildKnowledgePatch(
   record: KnowledgeRecord,
   doc: EditorDocument,
-): Record<string, unknown> {
+  keyBackedCurrent: Record<string, unknown>,
+  vocab: VocabularyIndex,
+): Promise<Record<string, unknown>> {
   const schema = KNOWLEDGE_EDIT_SCHEMA as JsonSchemaLike;
   const properties = schema.properties ?? {};
-  const fields = templateFields(KNOWLEDGE_EDIT_SCHEMA, 'body').filter((key) => key !== 'body');
+  const fields = templateFields(KNOWLEDGE_EDIT_SCHEMA, 'body', KEY_BACKED_FIELDS.knowledge).filter(
+    (key) => key !== 'body',
+  );
+  const keyBackedByBuffer = new Map(KEY_BACKED_FIELDS.knowledge.map((field) => [field.bufferField, field]));
 
   const before = toEditableFields(record) as Record<string, unknown>;
   const patch: Record<string, unknown> = {};
 
   for (const key of fields) {
+    const keyBackedField = keyBackedByBuffer.get(key);
+
+    if (keyBackedField) {
+      const emptyValue = keyBackedField.many ? [] : null;
+      const beforeValue = keyBackedCurrent[key] ?? emptyValue;
+      const afterValue = key in doc.fields ? doc.fields[key] : emptyValue;
+
+      if (JSON.stringify(beforeValue) !== JSON.stringify(afterValue)) {
+        patch[keyBackedField.dtoField] = await resolveKeyBackedValue(keyBackedField, afterValue, vocab);
+      }
+      continue;
+    }
+
     const fieldSchema = properties[key] ?? {};
     let beforeValue: unknown = before[key] ?? null;
     if (fieldSchema.format === 'date-time') {
@@ -204,3 +268,26 @@ export function withheldRowsNote(envelope: KnowledgeListEnvelope): string | null
     `you don't have access to view them.`
   );
 }
+
+/**
+ * `knowledge type`'s config for the shared vocabulary CRUD implementation
+ * (`src/commands/vocabulary/vocabulary-crud.ts`) — see `knowledge-type.command.ts`.
+ */
+export const KNOWLEDGE_TYPE_VOCAB_CONFIG: VocabConfig = {
+  label: 'knowledge type',
+  basePath: '/knowledge-vocabulary/types',
+  createSchema: schemas['CreateKnowledgeTypeDto'],
+  updateSchema: schemas['UpdateKnowledgeTypeDto'],
+};
+
+/** `knowledge category`'s config — see `knowledge-category.command.ts`. */
+export const KNOWLEDGE_CATEGORY_VOCAB_CONFIG: VocabConfig = {
+  label: 'knowledge category',
+  basePath: '/knowledge-vocabulary/categories',
+  createSchema: schemas['CreateCategoryDto'],
+  updateSchema: schemas['UpdateCategoryDto'],
+  header: [
+    'parentId nests this category under another; omit it for a root category.',
+    'Categories nest at most 5 deep, and a move that would create a cycle is rejected.',
+  ],
+};

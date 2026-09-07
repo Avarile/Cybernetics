@@ -5,6 +5,8 @@ import { EditorService } from '../../core/editor/editor.service';
 import { buildTemplate } from '../../core/editor/template';
 import { UsageError } from '../../core/errors';
 import { ClientFactory } from '../../core/http/client.factory';
+import { keyBackedField, mapKeyBackedFields } from '../../core/resolve/key-backed-submit';
+import { KEY_BACKED_FIELDS, VocabularyIndex } from '../../core/resolve/vocabulary';
 import { KNOWLEDGE_CREATE_SCHEMA, KNOWLEDGE_TEMPLATE_HEADER, type KnowledgeRecord } from './knowledge.helpers';
 
 interface AddOptions {
@@ -22,14 +24,17 @@ interface AddOptions {
   summary?: string;
   body?: string;
   format?: string;
-  typeId?: string;
-  categoryId?: string;
+  /** A knowledge type key or a raw UUID -- resolved the same way the buffer's `type` field is. */
+  type?: string;
+  /** A category key or a raw UUID -- resolved the same way the buffer's `category` field is. */
+  category?: string;
   visibility?: string;
   sourceUrl?: string;
   sourceFileId?: string;
   language?: string;
   reviewDueAt?: string;
   expiresAt?: string;
+  /** Comma-separated tag keys or raw UUIDs -- resolved the same way the buffer's `tags` field is. */
   tags?: string;
 }
 
@@ -39,8 +44,8 @@ const FIELD_OPTION_KEYS: (keyof AddOptions)[] = [
   'summary',
   'body',
   'format',
-  'typeId',
-  'categoryId',
+  'type',
+  'category',
   'visibility',
   'sourceUrl',
   'sourceFileId',
@@ -114,13 +119,13 @@ export class KnowledgeAddCommand extends CommandRunner {
     return v;
   }
 
-  @Option({ flags: '--type-id <uuid>', description: 'Knowledge type id' })
-  parseTypeId(v: string): string {
+  @Option({ flags: '--type <key-or-uuid>', description: 'Knowledge type key or id -- see: cyb knowledge type ls' })
+  parseType(v: string): string {
     return v;
   }
 
-  @Option({ flags: '--category-id <uuid>', description: 'Category id' })
-  parseCategoryId(v: string): string {
+  @Option({ flags: '--category <key-or-uuid>', description: 'Category key or id -- see: cyb knowledge category ls' })
+  parseCategory(v: string): string {
     return v;
   }
 
@@ -154,7 +159,7 @@ export class KnowledgeAddCommand extends CommandRunner {
     return v;
   }
 
-  @Option({ flags: '--tags <ids>', description: 'Comma-separated tag UUIDs' })
+  @Option({ flags: '--tags <keys-or-uuids>', description: 'Comma-separated tag keys or ids -- see: cyb tags ls' })
   parseTags(v: string): string {
     return v;
   }
@@ -162,6 +167,10 @@ export class KnowledgeAddCommand extends CommandRunner {
   async run(_params: string[], options: AddOptions): Promise<void> {
     const resolved = this.settings.resolve(options);
     const client = this.clients.create(resolved);
+    // One VocabularyIndex per invocation (design spec §3), shared across
+    // every key-backed field on both the editor and the flag-only path
+    // below.
+    const vocab = new VocabularyIndex(client);
 
     const fieldFlagsGiven = FIELD_OPTION_KEYS.some((key) => options[key] !== undefined);
     const wantsEditor = options.edit === true || (options.edit !== false && !fieldFlagsGiven);
@@ -182,12 +191,19 @@ export class KnowledgeAddCommand extends CommandRunner {
         schema: KNOWLEDGE_CREATE_SCHEMA,
         bodyField: 'body',
         header: KNOWLEDGE_TEMPLATE_HEADER,
+        keyBacked: KEY_BACKED_FIELDS.knowledge,
       });
       await this.editor.run({
         initial,
         filetype: 'md',
         submit: async (doc) => {
           const dto: Record<string, unknown> = { ...doc.fields };
+          // Renames each key-backed buffer field (type/category/tags) to its
+          // DTO id field, resolved through the shared vocab. A bad key here
+          // surfaces as an ApiError with an issue naming the buffer field
+          // (see key-backed-submit.ts), which EditorService's retry loop
+          // annotates back into the buffer instead of crashing.
+          await mapKeyBackedFields(KEY_BACKED_FIELDS.knowledge, dto, vocab);
           if (doc.body) dto.body = doc.body;
           await create(dto);
         },
@@ -204,8 +220,14 @@ export class KnowledgeAddCommand extends CommandRunner {
     if (options.summary !== undefined) dto.summary = options.summary;
     if (options.body !== undefined) dto.body = options.body;
     if (options.format !== undefined) dto.format = options.format;
-    if (options.typeId !== undefined) dto.typeId = options.typeId;
-    if (options.categoryId !== undefined) dto.categoryId = options.categoryId;
+    // A UsageError here (unknown key) has no buffer to annotate, so it
+    // propagates as itself -- ordinary exit 2, unlike the editor path above.
+    if (options.type !== undefined) {
+      dto.typeId = await vocab.toId(keyBackedField(KEY_BACKED_FIELDS.knowledge, 'type'), options.type);
+    }
+    if (options.category !== undefined) {
+      dto.categoryId = await vocab.toId(keyBackedField(KEY_BACKED_FIELDS.knowledge, 'category'), options.category);
+    }
     if (options.visibility !== undefined) dto.visibility = options.visibility;
     if (options.sourceUrl !== undefined) dto.sourceUrl = options.sourceUrl;
     if (options.sourceFileId !== undefined) dto.sourceFileId = options.sourceFileId;
@@ -213,10 +235,11 @@ export class KnowledgeAddCommand extends CommandRunner {
     if (options.reviewDueAt !== undefined) dto.reviewDueAt = options.reviewDueAt;
     if (options.expiresAt !== undefined) dto.expiresAt = options.expiresAt;
     if (options.tags !== undefined) {
-      dto.tagIds = options.tags
+      const keys = options.tags
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
+      dto.tagIds = await vocab.toIds(keyBackedField(KEY_BACKED_FIELDS.knowledge, 'tags'), keys);
     }
 
     await create(dto);

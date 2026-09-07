@@ -5,6 +5,8 @@ import { EditorService } from '../../core/editor/editor.service';
 import { buildTemplate } from '../../core/editor/template';
 import { UsageError } from '../../core/errors';
 import { ClientFactory } from '../../core/http/client.factory';
+import { keyBackedField, mapKeyBackedFields } from '../../core/resolve/key-backed-submit';
+import { KEY_BACKED_FIELDS, VocabularyIndex } from '../../core/resolve/vocabulary';
 import { CONTACTS_CREATE_SCHEMA, CONTACTS_TEMPLATE_HEADER, type ContactRecord } from './contacts.helpers';
 
 interface AddOptions {
@@ -24,9 +26,12 @@ interface AddOptions {
   primaryEmail?: string;
   primaryPhone?: string;
   jobTitle?: string;
-  companyId?: string;
-  typeId?: string;
-  categoryId?: string;
+  /** A company name or a raw UUID -- resolved the same way the buffer's `company` field is. */
+  company?: string;
+  /** A contact type key or a raw UUID -- resolved the same way the buffer's `type` field is. */
+  type?: string;
+  /** A category key or a raw UUID -- resolved the same way the buffer's `category` field is. */
+  category?: string;
   status?: string;
   source?: string;
   visibility?: string;
@@ -36,6 +41,7 @@ interface AddOptions {
   birthday?: string;
   notes?: string;
   nextFollowUpAt?: string;
+  /** Comma-separated tag keys or raw UUIDs -- resolved the same way the buffer's `tags` field is. */
   tags?: string;
 }
 
@@ -47,9 +53,9 @@ const FIELD_OPTION_KEYS: (keyof AddOptions)[] = [
   'primaryEmail',
   'primaryPhone',
   'jobTitle',
-  'companyId',
-  'typeId',
-  'categoryId',
+  'company',
+  'type',
+  'category',
   'status',
   'source',
   'visibility',
@@ -135,18 +141,18 @@ export class ContactsAddCommand extends CommandRunner {
     return v;
   }
 
-  @Option({ flags: '--company-id <uuid>', description: 'Company id' })
-  parseCompanyId(v: string): string {
+  @Option({ flags: '--company <key-or-uuid>', description: 'Company name or id -- see: cyb companies ls' })
+  parseCompany(v: string): string {
     return v;
   }
 
-  @Option({ flags: '--type-id <uuid>', description: 'Contact type id' })
-  parseTypeId(v: string): string {
+  @Option({ flags: '--type <key-or-uuid>', description: 'Contact type key or id -- see: cyb contacts type ls' })
+  parseType(v: string): string {
     return v;
   }
 
-  @Option({ flags: '--category-id <uuid>', description: 'Category id' })
-  parseCategoryId(v: string): string {
+  @Option({ flags: '--category <key-or-uuid>', description: 'Category key or id -- see: cyb contacts category ls' })
+  parseCategory(v: string): string {
     return v;
   }
 
@@ -195,7 +201,7 @@ export class ContactsAddCommand extends CommandRunner {
     return v;
   }
 
-  @Option({ flags: '--tags <ids>', description: 'Comma-separated tag UUIDs' })
+  @Option({ flags: '--tags <keys-or-uuids>', description: 'Comma-separated tag keys or ids -- see: cyb tags ls' })
   parseTags(v: string): string {
     return v;
   }
@@ -203,6 +209,10 @@ export class ContactsAddCommand extends CommandRunner {
   async run(_params: string[], options: AddOptions): Promise<void> {
     const resolved = this.settings.resolve(options);
     const client = this.clients.create(resolved);
+    // One VocabularyIndex per invocation (design spec §3), shared across
+    // every key-backed field on both the editor and the flag-only path
+    // below, so e.g. two fields of the same bounded kind cost one fetch.
+    const vocab = new VocabularyIndex(client);
 
     const fieldFlagsGiven = FIELD_OPTION_KEYS.some((key) => options[key] !== undefined);
     const wantsEditor = options.edit === true || (options.edit !== false && !fieldFlagsGiven);
@@ -223,12 +233,19 @@ export class ContactsAddCommand extends CommandRunner {
         schema: CONTACTS_CREATE_SCHEMA,
         bodyField: 'notes',
         header: CONTACTS_TEMPLATE_HEADER,
+        keyBacked: KEY_BACKED_FIELDS.contact,
       });
       await this.editor.run({
         initial,
         filetype: 'md',
         submit: async (doc) => {
           const dto: Record<string, unknown> = { ...doc.fields };
+          // Renames each key-backed buffer field (type/category/tags/company)
+          // to its DTO id field, resolved through the shared vocab. A bad key
+          // here surfaces as an ApiError with an issue naming the buffer
+          // field (see key-backed-submit.ts), which EditorService's retry
+          // loop annotates back into the buffer instead of crashing.
+          await mapKeyBackedFields(KEY_BACKED_FIELDS.contact, dto, vocab);
           if (doc.body) dto.notes = doc.body;
           await create(dto);
         },
@@ -251,9 +268,17 @@ export class ContactsAddCommand extends CommandRunner {
     if (options.primaryEmail !== undefined) dto.primaryEmail = options.primaryEmail;
     if (options.primaryPhone !== undefined) dto.primaryPhone = options.primaryPhone;
     if (options.jobTitle !== undefined) dto.jobTitle = options.jobTitle;
-    if (options.companyId !== undefined) dto.companyId = options.companyId;
-    if (options.typeId !== undefined) dto.typeId = options.typeId;
-    if (options.categoryId !== undefined) dto.categoryId = options.categoryId;
+    // A UsageError here (unknown key) has no buffer to annotate, so it
+    // propagates as itself -- ordinary exit 2, unlike the editor path above.
+    if (options.company !== undefined) {
+      dto.companyId = await vocab.toId(keyBackedField(KEY_BACKED_FIELDS.contact, 'company'), options.company);
+    }
+    if (options.type !== undefined) {
+      dto.typeId = await vocab.toId(keyBackedField(KEY_BACKED_FIELDS.contact, 'type'), options.type);
+    }
+    if (options.category !== undefined) {
+      dto.categoryId = await vocab.toId(keyBackedField(KEY_BACKED_FIELDS.contact, 'category'), options.category);
+    }
     if (options.status !== undefined) dto.status = options.status;
     if (options.source !== undefined) dto.source = options.source;
     if (options.visibility !== undefined) dto.visibility = options.visibility;
@@ -264,10 +289,11 @@ export class ContactsAddCommand extends CommandRunner {
     if (options.notes !== undefined) dto.notes = options.notes;
     if (options.nextFollowUpAt !== undefined) dto.nextFollowUpAt = options.nextFollowUpAt;
     if (options.tags !== undefined) {
-      dto.tagIds = options.tags
+      const keys = options.tags
         .split(',')
         .map((s) => s.trim())
         .filter(Boolean);
+      dto.tagIds = await vocab.toIds(keyBackedField(KEY_BACKED_FIELDS.contact, 'tags'), keys);
     }
 
     await create(dto);

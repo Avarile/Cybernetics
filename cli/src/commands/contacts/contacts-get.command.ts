@@ -2,7 +2,8 @@ import { CommandRunner, Option, SubCommand } from 'nest-commander';
 import { SettingsService } from '../../core/config/settings.service';
 import { ClientFactory } from '../../core/http/client.factory';
 import { AddressResolver, contactByEmailOrName } from '../../core/resolve/resolver';
-import { buildContactDocument, type ContactRecord } from './contacts.helpers';
+import { VocabularyIndex } from '../../core/resolve/vocabulary';
+import { buildContactDocument, resolveContactKeyBacked, type ContactRecord } from './contacts.helpers';
 
 interface GetOptions {
   profile?: string;
@@ -49,7 +50,9 @@ export class ContactsGetCommand extends CommandRunner {
 
     // Same shape `edit` opens the buffer with, so a user who wants to change
     // what they see here already knows what the editor will look like.
-    const text = buildContactDocument(record);
+    const vocab = new VocabularyIndex(client);
+    const keyBackedCurrent = await resolveContactKeyBacked(record, vocab);
+    const text = buildContactDocument(record, keyBackedCurrent);
     process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
   }
 }
