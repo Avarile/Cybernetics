@@ -26,6 +26,7 @@ import { KnowledgeModule } from './features/knowledge/knowledge.module';
 import { FinanceModule } from './features/finance/finance.module';
 import { NotificationsModule } from './features/notifications/notifications.module';
 import { ProjectsModule } from './features/projects/projects.module';
+import { SchedulingModule } from './features/scheduling/scheduling.module';
 import { DocumentIngestModule } from './features/document-ingest/document-ingest.module';
 import { FileProcessorModule } from './features/file-processor/file-processor.module';
 import { MailboxModule } from './features/mailbox/mailbox.module';
@@ -91,6 +92,9 @@ import { UsersModule } from './features/users/users.module';
     KnowledgeModule,
     ProjectsModule,
     NotificationsModule,
+    // After NotificationsModule and UsersModule: the reminder handler writes
+    // into the notification outbox.
+    SchedulingModule,
     FinanceModule,
     MailboxModule,
     DocumentIngestModule,

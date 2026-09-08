@@ -18,6 +18,14 @@ export interface ApiIssue {
 const EXPIRED = 'AUTH_TOKEN_EXPIRED';
 const SESSION_GONE = new Set(['AUTH_TOKEN_INVALID', 'AUTH_TOKEN_REUSE']);
 
+/**
+ * A token supplied through `CYB_TOKEN` that the API refused. Raised by the
+ * CLI rather than received from the API: there is no refresh token behind a
+ * supplied token, so nothing local can recover it. In the `AUTH_` namespace
+ * so `exitCodeFor` maps it to ExitCode.AuthRequired.
+ */
+export const TOKEN_REJECTED = 'AUTH_TOKEN_REJECTED';
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,

@@ -1,4 +1,5 @@
 import type { SettingsService } from '../../core/config/settings.service';
+import { ExitCode, UsageError } from '../../core/errors';
 import type { SessionService } from '../../core/session/session.service';
 import { LoginCommand } from './login.command';
 
@@ -58,5 +59,26 @@ describe('LoginCommand', () => {
     session.login.mockRejectedValue(new Error('AUTH_INVALID_CREDENTIALS'));
     await expect(make().run([], {})).rejects.toThrow();
     expect(session.login).toHaveBeenCalledTimes(1);
+  });
+
+  it('exits 2 when no email is available from a flag or the profile', async () => {
+    // A missing email is a flag the caller can supply, so it must not exit 1
+    // ("something we did not expect") -- see ExitCode in core/errors.
+    const noEmail = {
+      resolve: () => ({ profile: 'dev', baseUrl: 'http://api.test' }),
+    } as unknown as SettingsService;
+    const cmd = new LoginCommand(
+      noEmail,
+      session as unknown as SessionService,
+      async () => 'pw',
+      (s: string) => out.push(s),
+    );
+
+    await expect(cmd.run([], {})).rejects.toThrow(UsageError);
+    await expect(cmd.run([], {})).rejects.toMatchObject({
+      exitCode: ExitCode.Usage,
+    });
+    // Never prompt for a password we have no account to send it to.
+    expect(session.login).not.toHaveBeenCalled();
   });
 });

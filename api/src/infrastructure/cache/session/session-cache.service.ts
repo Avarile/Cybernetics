@@ -1,19 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Redis } from 'ioredis';
 import { withTimeout } from '../../../common/with-timeout';
+import type { RedisConfig } from '../../../config/configurations/redis.config';
 import { REDIS_CLIENT } from '../redis.provider';
-
-/**
- * Ceiling on a single Redis round-trip.
- *
- * Load-bearing, not a nicety. `redisClientProvider` builds ioredis with
- * defaults, so `enableOfflineQueue` is on: while the server is unreachable a
- * command is **queued rather than rejected** — it neither resolves nor throws.
- * Since this cache sits on the authenticated request path, awaiting it
- * unguarded would turn a Redis outage into hung requests rather than failed
- * ones, and no caller can react to a promise that never settles.
- */
-const COMMAND_TIMEOUT_MS = 200;
 
 /**
  * Stores and retrieves session data in Redis. Keys are namespaced under
@@ -32,7 +22,27 @@ const COMMAND_TIMEOUT_MS = 200;
 export class SessionCacheService {
   private readonly prefix = 'session:';
 
-  constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) {}
+  /**
+   * Ceiling on a single Redis round-trip.
+   *
+   * Load-bearing, not a nicety: while the server is unreachable ioredis can
+   * **queue** a command rather than reject it, and this cache sits on the
+   * authenticated request path, so an unguarded await would turn a Redis outage
+   * into hung requests rather than failed ones.
+   *
+   * Read from config rather than compiled in, and deliberately the same value
+   * the client itself is built with — see `redis.config.ts` for why a tighter
+   * number here was reporting a busy event loop as an unreachable server.
+   */
+  private readonly commandTimeoutMs: number;
+
+  constructor(
+    @Inject(REDIS_CLIENT) private readonly redis: Redis,
+    config: ConfigService,
+  ) {
+    this.commandTimeoutMs =
+      config.getOrThrow<RedisConfig>('redis').commandTimeoutMs;
+  }
 
   private key(sessionId: string): string {
     return `${this.prefix}${sessionId}`;
@@ -51,7 +61,7 @@ export class SessionCacheService {
         'EX',
         ttlSeconds,
       ),
-      COMMAND_TIMEOUT_MS,
+      this.commandTimeoutMs,
     );
   }
 
@@ -59,7 +69,7 @@ export class SessionCacheService {
   async get<T = Record<string, unknown>>(sessionId: string): Promise<T | null> {
     const raw = await withTimeout(
       this.redis.get(this.key(sessionId)),
-      COMMAND_TIMEOUT_MS,
+      this.commandTimeoutMs,
     );
     return raw ? (JSON.parse(raw) as T) : null;
   }
@@ -68,12 +78,15 @@ export class SessionCacheService {
   async touch(sessionId: string, ttlSeconds: number): Promise<void> {
     await withTimeout(
       this.redis.expire(this.key(sessionId), ttlSeconds),
-      COMMAND_TIMEOUT_MS,
+      this.commandTimeoutMs,
     );
   }
 
   /** Removes a session (e.g. on logout or revocation). */
   async destroy(sessionId: string): Promise<void> {
-    await withTimeout(this.redis.del(this.key(sessionId)), COMMAND_TIMEOUT_MS);
+    await withTimeout(
+      this.redis.del(this.key(sessionId)),
+      this.commandTimeoutMs,
+    );
   }
 }

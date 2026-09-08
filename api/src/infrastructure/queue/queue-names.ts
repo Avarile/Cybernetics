@@ -20,6 +20,7 @@ export const QUEUE_NAMES = {
   authCleanup: 'auth-cleanup',
   systemRetention: 'system-retention',
   notificationSend: 'notification-send',
+  scheduling: 'scheduling',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];

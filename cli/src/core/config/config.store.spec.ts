@@ -2,6 +2,7 @@ import { mkdtempSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ConfigStore, DEFAULT_CONFIG } from './config.store';
+import { UsageError } from '../errors';
 
 describe('ConfigStore', () => {
   let dir: string;
@@ -55,5 +56,8 @@ describe('ConfigStore', () => {
     store.write(DEFAULT_CONFIG);
     writeFileSync(join(dir, 'cybernetics', 'config.json'), '{ not json');
     expect(() => store.read()).toThrow(/is not valid JSON/);
+    // Exit 2, not 1: the message names the file and the fix, so this is a
+    // problem the user can act on rather than an unexpected failure.
+    expect(() => store.read()).toThrow(UsageError);
   });
 });

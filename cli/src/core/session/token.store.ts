@@ -7,6 +7,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { configDir, credentialsPath } from '../config/paths';
+import { UsageError } from '../errors';
 import type { TokenPair } from './tokens';
 
 type CredentialsFile = Record<string, TokenPair>;
@@ -61,7 +62,9 @@ export class TokenStore {
     try {
       return JSON.parse(raw) as CredentialsFile;
     } catch {
-      throw new Error(`${path} is not valid JSON. Run \`cyb login\` again.`);
+      // UsageError for the same reason as assertPrivate below: the message
+      // names the file and the fix, so this exits 2 and not 1.
+      throw new UsageError(`${path} is not valid JSON. Run \`cyb login\` again.`);
     }
   }
 
@@ -80,7 +83,9 @@ export class TokenStore {
     if (process.platform === 'win32') return;
     const mode = statSync(path).mode & 0o777;
     if (mode !== 0o600) {
-      throw new Error(
+      // UsageError, not Error: the message says exactly which command fixes
+      // this, so it exits 2 rather than 1 ("something we did not expect").
+      throw new UsageError(
         `${path} permissions are too open (${mode.toString(8)}). ` +
           `Run: chmod 600 ${path}`,
       );

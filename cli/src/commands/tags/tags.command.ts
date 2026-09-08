@@ -1,4 +1,5 @@
 import { Command, CommandRunner } from 'nest-commander';
+import { runGroup } from '../../core/cli/group';
 import { TagsAddCommand } from './tags-add.command';
 import { TagsEditCommand } from './tags-edit.command';
 import { TagsLsCommand } from './tags-ls.command';
@@ -10,8 +11,8 @@ import { TagsRmCommand } from './tags-rm.command';
   subCommands: [TagsLsCommand, TagsAddCommand, TagsEditCommand, TagsRmCommand],
 })
 export class TagsCommand extends CommandRunner {
-  async run(): Promise<void> {
-    this.command.help();
+  async run(params: string[]): Promise<void> {
+    runGroup(this.command, params);
   }
 }
 

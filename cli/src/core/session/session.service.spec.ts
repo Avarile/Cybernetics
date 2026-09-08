@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ApiError, ExitCode } from '../errors';
+import { ApiError, ExitCode, TOKEN_REJECTED } from '../errors';
 import { RefreshLock } from './refresh.lock';
 import { SessionService } from './session.service';
 import { TokenStore } from './token.store';
@@ -36,8 +36,16 @@ describe('SessionService', () => {
   let lock: RefreshLock;
   let fetchImpl: jest.Mock;
 
+  // `env` is passed explicitly so a CYB_TOKEN in the developer's own shell
+  // cannot change what these tests exercise.
   const make = () =>
-    new SessionService({ store, lock, fetchImpl: fetchImpl as unknown as typeof fetch, now: () => NOW });
+    new SessionService({
+      store,
+      lock,
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+      now: () => NOW,
+      env,
+    });
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'cyb-sess-'));
@@ -235,5 +243,78 @@ describe('SessionService', () => {
     // Spelled out separately from the toBeNull() above: whatever is on disk,
     // it must never be a pair whose expiresAt is NaN.
     expect(stored === null || !Number.isNaN(stored.expiresAt)).toBe(true);
+  });
+
+  describe('CYB_TOKEN', () => {
+    it('uses the supplied token and never reads the credentials file', async () => {
+      env.CYB_TOKEN = 'supplied-token';
+      // A live stored session must lose to the environment: the whole point
+      // of CYB_TOKEN is acting as someone other than whoever logged in here.
+      store.write('dev', { accessToken: 'stored', refreshToken: 'r', expiresAt: NOW + 600_000 });
+
+      await expect(make().getAccessToken('dev', BASE)).resolves.toBe('supplied-token');
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it('works with no credentials file at all', async () => {
+      env.CYB_TOKEN = 'supplied-token';
+      await expect(make().getAccessToken('dev', BASE)).resolves.toBe('supplied-token');
+    });
+
+    it('trims surrounding whitespace', async () => {
+      env.CYB_TOKEN = '  supplied-token\n';
+      await expect(make().getAccessToken('dev', BASE)).resolves.toBe('supplied-token');
+    });
+
+    it('treats an all-whitespace value as not provided', async () => {
+      // `CYB_TOKEN="$UNSET_VAR"` is a normal shell accident. Behaving as if
+      // the variable were unset beats sending `Bearer ` and surfacing
+      // whatever opaque 401 comes back.
+      env.CYB_TOKEN = '   ';
+      await expect(make().getAccessToken('dev', BASE)).rejects.toMatchObject({
+        code: 'UNAUTHORIZED',
+      });
+    });
+
+    it('falls back to the stored session when the value is empty', async () => {
+      env.CYB_TOKEN = '';
+      store.write('dev', { accessToken: 'stored', refreshToken: 'r', expiresAt: NOW + 600_000 });
+      await expect(make().getAccessToken('dev', BASE)).resolves.toBe('stored');
+    });
+
+    it('refreshes normally when no token is supplied', async () => {
+      // Guard against the short-circuit leaking into the ordinary path.
+      store.write('dev', { accessToken: 'old', refreshToken: 'r1', expiresAt: NOW - 1 });
+      fetchImpl.mockResolvedValue(
+        jsonResponse(200, { accessToken: 'new', refreshToken: 'r2', expiresIn: 900 }),
+      );
+      await expect(make().getAccessToken('dev', BASE)).resolves.toBe('new');
+    });
+
+    it('refuses to refresh a supplied token instead of falling back to disk', async () => {
+      env.CYB_TOKEN = 'supplied-token';
+      store.write('dev', { accessToken: 'stored', refreshToken: 'r', expiresAt: NOW + 600_000 });
+
+      await expect(make().refresh('dev', BASE, 'supplied-token')).rejects.toMatchObject({
+        code: TOKEN_REJECTED,
+      });
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it('exits 3 when the supplied token is rejected', async () => {
+      env.CYB_TOKEN = 'supplied-token';
+      await expect(make().refresh('dev', BASE)).rejects.toMatchObject({
+        exitCode: ExitCode.AuthRequired,
+      });
+    });
+
+    it('leaves the stored session on disk when a supplied token is rejected', async () => {
+      env.CYB_TOKEN = 'supplied-token';
+      store.write('dev', { accessToken: 'stored', refreshToken: 'r', expiresAt: NOW + 600_000 });
+
+      await expect(make().refresh('dev', BASE)).rejects.toThrow();
+      // The supplied token failing says nothing about the user's own session.
+      expect(store.read('dev')?.refreshToken).toBe('r');
+    });
   });
 });

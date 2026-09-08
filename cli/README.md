@@ -58,8 +58,14 @@ refuses a world-readable private key.
 |---|---|
 | `CYB_PROFILE` | use this profile |
 | `CYB_API_URL` | override the base URL |
-| `CYB_TOKEN` | supply a token directly — no credentials file needed (for CI) |
+| `CYB_TOKEN` | supply an access token directly — no credentials file needed (for CI) |
 | `VISUAL` / `EDITOR` | which editor opens; falls back to `vi` |
+
+`CYB_TOKEN` **takes precedence over `credentials.json` entirely**: the file is
+not read, and a stored session is not used even when one is live. Nothing
+local can refresh a token supplied this way, so a rejected one exits 3 rather
+than quietly falling back to whoever is logged in on the machine. An empty
+value counts as unset.
 
 Every command accepts `-p/--profile <name>` and `--api <url>` for a one-off
 override.
@@ -216,7 +222,7 @@ cyb contacts type|category ls|add|edit|rm
 
 ```
 cyb knowledge ls | get | add | edit | rm
-cyb knowledge publish <addr>          # set status: draft->review->published
+cyb knowledge publish <addr>          # --status draft|in_review|published|archived|deprecated
 cyb knowledge type|category ls|add|edit|rm
 ```
 
@@ -224,7 +230,7 @@ cyb knowledge type|category ls|add|edit|rm
 
 ```
 cyb projects ls | get | add | edit | rm
-cyb projects member add|rm
+cyb projects member ls|add|rm
 cyb projects milestone ls|add|edit|rm
 
 cyb tasks ls | get | add | edit | rm
@@ -302,9 +308,5 @@ Set `CYB_OPENAPI_URL` if the API is not on `http://localhost:3000`. Never edit
 - **Company resolution is by name only.** The API exposes no filter on company
   domain, so a company whose name is shared with another is reachable only by
   UUID.
-- **`projects member rm` needs a user id you cannot discover.** `GET
-  /projects/{id}/members` exists but has no `cyb projects member ls`, so the id
-  that `rm` requires is not obtainable through the CLI. Use `--json` on the
-  project until this is added.
 - **Not covered:** search, files, mailbox, notifications, agent chat, and system
   administration all have API endpoints with no commands yet.

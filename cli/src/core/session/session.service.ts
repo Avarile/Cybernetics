@@ -1,4 +1,4 @@
-import { ApiError, parseErrorEnvelope } from '../errors';
+import { ApiError, parseErrorEnvelope, TOKEN_REJECTED } from '../errors';
 import { RefreshLock } from './refresh.lock';
 import { TokenStore } from './token.store';
 import { isExpired, pairFromLogin, type LoginResponse } from './tokens';
@@ -8,6 +8,8 @@ export interface SessionDeps {
   lock: RefreshLock;
   fetchImpl?: typeof fetch;
   now?: () => number;
+  /** Injected for tests, the way SettingsService takes its own env. */
+  env?: NodeJS.ProcessEnv;
 }
 
 async function readBody(res: Response): Promise<unknown> {
@@ -23,6 +25,15 @@ async function readBody(res: Response): Promise<unknown> {
 
 function notLoggedIn(): ApiError {
   return new ApiError(401, 'UNAUTHORIZED', 'Not logged in.');
+}
+
+function tokenRejected(): ApiError {
+  return new ApiError(
+    401,
+    TOKEN_REJECTED,
+    'The API rejected the token in CYB_TOKEN, and a supplied token cannot be ' +
+      'refreshed. Supply a valid token, or unset CYB_TOKEN to use the stored session.',
+  );
 }
 
 /**
@@ -76,15 +87,37 @@ export class SessionService {
   private readonly lock: RefreshLock;
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
+  private readonly env: NodeJS.ProcessEnv;
 
   constructor(deps: SessionDeps) {
     this.store = deps.store;
     this.lock = deps.lock;
     this.fetchImpl = deps.fetchImpl ?? globalThis.fetch;
     this.now = deps.now ?? Date.now;
+    this.env = deps.env ?? process.env;
+  }
+
+  /**
+   * `CYB_TOKEN`, when set to something non-empty.
+   *
+   * A token supplied through the environment replaces the credentials file
+   * outright — that is the point of it for CI, where there is no `cyb login`
+   * to run and no writable home directory to keep credentials in.
+   *
+   * An empty or all-whitespace value counts as "not provided", the same as
+   * leaving it unset: `CYB_TOKEN="$SOME_UNSET_VAR"` is a normal shell
+   * accident, and the alternative is sending `Bearer ` and reporting whatever
+   * opaque 401 the API answers with.
+   */
+  private suppliedToken(): string | undefined {
+    const token = this.env.CYB_TOKEN?.trim();
+    return token ? token : undefined;
   }
 
   async getAccessToken(profile: string, baseUrl: string): Promise<string> {
+    const supplied = this.suppliedToken();
+    if (supplied) return supplied;
+
     const current = this.store.read(profile);
     if (!current) throw notLoggedIn();
     if (!isExpired(current, this.now())) return current.accessToken;
@@ -104,6 +137,12 @@ export class SessionService {
     baseUrl: string,
     rejectedToken?: string,
   ): Promise<string> {
+    // A token handed to us through the environment has no refresh token
+    // behind it, and falling through to the store would authenticate as
+    // whoever is logged in on this machine instead of failing — the one
+    // outcome a CI job that set CYB_TOKEN must never get.
+    if (this.suppliedToken()) throw tokenRejected();
+
     return this.lock.withLock(async () => {
       // Re-read INSIDE the lock. Without this every waiter would replay the
       // refresh token it queued with, and the API treats a second use of a

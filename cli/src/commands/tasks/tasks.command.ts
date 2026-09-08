@@ -1,4 +1,5 @@
 import { Command, CommandRunner } from 'nest-commander';
+import { runGroup } from '../../core/cli/group';
 import { TasksAddCommand } from './tasks-add.command';
 import { TasksEditCommand } from './tasks-edit.command';
 import { TasksGetCommand } from './tasks-get.command';
@@ -23,8 +24,8 @@ import { TasksTimeCommand } from './tasks-time.command';
   ],
 })
 export class TasksCommand extends CommandRunner {
-  async run(): Promise<void> {
-    this.command.help();
+  async run(params: string[]): Promise<void> {
+    runGroup(this.command, params);
   }
 }
 

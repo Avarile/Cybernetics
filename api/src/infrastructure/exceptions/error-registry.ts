@@ -170,6 +170,34 @@ export const ERROR_REGISTRY: Record<ErrorCode, ErrorSpec> = {
     message: 'Internal server error',
   },
 
+  [ErrorCode.CALENDAR_EVENT_NOT_FOUND]: {
+    status: S.NOT_FOUND,
+    kind: C,
+    message: 'Calendar event not found',
+  },
+  [ErrorCode.CALENDAR_OCCURRENCE_NOT_FOUND]: {
+    status: S.NOT_FOUND,
+    kind: C,
+    message: 'Calendar occurrence not found',
+  },
+  [ErrorCode.CALENDAR_RULE_INVALID]: {
+    status: S.BAD_REQUEST,
+    kind: C,
+    message: 'The recurrence rule is not valid',
+  },
+  [ErrorCode.SCHEDULED_JOB_NOT_FOUND]: {
+    status: S.NOT_FOUND,
+    kind: C,
+    message: 'Scheduled job not found',
+  },
+  [ErrorCode.SCHEDULER_HANDLER_NOT_REGISTERED]: {
+    // INTERNAL, not CLIENT: no request can cause this. It means a module asked
+    // to schedule a kind nothing will ever run — a wiring bug in our code.
+    status: S.INTERNAL_SERVER_ERROR,
+    kind: I,
+    message: 'No handler is registered for this scheduled job kind',
+  },
+
   [ErrorCode.MAILBOX_MESSAGE_NOT_FOUND]: {
     status: S.NOT_FOUND,
     kind: C,

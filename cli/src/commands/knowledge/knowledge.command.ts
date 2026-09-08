@@ -1,4 +1,5 @@
 import { Command, CommandRunner } from 'nest-commander';
+import { runGroup } from '../../core/cli/group';
 import { KnowledgeAddCommand } from './knowledge-add.command';
 import { KnowledgeCategoryAddCommand, KnowledgeCategoryCommand, KnowledgeCategoryEditCommand, KnowledgeCategoryLsCommand, KnowledgeCategoryRmCommand } from './knowledge-category.command';
 import { KnowledgeEditCommand } from './knowledge-edit.command';
@@ -23,8 +24,8 @@ import { KnowledgeTypeAddCommand, KnowledgeTypeCommand, KnowledgeTypeEditCommand
   ],
 })
 export class KnowledgeCommand extends CommandRunner {
-  async run(): Promise<void> {
-    this.command.help();
+  async run(params: string[]): Promise<void> {
+    runGroup(this.command, params);
   }
 }
 

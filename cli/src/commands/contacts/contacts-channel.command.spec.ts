@@ -1,3 +1,4 @@
+import { UsageError } from '../../core/errors';
 import { ContactsChannelCommand } from './contacts-channel.command';
 
 describe('ContactsChannelCommand', () => {
@@ -6,8 +7,22 @@ describe('ContactsChannelCommand', () => {
     const cmd = new ContactsChannelCommand();
     cmd.setCommand({ help } as never);
 
-    await cmd.run();
+    await cmd.run([]);
 
     expect(help).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an unknown subcommand instead of printing help', async () => {
+    const help = jest.fn();
+    const cmd = new ContactsChannelCommand();
+    cmd.setCommand({
+      help,
+      name: () => 'channel',
+      parent: null,
+      commands: [{ name: () => 'ls' }],
+    } as never);
+
+    await expect(cmd.run(['nope'])).rejects.toThrow(UsageError);
+    expect(help).not.toHaveBeenCalled();
   });
 });

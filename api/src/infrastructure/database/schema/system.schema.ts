@@ -214,6 +214,7 @@ export const retentionEntityType = pgEnum('retention_entity_type', [
   'password_reset_codes',
   'email_messages',
   'search_records',
+  'scheduled_job',
 ]);
 
 /** What the retention sweep does when a row ages out. */

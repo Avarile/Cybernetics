@@ -1,7 +1,8 @@
-import { chmodSync, mkdtempSync, readFileSync, statSync, rmSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, statSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { TokenStore } from './token.store';
+import { UsageError } from '../errors';
 
 const PAIR = { accessToken: 'a', refreshToken: 'r', expiresAt: 123 };
 
@@ -52,6 +53,17 @@ describe('TokenStore', () => {
     store.write('dev', PAIR);
     chmodSync(credFile, 0o644);
     expect(() => store.read('dev')).toThrow(/permissions are too open/);
+    // Exit 2, not 1: a deliberate, well-handled guard whose message names
+    // the exact command that fixes it.
+    expect(() => store.read('dev')).toThrow(UsageError);
+  });
+
+  it('reports malformed credentials as a usage error', () => {
+    const store = new TokenStore(env);
+    store.write('dev', PAIR);
+    writeFileSync(credFile, '{ not json', { mode: 0o600 });
+    expect(() => store.read('dev')).toThrow(/is not valid JSON/);
+    expect(() => store.read('dev')).toThrow(UsageError);
   });
 
   it('clear removes only the named profile', () => {

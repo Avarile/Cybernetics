@@ -1,4 +1,5 @@
 import { Command, CommandRunner } from 'nest-commander';
+import { runGroup } from '../../core/cli/group';
 import { InvoicesAddCommand } from './invoices-add.command';
 import { InvoicesBillTimeCommand } from './invoices-bill-time.command';
 import { InvoicesGetCommand } from './invoices-get.command';
@@ -22,8 +23,8 @@ import { InvoicesOverdueCommand } from './invoices-overdue.command';
   ],
 })
 export class InvoicesCommand extends CommandRunner {
-  async run(): Promise<void> {
-    this.command.help();
+  async run(params: string[]): Promise<void> {
+    runGroup(this.command, params);
   }
 }
 

@@ -1,4 +1,5 @@
 import { CommandRunner, SubCommand } from 'nest-commander';
+import { runGroup } from '../../core/cli/group';
 import { FinanceTxAddCommand } from './finance-tx-add.command';
 import { FinanceTxGetCommand } from './finance-tx-get.command';
 import { FinanceTxLsCommand } from './finance-tx-ls.command';
@@ -17,7 +18,7 @@ import { FinanceTxStatusCommand } from './finance-tx-status.command';
   ],
 })
 export class FinanceTxCommand extends CommandRunner {
-  async run(): Promise<void> {
-    this.command.help();
+  async run(params: string[]): Promise<void> {
+    runGroup(this.command, params);
   }
 }

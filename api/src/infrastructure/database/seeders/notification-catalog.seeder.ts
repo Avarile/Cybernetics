@@ -108,6 +108,15 @@ const EVENT_TYPES = [
     name: 'Expected income due',
     category: 'finance',
   },
+  // calendar
+  {
+    key: 'calendar.event_reminder',
+    name: 'Event reminder',
+    category: 'calendar',
+    // A reminder that arrives in tomorrow's digest is not a reminder.
+    isDigestable: false,
+    defaultTemplateKey: 'calendar.event_reminder',
+  },
 ];
 
 /**
@@ -184,6 +193,22 @@ const TEMPLATES = [
       taskTitle: 'string',
       dueDate: 'string',
       taskUrl: 'string',
+    },
+  },
+  {
+    key: 'calendar.event_reminder',
+    name: 'Event reminder',
+    subjectTemplate: 'Reminder: {{title}} at {{startLocal}}',
+    bodyTextTemplate:
+      'Hi {{displayName}},\n\n{{title}} starts at {{startLocal}} ({{timezone}}), ' +
+      'in about {{minutesBefore}} minutes.\n{{location}}',
+    variables: {
+      displayName: 'string',
+      title: 'string',
+      startLocal: 'string',
+      timezone: 'string',
+      minutesBefore: 'number',
+      location: 'string',
     },
   },
 ];

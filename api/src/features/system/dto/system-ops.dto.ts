@@ -10,6 +10,7 @@ export const RETENTION_ENTITY_TYPES = [
   'password_reset_codes',
   'email_messages',
   'search_records',
+  'scheduled_job',
 ] as const;
 
 export const EVENT_SEVERITIES = [

@@ -1,10 +1,9 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Redis } from 'ioredis';
 import { withTimeout } from '../../common/with-timeout';
+import type { RedisConfig } from '../../config/configurations/redis.config';
 import { REDIS_CLIENT } from '../../infrastructure/cache/redis.provider';
-
-/** Ceiling on one Redis round-trip; see `withTimeout` for why this is required. */
-const COMMAND_TIMEOUT_MS = 200;
 
 /** How long a resolved permission set may be reused. */
 const TTL_SECONDS = 300;
@@ -35,7 +34,21 @@ interface CachedSet {
 export class PermissionCacheService {
   private readonly logger = new Logger(PermissionCacheService.name);
 
-  constructor(@Inject(REDIS_CLIENT) private readonly redis: Redis) {}
+  /**
+   * Ceiling on one Redis round-trip; see `withTimeout` for why this is required
+   * and `redis.config.ts` for why the number is configured rather than compiled
+   * in. Abandoning a read that Redis would have answered is not free here: it
+   * silently moves the authorization path back onto the database.
+   */
+  private readonly commandTimeoutMs: number;
+
+  constructor(
+    @Inject(REDIS_CLIENT) private readonly redis: Redis,
+    config: ConfigService,
+  ) {
+    this.commandTimeoutMs =
+      config.getOrThrow<RedisConfig>('redis').commandTimeoutMs;
+  }
 
   private key(subject: string): string {
     return `perm:set:${subject}`;
@@ -52,7 +65,7 @@ export class PermissionCacheService {
     try {
       const results = await withTimeout(
         this.redis.pipeline().get(EPOCH_KEY).get(this.key(subject)).exec(),
-        COMMAND_TIMEOUT_MS,
+        this.commandTimeoutMs,
       );
       if (!results) return null;
       const [[, rawEpoch], [, rawEntry]] = results as [
@@ -79,7 +92,8 @@ export class PermissionCacheService {
   async set(subject: string, keys: string[]): Promise<void> {
     try {
       const epoch = Number(
-        (await withTimeout(this.redis.get(EPOCH_KEY), COMMAND_TIMEOUT_MS)) ?? 0,
+        (await withTimeout(this.redis.get(EPOCH_KEY), this.commandTimeoutMs)) ??
+          0,
       );
       const entry: CachedSet = { epoch, keys };
       await withTimeout(
@@ -89,7 +103,7 @@ export class PermissionCacheService {
           'EX',
           TTL_SECONDS,
         ),
-        COMMAND_TIMEOUT_MS,
+        this.commandTimeoutMs,
       );
     } catch (error) {
       // A failed cache write costs a database read next time. Nothing more.
@@ -110,7 +124,7 @@ export class PermissionCacheService {
    */
   async invalidateAll(): Promise<void> {
     try {
-      await withTimeout(this.redis.incr(EPOCH_KEY), COMMAND_TIMEOUT_MS);
+      await withTimeout(this.redis.incr(EPOCH_KEY), this.commandTimeoutMs);
     } catch (error) {
       // Failing to invalidate is the one failure that is NOT safe to swallow
       // silently: stale grants would survive for the TTL.

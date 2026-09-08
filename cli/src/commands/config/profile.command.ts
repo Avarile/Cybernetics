@@ -1,4 +1,5 @@
 import { Command, CommandRunner, Option, SubCommand } from 'nest-commander';
+import { runGroup } from '../../core/cli/group';
 import { ConfigStore } from '../../core/config/config.store';
 import { UsageError } from '../../core/errors';
 
@@ -107,8 +108,8 @@ export class ProfileListCommand extends CommandRunner {
   subCommands: [ProfileAddCommand, ProfileUseCommand, ProfileListCommand],
 })
 export class ProfileCommand extends CommandRunner {
-  async run(): Promise<void> {
-    this.command.help();
+  async run(params: string[]): Promise<void> {
+    runGroup(this.command, params);
   }
 }
 
@@ -118,7 +119,7 @@ export class ProfileCommand extends CommandRunner {
   subCommands: [ProfileCommand],
 })
 export class ConfigCommand extends CommandRunner {
-  async run(): Promise<void> {
-    this.command.help();
+  async run(params: string[]): Promise<void> {
+    runGroup(this.command, params);
   }
 }

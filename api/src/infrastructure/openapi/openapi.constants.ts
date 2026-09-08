@@ -60,4 +60,12 @@ export const OPENAPI_TAGS: ReadonlyArray<{
     name: 'System',
     description: 'SMTP/IMAP config, settings, integration credentials, audit.',
   },
+  {
+    name: 'Calendar',
+    description: 'Calendar events, recurrence and single-instance overrides.',
+  },
+  {
+    name: 'Scheduler',
+    description: 'Poller health, dead-letter queue and manual sweeps (admin).',
+  },
 ];

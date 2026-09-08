@@ -8,6 +8,7 @@ import { mastraConfig } from './configurations/mastra.config';
 import { openapiConfig } from './configurations/openapi.config';
 import { redisConfig } from './configurations/redis.config';
 import { searchConfig } from './configurations/search.config';
+import { schedulingConfig } from './configurations/scheduling.config';
 import { sentryConfig } from './configurations/sentry.config';
 import { storageConfig } from './configurations/storage.config';
 import { systemConfig } from './configurations/system.config';
@@ -41,6 +42,7 @@ import { validateEnv } from './env.validation';
         mastraConfig,
         mailboxConfig,
         openapiConfig,
+        schedulingConfig,
       ],
     }),
   ],

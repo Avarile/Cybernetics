@@ -30,7 +30,12 @@ export const redisClientProvider: Provider = {
       // while Redis is unreachable neither resolves nor rejects — it queues.
       // Callers on a request path then hang instead of failing, which is why
       // `SessionCacheService` also races every command against `withTimeout`.
-      commandTimeout: 1_000,
+      //
+      // Both bounds read the SAME config value on purpose. When they disagreed
+      // (200ms in the services, 1s here) only the tighter one ever decided, so
+      // the looser one was decoration and the tighter one was mistaking a busy
+      // event loop for an unreachable server.
+      commandTimeout: redis.commandTimeoutMs,
       maxRetriesPerRequest: 3,
     });
   },

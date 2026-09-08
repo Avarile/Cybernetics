@@ -1,4 +1,5 @@
 import { CommandRunner, SubCommand } from 'nest-commander';
+import { runGroup } from '../../core/cli/group';
 import { ProjectsMilestoneAddCommand } from './projects-milestone-add.command';
 import { ProjectsMilestoneEditCommand } from './projects-milestone-edit.command';
 import { ProjectsMilestoneLsCommand } from './projects-milestone-ls.command';
@@ -15,7 +16,7 @@ import { ProjectsMilestoneRmCommand } from './projects-milestone-rm.command';
   ],
 })
 export class ProjectsMilestoneCommand extends CommandRunner {
-  async run(): Promise<void> {
-    this.command.help();
+  async run(params: string[]): Promise<void> {
+    runGroup(this.command, params);
   }
 }

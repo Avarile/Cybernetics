@@ -1,4 +1,5 @@
 import { Command, CommandRunner } from 'nest-commander';
+import { runGroup } from '../../core/cli/group';
 import { ContactsAddCommand } from './contacts-add.command';
 import { ContactsCategoryAddCommand, ContactsCategoryCommand, ContactsCategoryEditCommand, ContactsCategoryLsCommand, ContactsCategoryRmCommand } from './contacts-category.command';
 import { ContactsChannelAddCommand } from './contacts-channel-add.command';
@@ -30,8 +31,8 @@ import { ContactsTypeAddCommand, ContactsTypeCommand, ContactsTypeEditCommand, C
   ],
 })
 export class ContactsCommand extends CommandRunner {
-  async run(): Promise<void> {
-    this.command.help();
+  async run(params: string[]): Promise<void> {
+    runGroup(this.command, params);
   }
 }
 

@@ -1,5 +1,6 @@
 import { Injectable, Optional } from '@nestjs/common';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { UsageError } from '../errors';
 import { configDir, configPath } from './paths';
 
 export interface Profile {
@@ -40,8 +41,10 @@ export class ConfigStore {
     try {
       return JSON.parse(raw) as CliConfig;
     } catch {
-      // The raw SyntaxError names neither the file nor the fix.
-      throw new Error(`${path} is not valid JSON. Fix or delete it.`);
+      // The raw SyntaxError names neither the file nor the fix. UsageError
+      // rather than Error because this one does both, so it exits 2 — not 1,
+      // which means "something we did not expect".
+      throw new UsageError(`${path} is not valid JSON. Fix or delete it.`);
     }
   }
 

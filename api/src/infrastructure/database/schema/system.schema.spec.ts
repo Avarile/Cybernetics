@@ -62,6 +62,7 @@ describe('system schema', () => {
       'password_reset_codes',
       'email_messages',
       'search_records',
+      'scheduled_job',
     ]);
     expect(retentionAction.enumValues).toEqual([
       'purge',

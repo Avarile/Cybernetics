@@ -24,3 +24,4 @@ export * from './knowledge.schema';
 export * from './finance.schema';
 export * from './project-link.schema';
 export * from './notification.schema';
+export * from './calendar.schema';

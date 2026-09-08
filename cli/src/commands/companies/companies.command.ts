@@ -1,4 +1,5 @@
 import { Command, CommandRunner } from 'nest-commander';
+import { runGroup } from '../../core/cli/group';
 import { CompaniesAddCommand } from './companies-add.command';
 import { CompaniesEditCommand } from './companies-edit.command';
 import { CompaniesGetCommand } from './companies-get.command';
@@ -17,8 +18,8 @@ import { CompaniesRmCommand } from './companies-rm.command';
   ],
 })
 export class CompaniesCommand extends CommandRunner {
-  async run(): Promise<void> {
-    this.command.help();
+  async run(params: string[]): Promise<void> {
+    runGroup(this.command, params);
   }
 }
 

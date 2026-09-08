@@ -65,6 +65,7 @@ export const notificationEntityType = pgEnum('notification_entity_type', [
   'budget',
   'user',
   'system',
+  'event',
 ]);
 
 /**

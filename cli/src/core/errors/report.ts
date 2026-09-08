@@ -1,5 +1,5 @@
 import pc from 'picocolors';
-import { ApiError, ExitCode } from './api-error';
+import { ApiError, ExitCode, TOKEN_REJECTED } from './api-error';
 import { UsageError } from './usage-error';
 
 /**
@@ -43,7 +43,10 @@ export function reportError(
       write(`  ${pc.yellow(issue.path.join('.'))}: ${issue.message}\n`);
     }
 
-    if (err.exitCode === ExitCode.AuthRequired) {
+    // `cyb login` writes credentials.json, which a supplied CYB_TOKEN
+    // overrides — so the usual advice would not fix a rejected one, and the
+    // message already says what would.
+    if (err.exitCode === ExitCode.AuthRequired && err.code !== TOKEN_REJECTED) {
       write(`\nRun ${pc.bold('cyb login')} to authenticate.\n`);
     }
 

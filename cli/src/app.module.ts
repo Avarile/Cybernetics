@@ -98,6 +98,7 @@ import { ProjectsEditCommand } from './commands/projects/projects-edit.command';
 import { ProjectsGetCommand } from './commands/projects/projects-get.command';
 import { ProjectsLsCommand } from './commands/projects/projects-ls.command';
 import { ProjectsMemberAddCommand } from './commands/projects/projects-member-add.command';
+import { ProjectsMemberLsCommand } from './commands/projects/projects-member-ls.command';
 import { ProjectsMemberRmCommand } from './commands/projects/projects-member-rm.command';
 import { ProjectsMemberCommand } from './commands/projects/projects-member.command';
 import { ProjectsMilestoneAddCommand } from './commands/projects/projects-milestone-add.command';
@@ -220,6 +221,7 @@ import { SessionService } from './core/session/session.service';
     ProjectsEditCommand,
     ProjectsRmCommand,
     ProjectsMemberCommand,
+    ProjectsMemberLsCommand,
     ProjectsMemberAddCommand,
     ProjectsMemberRmCommand,
     ProjectsMilestoneCommand,

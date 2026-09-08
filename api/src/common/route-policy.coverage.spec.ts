@@ -34,6 +34,11 @@ import {
   NotificationController,
 } from '../features/notifications/notification.controller';
 import { ProjectController } from '../features/projects/project.controller';
+import {
+  CalendarController,
+  CalendarOccurrenceController,
+} from '../features/scheduling/calendar.controller';
+import { SchedulingAdminController } from '../features/scheduling/scheduling-admin.controller';
 import { TaskController } from '../features/projects/task.controller';
 import { ActivityController } from '../features/shared/activity.controller';
 import { AttachmentController } from '../features/shared/attachment.controller';
@@ -97,6 +102,9 @@ const CONTROLLERS = [
   KnowledgeVocabularyController,
   ProjectController,
   TaskController,
+  CalendarController,
+  CalendarOccurrenceController,
+  SchedulingAdminController,
   NotificationController,
   NotificationAdminController,
   FinanceController,

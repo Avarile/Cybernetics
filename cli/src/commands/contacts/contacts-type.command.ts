@@ -1,6 +1,7 @@
 import { Optional } from '@nestjs/common';
 import { confirm as promptConfirm } from '@inquirer/prompts';
 import { CommandRunner, Option, SubCommand } from 'nest-commander';
+import { runGroup } from '../../core/cli/group';
 import { SettingsService } from '../../core/config/settings.service';
 import { EditorService } from '../../core/editor/editor.service';
 import { ClientFactory } from '../../core/http/client.factory';
@@ -183,7 +184,7 @@ export class ContactsTypeRmCommand extends CommandRunner {
   subCommands: [ContactsTypeLsCommand, ContactsTypeAddCommand, ContactsTypeEditCommand, ContactsTypeRmCommand],
 })
 export class ContactsTypeCommand extends CommandRunner {
-  async run(): Promise<void> {
-    this.command.help();
+  async run(params: string[]): Promise<void> {
+    runGroup(this.command, params);
   }
 }

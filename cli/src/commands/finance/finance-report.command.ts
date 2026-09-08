@@ -1,4 +1,5 @@
 import { CommandRunner, SubCommand } from 'nest-commander';
+import { runGroup } from '../../core/cli/group';
 import { FinanceReportForecastCommand } from './finance-report-forecast.command';
 import { FinanceReportIncomeCommand } from './finance-report-income.command';
 import { FinanceReportSpendCommand } from './finance-report-spend.command';
@@ -15,7 +16,7 @@ import { FinanceReportSummaryCommand } from './finance-report-summary.command';
   ],
 })
 export class FinanceReportCommand extends CommandRunner {
-  async run(): Promise<void> {
-    this.command.help();
+  async run(params: string[]): Promise<void> {
+    runGroup(this.command, params);
   }
 }

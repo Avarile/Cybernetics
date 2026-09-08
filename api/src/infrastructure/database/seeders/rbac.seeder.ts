@@ -34,6 +34,8 @@ const PERMISSIONS: Array<[key: string, description: string]> = [
   ['finance.invoice.manage', 'Issue, send and void invoices'],
   ['finance.budget.manage', 'Create and adjust budgets'],
   ['finance.fx.manage', 'Record exchange rates into the historical archive'],
+  ['calendar.read', 'View your calendar events and occurrences'],
+  ['calendar.write', 'Create, edit, move and cancel calendar events'],
   ['notification.manage', 'Edit notification templates and event types'],
   ['system.settings.manage', 'Edit system settings and integrations'],
   ['system.audit.read', 'Read audit and event logs'],
@@ -84,6 +86,8 @@ const ROLES: Array<{
       'contact.read',
       'contact.create',
       'contact.update',
+      'calendar.read',
+      'calendar.write',
     ],
   },
   {
@@ -97,6 +101,7 @@ const ROLES: Array<{
       'project.task.read',
       'knowledge.read',
       'contact.read',
+      'calendar.read',
     ],
   },
   {

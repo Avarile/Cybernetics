@@ -20,9 +20,15 @@ const RETENTION_DAYS = 120;
  *
  * Both are seeded at the agreed window so the intent is recorded, and left
  * `enabled = false` so nothing destructive runs until someone turns it on
- * deliberately. The other six purge normally.
+ * deliberately. The other seven purge normally.
  */
-const RETENTION = [
+const RETENTION: Array<{
+  entityType: (typeof dataRetentionPolicies.entityType.enumValues)[number];
+  enabled: boolean;
+  description: string;
+  /** Overrides {@link RETENTION_DAYS} where the uniform window does not fit. */
+  retentionDays?: number;
+}> = [
   {
     entityType: 'activity_log' as const,
     enabled: true,
@@ -66,6 +72,13 @@ const RETENTION = [
     description:
       'DISABLED: this is the source of truth behind the search index, not a log.',
   },
+  {
+    entityType: 'scheduled_job' as const,
+    enabled: true,
+    retentionDays: 30,
+    description:
+      'Terminal poller rows (done/skipped/dead). Kept short so `scheduled_job` stays a working set rather than an archive; permanent history belongs in an append-only audit table, not the poller hot path.',
+  },
 ];
 
 /**
@@ -81,6 +94,7 @@ const FLAGS = [
   ['module.projects', 'Projects, tasks, goals, milestones and time entries.'],
   ['module.notifications', 'Email notification pipeline.'],
   ['module.finance', 'Budgets, transactions, invoicing and payments.'],
+  ['module.calendar', 'Calendar events, occurrences and the reminder poller.'],
 ];
 
 export class SystemPolicySeeder implements Seeder {
@@ -93,7 +107,9 @@ export class SystemPolicySeeder implements Seeder {
       dataRetentionPolicies.entityType,
       RETENTION.map((r) => ({
         entityType: r.entityType,
-        retentionDays: RETENTION_DAYS,
+        // Per-policy override where the uniform window is wrong: `scheduled_job`
+        // is high-churn operational state, not a 120-day record.
+        retentionDays: r.retentionDays ?? RETENTION_DAYS,
         action: 'purge' as const,
         enabled: r.enabled,
         description: r.description,
@@ -115,7 +131,8 @@ export class SystemPolicySeeder implements Seeder {
     );
 
     console.log(
-      `  ↳ retention policies +${retentionCount} (${RETENTION_DAYS}d), feature flags +${flagCount}`,
+      `  ↳ retention policies +${retentionCount} (${RETENTION_DAYS}d, ` +
+        `except where overridden), feature flags +${flagCount}`,
     );
   }
 }

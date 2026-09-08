@@ -2,6 +2,7 @@ import { Optional } from '@nestjs/common';
 import { password as promptPassword } from '@inquirer/prompts';
 import { Command, CommandRunner, Option } from 'nest-commander';
 import { SettingsService } from '../../core/config/settings.service';
+import { UsageError } from '../../core/errors';
 import { SessionService } from '../../core/session/session.service';
 
 interface LoginOptions {
@@ -49,7 +50,9 @@ export class LoginCommand extends CommandRunner {
     const resolved = this.settings.resolve(options);
     const email = options.email ?? resolved.email;
     if (!email) {
-      throw new Error(
+      // UsageError, not Error: this is a flag the caller can supply, so it
+      // exits 2 rather than 1 ("something we did not expect").
+      throw new UsageError(
         'No email. Pass --email, or set one with: cyb config profile add',
       );
     }
