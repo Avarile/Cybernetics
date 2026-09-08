@@ -785,6 +785,121 @@ export const schemas: Record<string, unknown> = {
       "name"
     ]
   },
+  "CreateEventDto": {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+      },
+      "description": {
+        "type": "string",
+        "maxLength": 2000,
+        "nullable": true
+      },
+      "location": {
+        "type": "string",
+        "maxLength": 300,
+        "nullable": true
+      },
+      "startLocal": {
+        "type": "string",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}:\\d{2}(?::\\d{2})?)?$"
+      },
+      "durationMinutes": {
+        "type": "integer",
+        "minimum": 0,
+        "exclusiveMinimum": false,
+        "maximum": 527040,
+        "exclusiveMaximum": false,
+        "default": 0
+      },
+      "timezone": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "allDay": {
+        "type": "boolean",
+        "default": false
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "confirmed",
+          "tentative"
+        ],
+        "default": "confirmed"
+      },
+      "frequency": {
+        "type": "string",
+        "enum": [
+          "none",
+          "daily",
+          "weekly",
+          "monthly",
+          "yearly"
+        ],
+        "default": "none"
+      },
+      "interval": {
+        "type": "integer",
+        "minimum": 1,
+        "exclusiveMinimum": false,
+        "maximum": 1000,
+        "exclusiveMaximum": false,
+        "default": 1
+      },
+      "byWeekday": {
+        "type": "array",
+        "maxItems": 7,
+        "items": {
+          "type": "integer",
+          "minimum": 0,
+          "exclusiveMinimum": false,
+          "maximum": 6,
+          "exclusiveMaximum": false
+        },
+        "default": []
+      },
+      "count": {
+        "type": "integer",
+        "minimum": 1,
+        "exclusiveMinimum": false,
+        "maximum": 1000,
+        "exclusiveMaximum": false,
+        "nullable": true
+      },
+      "untilLocal": {
+        "type": "string",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}:\\d{2}(?::\\d{2})?)?$",
+        "nullable": true
+      },
+      "reminderOffsetsMs": {
+        "type": "array",
+        "maxItems": 10,
+        "items": {
+          "type": "integer",
+          "minimum": 0,
+          "exclusiveMinimum": false,
+          "maximum": 2592000000,
+          "exclusiveMaximum": false
+        },
+        "default": []
+      },
+      "projectId": {
+        "type": "string",
+        "format": "uuid",
+        "nullable": true
+      }
+    },
+    "required": [
+      "title",
+      "startLocal",
+      "timezone"
+    ]
+  },
   "CreateGoalDto": {
     "type": "object",
     "properties": {
@@ -2108,6 +2223,28 @@ export const schemas: Record<string, unknown> = {
       "seen"
     ]
   },
+  "MoveOccurrenceDto": {
+    "type": "object",
+    "properties": {
+      "startLocal": {
+        "type": "string",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}:\\d{2}(?::\\d{2})?)?$"
+      },
+      "durationMinutes": {
+        "type": "integer",
+        "minimum": 0,
+        "exclusiveMinimum": false,
+        "maximum": 527040,
+        "exclusiveMaximum": false
+      },
+      "title": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300,
+        "nullable": true
+      }
+    }
+  },
   "MoveTaskDto": {
     "type": "object",
     "properties": {
@@ -2791,6 +2928,109 @@ export const schemas: Record<string, unknown> = {
         "minimum": 0,
         "exclusiveMinimum": false,
         "default": 0
+      }
+    }
+  },
+  "UpdateEventDto": {
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 300
+      },
+      "description": {
+        "type": "string",
+        "maxLength": 2000,
+        "nullable": true
+      },
+      "location": {
+        "type": "string",
+        "maxLength": 300,
+        "nullable": true
+      },
+      "startLocal": {
+        "type": "string",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}:\\d{2}(?::\\d{2})?)?$"
+      },
+      "durationMinutes": {
+        "type": "integer",
+        "minimum": 0,
+        "exclusiveMinimum": false,
+        "maximum": 527040,
+        "exclusiveMaximum": false
+      },
+      "timezone": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64
+      },
+      "allDay": {
+        "type": "boolean"
+      },
+      "status": {
+        "type": "string",
+        "enum": [
+          "confirmed",
+          "tentative"
+        ]
+      },
+      "frequency": {
+        "type": "string",
+        "enum": [
+          "none",
+          "daily",
+          "weekly",
+          "monthly",
+          "yearly"
+        ]
+      },
+      "interval": {
+        "type": "integer",
+        "minimum": 1,
+        "exclusiveMinimum": false,
+        "maximum": 1000,
+        "exclusiveMaximum": false
+      },
+      "byWeekday": {
+        "type": "array",
+        "maxItems": 7,
+        "items": {
+          "type": "integer",
+          "minimum": 0,
+          "exclusiveMinimum": false,
+          "maximum": 6,
+          "exclusiveMaximum": false
+        }
+      },
+      "count": {
+        "type": "integer",
+        "minimum": 1,
+        "exclusiveMinimum": false,
+        "maximum": 1000,
+        "exclusiveMaximum": false,
+        "nullable": true
+      },
+      "untilLocal": {
+        "type": "string",
+        "pattern": "^\\d{4}-\\d{2}-\\d{2}(?:[T ]\\d{2}:\\d{2}(?::\\d{2})?)?$",
+        "nullable": true
+      },
+      "reminderOffsetsMs": {
+        "type": "array",
+        "maxItems": 10,
+        "items": {
+          "type": "integer",
+          "minimum": 0,
+          "exclusiveMinimum": false,
+          "maximum": 2592000000,
+          "exclusiveMaximum": false
+        }
+      },
+      "projectId": {
+        "type": "string",
+        "format": "uuid",
+        "nullable": true
       }
     }
   },
