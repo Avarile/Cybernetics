@@ -85,7 +85,7 @@ export class ContactsCategoryAddCommand extends CommandRunner {
     return false;
   }
 
-  @Option({ flags: '--key <key>', description: 'Lowercase slug key' })
+  @Option({ flags: '--key <key>', description: 'Lowercase slug key (optional; derived from --name)' })
   parseKey(v: string): string {
     return v;
   }

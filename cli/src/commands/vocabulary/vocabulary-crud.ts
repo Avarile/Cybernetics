@@ -147,7 +147,7 @@ export async function runVocabularyAdd(
 
   if (!wantsEditor && !fieldFlagsGiven) {
     throw new UsageError(
-      'No fields given and --no-edit forbids the editor. Pass --key and --name (and others), or drop --no-edit.',
+      'No fields given and --no-edit forbids the editor. Pass --name (and others), or drop --no-edit.',
     );
   }
 
@@ -162,16 +162,24 @@ export async function runVocabularyAdd(
       initial,
       filetype: 'md',
       submit: async (doc) => {
-        await create({ ...doc.fields });
+        // The template renders `key` commented out (the API no longer marks it
+        // required), but an admin who uncomments and leaves it blank means
+        // "derive from name" -- posting `''` would just fail the API's min(1).
+        const fields = { ...doc.fields };
+        if (typeof fields.key === 'string' && fields.key.trim() === '') {
+          delete fields.key;
+        }
+        await create(fields);
       },
     });
     return;
   }
 
-  if (options.key === undefined) throw new UsageError('--key is required.');
   if (options.name === undefined) throw new UsageError('--name is required.');
 
-  const dto: Record<string, unknown> = { key: options.key, name: options.name };
+  // `key` is optional: omitted, the API derives it from `name`.
+  const dto: Record<string, unknown> = { name: options.name };
+  if (options.key !== undefined) dto.key = options.key;
   if (options.description !== undefined) dto.description = options.description;
   if (options.sortOrder !== undefined) dto.sortOrder = options.sortOrder;
 

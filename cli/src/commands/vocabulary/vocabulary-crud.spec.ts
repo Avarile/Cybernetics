@@ -165,11 +165,10 @@ describe('runVocabularyAdd', () => {
     expect(editorRun).not.toHaveBeenCalled();
   });
 
-  it('requires --key when using flags', async () => {
-    await expect(
-      runVocabularyAdd(FAKE_CONFIG, settings, clients, editor, { name: 'Gadget', edit: false }),
-    ).rejects.toThrow(UsageError);
-    expect(post).not.toHaveBeenCalled();
+  it('omits key entirely when only --name is given, leaving the API to derive it', async () => {
+    await runVocabularyAdd(FAKE_CONFIG, settings, clients, editor, { name: 'Gadget', edit: false });
+
+    expect(post).toHaveBeenCalledWith('/fake-vocabulary/widgets', { name: 'Gadget' });
   });
 
   it('requires --name when using flags', async () => {
@@ -187,6 +186,17 @@ describe('runVocabularyAdd', () => {
     await runVocabularyAdd(FAKE_CONFIG, settings, clients, editor, {});
 
     expect(post).toHaveBeenCalledWith('/fake-vocabulary/widgets', { key: 'gadget', name: 'Gadget' });
+  });
+
+  it('drops a blank key from the editor buffer rather than posting an empty string', async () => {
+    // `key: ''` would fail the API's min(1); absent, the API derives it.
+    editorRun.mockImplementation(async (opts: EditSessionOptions) => {
+      await opts.submit({ fields: { key: '   ', name: 'Gadget' }, body: '' });
+    });
+
+    await runVocabularyAdd(FAKE_CONFIG, settings, clients, editor, {});
+
+    expect(post).toHaveBeenCalledWith('/fake-vocabulary/widgets', { name: 'Gadget' });
   });
 });
 
