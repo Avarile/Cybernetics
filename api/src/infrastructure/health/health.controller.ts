@@ -13,6 +13,7 @@ import {
   type HealthCheckResult,
 } from '@nestjs/terminus';
 import type { AppConfig } from '../../config/configurations/app.config';
+import { BUILD_INFO } from '../../version';
 import { Public } from '../../common/decorators/public.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { DatabaseHealthIndicator } from './database.health';
@@ -94,10 +95,32 @@ export class HealthController {
   @Roles('admin')
   @Get()
   @HealthCheck()
-  check(
+  async check(
     @Res({ passthrough: true }) res: ResponseLike,
   ): Promise<HealthCheckResult> {
-    return this.runDependencyChecks(res, { includeHeap: true });
+    return this.withBuildInfo(
+      await this.runDependencyChecks(res, { includeHeap: true }),
+    );
+  }
+
+  /**
+   * Attach build identity to the report.
+   *
+   * "Which build is this?" is the first question of most incidents, and the
+   * answer otherwise lives only in the orchestrator. It rides on the admin
+   * endpoint and not on the public probes on purpose: those deliberately tell
+   * an anonymous caller nothing but up/down, and a version number is precisely
+   * where CVE-matching starts. It is attached after the checks rather than
+   * registered as an indicator because it cannot fail, and anything passed to
+   * `HealthCheckService.check` can drag the overall status down with it.
+   */
+  private withBuildInfo(result: HealthCheckResult): HealthCheckResult {
+    const build = { status: 'up', ...BUILD_INFO };
+    return {
+      ...result,
+      info: { ...result.info, build },
+      details: { ...result.details, build },
+    } as HealthCheckResult;
   }
 
   /**

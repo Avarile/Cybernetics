@@ -1,4 +1,5 @@
 import { ServiceUnavailableException } from '@nestjs/common';
+import { GIT_SHA, VERSION } from '../../version';
 import { HealthController } from './health.controller';
 
 const HEAP_THRESHOLD = 1_073_741_824;
@@ -103,6 +104,15 @@ describe('HealthController', () => {
       expect(JSON.stringify(out)).not.toContain('ECONNREFUSED');
       expect(JSON.stringify(out)).not.toContain('10.0.0.5');
     });
+
+    // Same rule applied to build identity: a version number is where
+    // CVE-matching starts, so it rides on the admin endpoint only.
+    it('keeps the build identity off the public probe', async () => {
+      const { controller, res } = make(healthy);
+      const out = await controller.ready(res as never);
+      expect(out.info).not.toHaveProperty('build');
+      expect(out.details).not.toHaveProperty('build');
+    });
   });
 
   describe('check (admin)', () => {
@@ -120,6 +130,26 @@ describe('HealthController', () => {
       const out = await controller.check(res as never);
       expect(res.status).toHaveBeenCalledWith(503);
       expect(JSON.stringify(out)).toContain('ECONNREFUSED');
+    });
+
+    it('reports which build is running', async () => {
+      const { controller, res } = make(healthy);
+      const out = await controller.check(res as never);
+      const build = { status: 'up', version: VERSION, sha: GIT_SHA };
+      expect(out.details.build).toEqual(build);
+      expect(out.info?.build).toEqual(build);
+      // Attaching it leaves the indicators' own report untouched.
+      expect(out.details.database).toEqual({ status: 'up' });
+      expect(out.status).toBe('ok');
+    });
+
+    // Which build is running matters most when something is broken, so it has
+    // to survive the 503 path too.
+    it('reports the build on a failing report as well', async () => {
+      const { controller, res } = make(unhealthy, true);
+      const out = await controller.check(res as never);
+      expect(out.details.build).toMatchObject({ version: VERSION });
+      expect(out.status).toBe('error');
     });
 
     // Anything that is not Terminus reporting "unhealthy" is a real fault and
