@@ -76,6 +76,35 @@ export function convert(amount: string, rate: string): string {
   return multiply(amount, rate);
 }
 
+/**
+ * Logged minutes as decimal hours, at the column's scale.
+ *
+ * `(minutes / 60).toFixed(4)` was the one arithmetic path in the billing chain
+ * that went through IEEE-754 — 100 minutes produced 1.6666666666666667 before
+ * an engine-rounded `toFixed` cut it down. This divides in BigInt with the same
+ * half-up rule as `multiply`, so a billed hour is derived the way every other
+ * figure on the invoice is.
+ */
+export function minutesToHours(minutes: number): string {
+  if (!Number.isInteger(minutes)) {
+    throw new Error(`"${minutes}" is not a whole number of minutes`);
+  }
+  return fromUnits(roundedDivide(BigInt(minutes) * FACTOR, 60n));
+}
+
+/**
+ * `part` as a whole-number percentage of `whole`, rounded half-up.
+ *
+ * Budget alerting compared `Number(spentAmount)` against `Number(amount)`,
+ * which is the same float policy violation the rest of this module exists to
+ * prevent. Returns 0 for a non-positive `whole` rather than Infinity or NaN.
+ */
+export function percentageOf(part: string, whole: string): number {
+  const denominator = toUnits(whole);
+  if (denominator <= 0n) return 0;
+  return Number(roundedDivide(toUnits(part) * 100n, denominator));
+}
+
 export function isNegative(value: string): boolean {
   return toUnits(value) < 0n;
 }

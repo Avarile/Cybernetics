@@ -25,6 +25,7 @@ import { KnowledgeVocabularyService } from './knowledge-vocabulary.service';
 export class KnowledgeVocabularyController {
   constructor(private readonly vocabulary: KnowledgeVocabularyService) {}
 
+  // Knowledge Types
   @ApiOperation({ summary: 'List knowledge types' })
   @Get('types')
   @Roles('user', 'admin', 'agent')
@@ -57,6 +58,7 @@ export class KnowledgeVocabularyController {
     await this.vocabulary.removeType(id);
   }
 
+  // Knowledge Categories
   @ApiOperation({ summary: 'List knowledge categories' })
   @Get('categories')
   @Roles('user', 'admin', 'agent')

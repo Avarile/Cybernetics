@@ -3,29 +3,31 @@ import { userIdOrNull, type Principal } from '../../common/principal';
 import {
   DRIZZLE,
   type DrizzleDB,
+  type DrizzleExecutor,
 } from '../../infrastructure/database/drizzle.constants';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
-import type {
-  InvoiceRow,
-  PaymentRow,
-} from '../../infrastructure/database/schema/finance.schema';
+import type { InvoiceRow } from '../../infrastructure/database/schema/finance.schema';
 import { ContactCompanyService } from '../contacts/contact-company.service';
 import { ContactService } from '../contacts/contact.service';
 import { ProjectLinkRepository } from '../projects/project-link.repository';
+import { ProjectLinkService } from '../projects/project-link.service';
 import { ActivityService } from '../shared/activity.service';
 import type {
   AddLineItemDto,
   BillTimeDto,
   CreateInvoiceDto,
   ListInvoicesDto,
-  RecordPaymentDto,
 } from './dto/finance.dto';
 import { InvoiceRepository } from './invoice.repository';
-import { LedgerRepository } from './ledger.repository';
-import { add, compare, multiply, percentOf, sum } from './money.util';
-
-/** Minutes to hours, for billing logged time. */
-const MINUTES_PER_HOUR = 60;
+import { LedgerService } from './ledger.service';
+import {
+  add,
+  compare,
+  minutesToHours,
+  multiply,
+  percentOf,
+  sum,
+} from './money.util';
 
 @Injectable()
 export class InvoiceService {
@@ -34,8 +36,15 @@ export class InvoiceService {
   constructor(
     @Inject(DRIZZLE) private readonly db: DrizzleDB,
     private readonly repo: InvoiceRepository,
-    private readonly ledger: LedgerRepository,
+    // `LedgerService`, not `LedgerRepository`. Posting straight to the
+    // repository skipped `applyEffects`, so a recorded payment inserted a
+    // `cleared` income row that never moved the account balance.
+    private readonly ledger: LedgerService,
+    // The repository for the writes that must join this module's transactions
+    // (`markBilled`, `releaseBilled`); the service for every READ, because that
+    // is where project membership is enforced.
     private readonly timeEntries: ProjectLinkRepository,
+    private readonly projectLinks: ProjectLinkService,
     private readonly contacts: ContactService,
     private readonly companies: ContactCompanyService,
     private readonly activity: ActivityService,
@@ -101,21 +110,32 @@ export class InvoiceService {
     const amount = multiply(dto.unitPrice, dto.quantity);
     const taxAmount = percentOf(amount, dto.taxRatePct);
 
-    const item = await this.repo.addLineItem({
-      invoiceId,
-      description: dto.description,
-      quantity: dto.quantity,
-      unit: dto.unit,
-      unitPrice: dto.unitPrice,
-      taxRatePct: dto.taxRatePct,
-      // Stored, not derived on read: rounding must not vary by reader.
-      amount,
-      taxAmount,
-      total: add(amount, taxAmount),
-      taskId: dto.taskId,
-      projectId: dto.projectId ?? invoice.projectId,
+    // The line and the header totals it changes commit together. `recalculate`
+    // ran after the caller's transaction closed, on the pool: if it threw, the
+    // line existed against stale totals, and concurrent adds could interleave
+    // and leave the subtotal short by a line.
+    const item = await this.db.transaction(async (tx) => {
+      const created = await this.repo.addLineItem(
+        {
+          invoiceId,
+          description: dto.description,
+          quantity: dto.quantity,
+          unit: dto.unit,
+          unitPrice: dto.unitPrice,
+          taxRatePct: dto.taxRatePct,
+          // Stored, not derived on read: rounding must not vary by reader.
+          amount,
+          taxAmount,
+          total: add(amount, taxAmount),
+          taskId: dto.taskId,
+          projectId: dto.projectId ?? invoice.projectId,
+        },
+        tx,
+      );
+      await this.recalculate(invoiceId, tx);
+      return created;
     });
-    await this.recalculate(invoiceId);
+
     await this.activity.recordSafe({
       principal,
       entityType: 'invoice',
@@ -125,11 +145,29 @@ export class InvoiceService {
     return item;
   }
 
+  /**
+   * Remove a draft line, returning any time it billed to the unbilled pool.
+   *
+   * `unbilledFor` treats `invoice_line_item_id IS NULL` as the double-billing
+   * lock, so hours billed to a deleted line stayed stamped with a soft-deleted
+   * line id: invisible to every future invoice, unbillable for good. All three
+   * writes share one transaction — a released entry whose line still exists is
+   * the double-billing the lock exists to stop.
+   */
   async removeLineItem(invoiceId: string, itemId: string): Promise<void> {
     await this.requireDraft(invoiceId);
-    const removed = await this.repo.removeLineItem(itemId);
-    if (!removed) throw this.errors.create(ErrorCode.NOT_FOUND);
-    await this.recalculate(invoiceId);
+    const released = await this.db.transaction(async (tx) => {
+      const removed = await this.repo.removeLineItem(itemId, tx);
+      if (!removed) throw this.errors.create(ErrorCode.NOT_FOUND);
+      const ids = await this.timeEntries.releaseBilled(itemId, tx);
+      await this.recalculate(invoiceId, tx);
+      return ids;
+    });
+    if (released.length > 0) {
+      this.logger.log(
+        `Released ${released.length} time entr(ies) from invoice line ${itemId}`,
+      );
+    }
   }
 
   /**
@@ -142,7 +180,14 @@ export class InvoiceService {
    */
   async billTime(invoiceId: string, dto: BillTimeDto, principal: Principal) {
     const invoice = await this.requireDraft(invoiceId);
-    const available = await this.timeEntries.unbilledFor(dto.projectId);
+    // Through `ProjectLinkService`, which enforces project membership. Reading
+    // the repository directly let anyone holding `finance.invoice.manage` bill
+    // hours from a project they were not a member of, because the repository
+    // never sees a principal.
+    const available = await this.projectLinks.unbilledFor(
+      dto.projectId,
+      principal,
+    );
     const byId = new Map(available.map((e) => [e.id, e]));
 
     const selected = dto.timeEntryIds.map((id) => {
@@ -158,7 +203,9 @@ export class InvoiceService {
     });
 
     const totalMinutes = selected.reduce((acc, e) => acc + e.minutes, 0);
-    const hours = (totalMinutes / MINUTES_PER_HOUR).toFixed(4);
+    // BigInt division, not `(minutes / 60).toFixed(4)`. This was the one
+    // arithmetic path in the billing chain that went through a float.
+    const hours = minutesToHours(totalMinutes);
     const amount = multiply(dto.unitPrice, hours);
     const taxAmount = percentOf(amount, dto.taxRatePct);
 
@@ -194,10 +241,10 @@ export class InvoiceService {
             'Some time entries were billed by another invoice; nothing was changed',
         });
       }
+      await this.recalculate(invoiceId, tx);
       return created;
     });
 
-    await this.recalculate(invoiceId);
     await this.activity.recordSafe({
       principal,
       entityType: 'invoice',
@@ -227,12 +274,23 @@ export class InvoiceService {
     const row = await this.db.transaction(async (tx) => {
       const prefix = `INV-${new Date(invoice.issueDate).getFullYear()}`;
       const number = await this.repo.nextNumber(prefix, tx);
-      const updated = await this.repo.update(
+      // Conditional on the invoice still being a draft. `requireDraft` ran
+      // before the transaction opened, so two concurrent issues both passed it,
+      // both took a number under the advisory lock, and the second overwrote
+      // the first — the number the loser consumed then existed nowhere, which
+      // is the sequence gap the lock is there to prevent. Failing here rolls
+      // the transaction back and hands the number straight back.
+      const updated = await this.repo.updateFromStatus(
         id,
+        'draft',
         { number, status: 'sent', sentAt: new Date() },
         tx,
       );
-      if (!updated) throw this.errors.create(ErrorCode.NOT_FOUND);
+      if (!updated) {
+        throw this.errors.create(ErrorCode.CONFLICT, {
+          message: 'The invoice was issued by another request',
+        });
+      }
       return updated;
     });
 
@@ -247,18 +305,42 @@ export class InvoiceService {
     return row;
   }
 
+  /**
+   * Void an invoice that has taken no money.
+   *
+   * The old guard excluded only `paid`, so a `partially_paid` invoice voided
+   * cleanly while its payments and their `cleared` income stayed posted: the
+   * balance kept the money for an invoice that officially did not happen. Any
+   * settled payment now blocks the void.
+   *
+   * Auto-reversing the postings would be wrong — this module corrects money
+   * with explicit reversing entries, never as a side effect of a status change.
+   */
   async void(id: string, principal: Principal): Promise<InvoiceRow> {
     const invoice = await this.get(id);
+    if (invoice.status === 'void') return invoice;
     if (invoice.status === 'paid') {
       throw this.errors.create(ErrorCode.CONFLICT, {
         message: 'A paid invoice cannot be voided; refund it instead',
       });
     }
-    const row = await this.repo.update(id, {
+    if (compare(invoice.amountPaid, '0') > 0) {
+      throw this.errors.create(ErrorCode.CONFLICT, {
+        message:
+          `Invoice ${invoice.number} has ${invoice.amountPaid} ${invoice.currency} ` +
+          'recorded against it. Reverse those payments before voiding it, or ' +
+          'the ledger keeps money for an invoice that does not exist.',
+      });
+    }
+    const row = await this.repo.updateFromStatus(id, invoice.status, {
       status: 'void',
       voidedAt: new Date(),
     });
-    if (!row) throw this.errors.create(ErrorCode.NOT_FOUND);
+    if (!row) {
+      throw this.errors.create(ErrorCode.CONFLICT, {
+        message: 'The invoice changed while it was being voided',
+      });
+    }
     await this.activity.recordSafe({
       principal,
       entityType: 'invoice',
@@ -268,111 +350,35 @@ export class InvoiceService {
     return row;
   }
 
-  /**
-   * Record a payment, optionally posting the matching ledger entry.
-   *
-   * The payment, the invoice's paid total and the ledger row all move together:
-   * an invoice that says paid with nothing in the ledger behind it is how the
-   * two halves of a finance module drift apart.
-   */
-  async recordPayment(
-    invoiceId: string,
-    dto: RecordPaymentDto,
-    principal: Principal,
-  ): Promise<PaymentRow> {
-    const invoice = await this.get(invoiceId);
-    if (invoice.status === 'draft' || invoice.status === 'void') {
-      throw this.errors.create(ErrorCode.CONFLICT, {
-        message: `Cannot pay a ${invoice.status} invoice`,
-      });
-    }
-    if (dto.currency !== invoice.currency) {
-      throw this.errors.validation([
-        {
-          path: 'currency',
-          message: `Invoice is in ${invoice.currency}`,
-        },
-      ]);
-    }
-
-    const payment = await this.db.transaction(async (tx) => {
-      let transactionId: string | null = null;
-      if (dto.accountId) {
-        const posted = await this.ledger.create(
-          {
-            kind: 'income',
-            occurredOn: dto.paidAt.toISOString().slice(0, 10),
-            amount: dto.amount,
-            currency: dto.currency,
-            accountId: dto.accountId,
-            projectId: invoice.projectId,
-            contactId: invoice.contactId,
-            companyId: invoice.companyId,
-            invoiceId,
-            description: `Payment for ${invoice.number}`,
-            reference: dto.reference,
-            status: 'cleared',
-            createdBy: userIdOrNull(principal),
-          },
-          tx,
-        );
-        transactionId = posted.id;
-      }
-
-      const created = await this.repo.addPayment(
-        {
-          invoiceId,
-          transactionId,
-          amount: dto.amount,
-          currency: dto.currency,
-          paidAt: dto.paidAt,
-          method: dto.method,
-          reference: dto.reference,
-          recordedBy: userIdOrNull(principal),
-        },
-        tx,
-      );
-
-      const paid = add(invoice.amountPaid, dto.amount);
-      const settled = compare(paid, invoice.total) >= 0;
-      await this.repo.update(
-        invoiceId,
-        {
-          amountPaid: paid,
-          status: settled ? 'paid' : 'partially_paid',
-          ...(settled ? { paidAt: dto.paidAt } : {}),
-        },
-        tx,
-      );
-      return created;
-    });
-
-    await this.activity.recordSafe({
-      principal,
-      entityType: 'invoice',
-      entityId: invoiceId,
-      projectId: invoice.projectId,
-      action: 'finance.payment_recorded',
-      summary: `${dto.amount} ${dto.currency}`,
-    });
-    return payment;
-  }
-
   /** Invoices past due — the reminder sweep's input. */
   overdue() {
     return this.repo.overdue(new Date().toISOString().slice(0, 10));
   }
 
-  /** Recompute the header totals from the lines, exactly. */
-  private async recalculate(invoiceId: string): Promise<void> {
-    const items = await this.repo.lineItems(invoiceId);
-    const subtotal = sum(items.map((i) => i.amount));
-    const taxTotal = sum(items.map((i) => i.taxAmount));
-    await this.repo.update(invoiceId, {
-      subtotal,
-      taxTotal,
-      total: add(subtotal, taxTotal),
-    });
+  /**
+   * Recompute the header totals from the lines, exactly.
+   *
+   * Takes the caller's executor: read and write share the transaction of the
+   * line change that triggered them.
+   *
+   * `total` is summed from the stored per-line totals rather than derived as
+   * `subtotal + taxTotal` — deriving it agrees with the lines by construction,
+   * so it could never reveal a line whose own total had drifted.
+   */
+  private async recalculate(
+    invoiceId: string,
+    executor: DrizzleExecutor,
+  ): Promise<void> {
+    const items = await this.repo.lineItems(invoiceId, executor);
+    await this.repo.update(
+      invoiceId,
+      {
+        subtotal: sum(items.map((i) => i.amount)),
+        taxTotal: sum(items.map((i) => i.taxAmount)),
+        total: sum(items.map((i) => i.total)),
+      },
+      executor,
+    );
   }
 
   private async requireDraft(id: string): Promise<InvoiceRow> {

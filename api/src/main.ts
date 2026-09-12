@@ -71,7 +71,14 @@ async function bootstrap(): Promise<void> {
   const port = appCfg.port;
   await app.listen(port);
 
-  app.get(Logger).log(`Application listening on port ${port}`, 'Bootstrap');
+  app.get(Logger).debug(
+    `
+    Application listening on port ${port}
+    OPENAPI(Scalar) is live at /reference
+    OPENAPI JSON is live at /openapi.json
+    `,
+    'Bootstrap',
+  );
 }
 
 void bootstrap();

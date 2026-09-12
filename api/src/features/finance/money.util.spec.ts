@@ -1,3 +1,4 @@
+import { minutesToHours, percentageOf } from './money.util';
 import {
   add,
   compare,
@@ -107,5 +108,48 @@ describe('money arithmetic', () => {
       expect(compare('9.99', '10.00')).toBe(-1);
       expect(compare('10.0000', '10')).toBe(0);
     });
+  });
+});
+
+describe('minutesToHours', () => {
+  it('divides exactly where a float could not', () => {
+    // `(100 / 60).toFixed(4)` went through 1.6666666666666667 and then an
+    // engine-rounded toFixed — the one arithmetic path in the billing chain
+    // that escaped the BigInt helpers.
+    expect(minutesToHours(100)).toBe('1.6667');
+  });
+
+  it('keeps whole hours whole', () => {
+    expect(minutesToHours(60)).toBe('1.0000');
+    expect(minutesToHours(480)).toBe('8.0000');
+    expect(minutesToHours(0)).toBe('0.0000');
+  });
+
+  it('rounds half up at the fourth place', () => {
+    // 10 minutes is 0.16666... hours; half-up at scale 4 gives 0.1667.
+    expect(minutesToHours(10)).toBe('0.1667');
+  });
+
+  it('refuses a fractional minute rather than silently truncating', () => {
+    expect(() => minutesToHours(1.5)).toThrow(/whole number of minutes/);
+  });
+});
+
+describe('percentageOf', () => {
+  it('computes a used percentage without floats', () => {
+    expect(percentageOf('2650.5000', '3000.0000')).toBe(88);
+    expect(percentageOf('1400.0000', '1000.0000')).toBe(140);
+  });
+
+  it('returns zero for a non-positive cap instead of NaN or Infinity', () => {
+    // `Number(spent) / Number(0)` produced Infinity, which then compared true
+    // against every alert threshold.
+    expect(percentageOf('10.0000', '0.0000')).toBe(0);
+    expect(percentageOf('10.0000', '-5.0000')).toBe(0);
+  });
+
+  it('rounds half up', () => {
+    expect(percentageOf('1.0000', '3.0000')).toBe(33);
+    expect(percentageOf('2.0000', '3.0000')).toBe(67);
   });
 });

@@ -1,5 +1,6 @@
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import type { Principal } from '../../common/principal';
+import { PermissionResolver } from './permission-resolver.service';
 import { RbacService } from './rbac.service';
 
 const admin: Principal = { kind: 'user', userId: 'a1', role: 'admin' };
@@ -8,6 +9,7 @@ describe('RbacService — per-user permission overrides', () => {
   let repo: any;
   let cache: any;
   let activity: any;
+  let resolver: PermissionResolver;
   let rbac: RbacService;
 
   beforeEach(() => {
@@ -22,10 +24,30 @@ describe('RbacService — per-user permission overrides', () => {
       overridesDetailForUser: jest.fn(async () => []),
       permissionKeysForUser: jest.fn(async () => ['project.read']),
       overridesForUser: jest.fn(async () => []),
+      findLiveUserRole: jest.fn(async () => 'user'),
+      allPermissionKeys: jest.fn(async () => [
+        'project.read',
+        'finance.read',
+        'rbac.manage',
+      ]),
+      permissionKeysForRoleKey: jest.fn(async () => []),
     };
     cache = { invalidateAll: jest.fn(async () => undefined) };
     activity = { recordSafe: jest.fn(async () => undefined) };
-    rbac = new RbacService(repo, cache, activity, new ExceptionService());
+    // A REAL resolver over the mocked repo: `effectiveFor` delegates to it, and
+    // the point of that delegation is that the report and the guard run the
+    // same code. Stubbing it here would test the delegation and not the answer.
+    resolver = new PermissionResolver(repo, {
+      get: jest.fn(async () => null),
+      set: jest.fn(async () => undefined),
+    } as any);
+    rbac = new RbacService(
+      repo,
+      cache,
+      activity,
+      new ExceptionService(),
+      resolver,
+    );
   });
 
   it('grants an override and invalidates the permission cache', async () => {
@@ -118,5 +140,27 @@ describe('RbacService — per-user permission overrides', () => {
       { key: 'finance.read', effect: 'deny' },
     ]);
     await expect(rbac.effectiveFor('u1')).resolves.toEqual(['project.read']);
+  });
+
+  it('reports an admin as holding every permission, not an empty set', async () => {
+    // The regression this endpoint existed to have: `effectiveFor` used to walk
+    // the grant tables directly, so an admin — whose capabilities come from
+    // `users.role` and not from any `user_roles` row — was reported as holding
+    // nothing, while the guard was letting them do everything.
+    repo.findLiveUserRole.mockResolvedValueOnce('admin');
+    await expect(rbac.effectiveFor('a1')).resolves.toEqual([
+      'finance.read',
+      'project.read',
+      'rbac.manage',
+    ]);
+    // Resolved by short-circuit, not by reading grants.
+    expect(repo.permissionKeysForUser).not.toHaveBeenCalled();
+  });
+
+  it('404s for a user that does not exist', async () => {
+    repo.findLiveUserRole.mockResolvedValueOnce(null);
+    await expect(rbac.effectiveFor('nope')).rejects.toMatchObject({
+      code: ErrorCode.USER_NOT_FOUND,
+    });
   });
 });

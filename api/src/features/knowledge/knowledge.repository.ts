@@ -25,6 +25,12 @@ import {
   type NewKnowledgeRow,
 } from '../../infrastructure/database/schema/knowledge.schema';
 
+/**
+ * Assigns `updated_at` to itself, suppressing `baseColumns.updatedAt`'s
+ * `$onUpdate` for writes that are not edits. See `bumpViewCount`.
+ */
+const KEEP_UPDATED_AT = sql`${knowledge.updatedAt}`;
+
 export interface KnowledgeQuery {
   search?: string;
   status?: KnowledgeRow['status'];
@@ -122,10 +128,25 @@ export class KnowledgeRepository extends BaseRepository<typeof knowledge> {
       .where(eq(knowledge.id, id));
   }
 
+  /**
+   * Increment the view counter without touching `updatedAt`.
+   *
+   * `baseColumns.updatedAt` carries `$onUpdate`, which Drizzle applies to any
+   * column absent from `.set()`. So this — called from `KnowledgeService.get`,
+   * on a pure read — used to restamp the record's modification time. `list()`
+   * orders by `desc(updatedAt)`, so simply opening a record floated it to the
+   * top of the listing as though it had been edited, and the body returned to
+   * the caller carried the pre-bump timestamp, i.e. already stale. Assigning
+   * the column to itself is a no-op write that suppresses `$onUpdate`
+   * deterministically — the same guard `search_records` uses.
+   */
   async bumpViewCount(id: string): Promise<void> {
     await this.db
       .update(knowledge)
-      .set({ viewCount: sql`${knowledge.viewCount} + 1` })
+      .set({
+        viewCount: sql`${knowledge.viewCount} + 1`,
+        updatedAt: KEEP_UPDATED_AT,
+      })
       .where(eq(knowledge.id, id));
   }
 

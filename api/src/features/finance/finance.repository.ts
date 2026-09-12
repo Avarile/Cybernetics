@@ -235,23 +235,42 @@ export class FinanceRepository {
   }
 
   /**
-   * Budgets a transaction falls inside — same project, category and period.
+   * Budgets a posting falls under — same project, category, period AND currency.
    *
    * Used to keep `spent_amount` current. A transaction can match more than one
    * budget (a project budget and a category budget), and both should move.
+   *
+   * Takes an executor so the read runs inside the same transaction as the spend
+   * adjustment it feeds — reading on the pool while writing in a transaction
+   * meant this saw a different snapshot than the `adjustBudgetSpend` calls it
+   * decides.
+   *
+   * The currency predicate is not optional tidiness. Without it a 500.0000 USD
+   * expense was added to an AUD budget as 500.0000, because `spent_amount` has
+   * no unit of its own — it inherits the budget's, and the posting's was never
+   * compared against it.
+   *
+   * `exceeded` is matched alongside `active`: a budget that has passed its cap
+   * must keep accruing, or the first overspend freezes the figure the alert is
+   * computed from.
    */
-  async budgetsMatching(input: {
-    projectId: string | null;
-    categoryId: string | null;
-    occurredOn: string;
-  }): Promise<BudgetRow[]> {
-    return this.db
+  async budgetsMatching(
+    input: {
+      projectId: string | null;
+      categoryId: string | null;
+      currency: string;
+      occurredOn: string;
+    },
+    executor: DrizzleExecutor = this.db,
+  ): Promise<BudgetRow[]> {
+    return executor
       .select()
       .from(budgets)
       .where(
         and(
           eq(budgets.isDeleted, false),
-          eq(budgets.status, 'active'),
+          sql`${budgets.status} IN ('active', 'exceeded')`,
+          eq(budgets.currency, input.currency),
           lte(budgets.periodStart, input.occurredOn),
           gte(budgets.periodEnd, input.occurredOn),
           input.projectId
@@ -264,6 +283,19 @@ export class FinanceRepository {
       );
   }
 
+  /**
+   * Move a budget's consumed total, and its status with it.
+   *
+   * Status is derived in the same statement as the amount rather than in a
+   * follow-up write: `budget_status` has had an `exceeded` member since the
+   * first migration and nothing ever wrote it, so a budget sat at 140% of its
+   * cap still reporting `active`. Computing it from `spent_amount + delta`
+   * means the two can never disagree, and a concurrent posting cannot land
+   * between the amount and the status.
+   *
+   * Only `active` and `exceeded` are re-derived — a `draft` or `closed` budget
+   * keeps whatever an operator set.
+   */
   async adjustBudgetSpend(
     id: string,
     delta: string,
@@ -271,8 +303,87 @@ export class FinanceRepository {
   ): Promise<void> {
     await executor
       .update(budgets)
-      .set({ spentAmount: sql`${budgets.spentAmount} + ${delta}::numeric` })
+      .set({
+        spentAmount: sql`${budgets.spentAmount} + ${delta}::numeric`,
+        // Cast explicitly rather than relying on the first branch's column
+        // reference to anchor the type — see the same CASE in
+        // `InvoiceRepository.applyPayment`, where there is no column branch and
+        // the untyped literals were rejected outright.
+        status: sql`
+          CASE
+            WHEN ${budgets.status} NOT IN ('active', 'exceeded') THEN ${budgets.status}
+            WHEN ${budgets.spentAmount} + ${delta}::numeric > ${budgets.amount} THEN 'exceeded'
+            ELSE 'active'
+          END::budget_status
+        `,
+      })
       .where(eq(budgets.id, id));
+  }
+
+  /**
+   * Spend already on the ledger for a budget's scope, at the moment it is made.
+   *
+   * `adjustBudgetSpend` only ever accrues forward from a posting, so a budget
+   * created after the money was spent started at 0.0000 and stayed wrong for
+   * its whole period — 7 of 36 budgets in the live dataset disagreed with the
+   * ledger this way, several reading zero against thousands of real spend.
+   * Seeding from the ledger makes the column mean the same thing regardless of
+   * when the budget was created.
+   *
+   * The predicates mirror `budgetsMatching` exactly, in the opposite direction:
+   * there, a posting finds its budgets; here, a budget finds its postings.
+   */
+  async spendForScope(input: {
+    projectId: string | null;
+    categoryId: string | null;
+    currency: string;
+    periodStart: string;
+    periodEnd: string;
+  }): Promise<string> {
+    const result = await this.db.execute<{ total: string }>(sql`
+      SELECT COALESCE(SUM(amount), 0)::text AS total
+      FROM transactions
+      WHERE is_deleted = false
+        AND kind = 'expense'
+        AND status IN ('cleared', 'reconciled')
+        AND currency = ${input.currency}
+        AND occurred_on BETWEEN ${input.periodStart} AND ${input.periodEnd}
+        AND ${
+          input.projectId
+            ? sql`project_id = ${input.projectId}`
+            : sql`TRUE /* a budget with no project matches every project */`
+        }
+        AND ${
+          input.categoryId
+            ? sql`category_id = ${input.categoryId}`
+            : sql`TRUE /* a budget with no category matches every category */`
+        }
+    `);
+    return result.rows[0]?.total ?? '0';
+  }
+
+  /**
+   * Budgets at or past their alert threshold, decided in SQL.
+   *
+   * This was a `Number(spentAmount) / Number(amount)` comparison over the first
+   * 500 budgets, which violated the module's no-floats policy, silently dropped
+   * budget 501, and evaluated closed budgets alongside live ones. Postgres
+   * compares the numerics exactly and applies the threshold as the predicate,
+   * so there is no page to fall off the end of.
+   */
+  async budgetsAtRisk(): Promise<BudgetRow[]> {
+    return this.db
+      .select()
+      .from(budgets)
+      .where(
+        and(
+          eq(budgets.isDeleted, false),
+          sql`${budgets.status} IN ('active', 'exceeded')`,
+          sql`${budgets.amount} > 0`,
+          sql`${budgets.spentAmount} * 100 >= ${budgets.amount} * ${budgets.alertThresholdPct}`,
+        ),
+      )
+      .orderBy(desc(budgets.periodStart));
   }
 
   /**

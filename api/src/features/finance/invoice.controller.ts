@@ -22,6 +22,7 @@ import {
   RecordPaymentDto,
 } from './dto/finance.dto';
 import { InvoiceService } from './invoice.service';
+import { PaymentService } from './payment.service';
 
 /**
  * Invoicing.
@@ -33,7 +34,10 @@ import { InvoiceService } from './invoice.service';
 @ApiTags('Finance')
 @Controller('invoices')
 export class InvoiceController {
-  constructor(private readonly invoices: InvoiceService) {}
+  constructor(
+    private readonly invoices: InvoiceService,
+    private readonly payments: PaymentService,
+  ) {}
 
   @ApiOperation({ summary: 'List invoices' })
   @Get()
@@ -134,6 +138,6 @@ export class InvoiceController {
     @Body() dto: RecordPaymentDto,
     @CurrentUser() principal: Principal,
   ) {
-    return this.invoices.recordPayment(id, dto, principal);
+    return this.payments.recordPayment(id, dto, principal);
   }
 }

@@ -153,6 +153,35 @@ export class ProjectRepository extends BaseRepository<typeof projects> {
 
   // --- members ---
 
+  /**
+   * One user's memberships across a batch of projects, keyed by project id.
+   *
+   * The listing path resolves access per row, and calling `membership` inside
+   * that loop issued one query per project on the page — up to 100 concurrent
+   * single-row selects against a pool of 20 that is shared with the queue
+   * workers and Mastra's store. One `inArray` instead, the same shape
+   * `KnowledgeAclRepository.grantsForMany` already uses.
+   */
+  async membershipsForMany(
+    projectIds: string[],
+    userId: string,
+  ): Promise<Map<string, ProjectMemberRow>> {
+    const byProject = new Map<string, ProjectMemberRow>();
+    if (projectIds.length === 0) return byProject;
+    const rows = await this.db
+      .select()
+      .from(projectMembers)
+      .where(
+        and(
+          inArray(projectMembers.projectId, projectIds),
+          eq(projectMembers.userId, userId),
+          eq(projectMembers.isDeleted, false),
+        ),
+      );
+    for (const row of rows) byProject.set(row.projectId, row);
+    return byProject;
+  }
+
   async membership(
     projectId: string,
     userId: string,

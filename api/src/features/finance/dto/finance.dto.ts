@@ -128,6 +128,22 @@ export const createBudgetSchema = z.object({
 
 export class CreateBudgetDto extends createZodDto(createBudgetSchema) {}
 
+/**
+ * Budget listing parameters.
+ *
+ * The route read `@Query('page')` and `@Query('limit')` as raw strings and
+ * passed them through `Number(...)`, so `?limit=abc` reached the repository as
+ * `NaN` and `?limit=1e9` was unbounded — the only list endpoint in the module
+ * without the caps the others get from their DTO.
+ */
+export const listBudgetsSchema = z.object({
+  projectId: z.string().uuid().optional(),
+  page: z.coerce.number().int().positive().default(1),
+  limit: z.coerce.number().int().positive().max(100).default(20),
+});
+
+export class ListBudgetsDto extends createZodDto(listBudgetsSchema) {}
+
 export const createRecurringSchema = z.object({
   name: z.string().min(1).max(150),
   kind: z.enum(TRANSACTION_KINDS),

@@ -250,4 +250,32 @@ export class ProjectLinkRepository {
       .returning({ id: timeEntries.id });
     return claimed.map((r) => r.id);
   }
+
+  /**
+   * Return every entry billed to a line item back to the unbilled pool.
+   *
+   * The counterpart to `markBilled`, and the reason removing an invoice line is
+   * not simply a delete. `unbilledFor` treats `invoice_line_item_id IS NULL` as
+   * the double-billing lock, so a line that was deleted without clearing the
+   * stamp took its hours with it: they stayed pointed at a soft-deleted row,
+   * invisible to every future invoice and unbillable forever.
+   *
+   * Returns the ids it released so the caller can report what came back.
+   */
+  async releaseBilled(
+    invoiceLineItemId: string,
+    executor: DrizzleExecutor = this.db,
+  ): Promise<string[]> {
+    const released = await executor
+      .update(timeEntries)
+      .set({ invoiceLineItemId: null })
+      .where(
+        and(
+          eq(timeEntries.invoiceLineItemId, invoiceLineItemId),
+          eq(timeEntries.isDeleted, false),
+        ),
+      )
+      .returning({ id: timeEntries.id });
+    return released.map((r) => r.id);
+  }
 }

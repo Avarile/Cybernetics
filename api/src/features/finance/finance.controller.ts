@@ -20,11 +20,13 @@ import {
   CreateBudgetDto,
   CreateRecurringDto,
   CreateTransactionDto,
+  ListBudgetsDto,
   ListTransactionsDto,
   ReportDto,
   UpsertFxRateDto,
   TRANSACTION_STATUSES,
 } from './dto/finance.dto';
+import { BudgetService } from './budget.service';
 import { FinanceRepository } from './finance.repository';
 import { LedgerService } from './ledger.service';
 import { RecurringService } from './recurring.service';
@@ -35,12 +37,22 @@ import { RecurringService } from './recurring.service';
  * Financial data is not row-scoped the way projects are: holding
  * `finance.read` is what grants access, and it is granted by role rather than
  * by membership.
+ *
+ * Every route here is `@Roles('user', 'admin')` and gated by its permission.
+ * `@Roles` matches the coarse `users.role` claim, NOT the RBAC role key, so
+ * narrowing a route to `@Roles('admin')` does not restrict it to privileged
+ * users — it excludes every non-admin regardless of what they hold. Three
+ * routes were written that way and made `finance.fx.manage` unreachable: the
+ * permission was seeded, granted to `finance_manager`, and could never be
+ * exercised by anyone, because a finance manager's `users.role` is `'user'`.
+ * The permission is the gate; the role list must stay wide enough to reach it.
  */
 @ApiTags('Finance')
 @Controller('finance')
 export class FinanceController {
   constructor(
     private readonly ledger: LedgerService,
+    private readonly budgetService: BudgetService,
     private readonly recurring: RecurringService,
     private readonly repo: FinanceRepository,
   ) {}
@@ -74,7 +86,7 @@ export class FinanceController {
 
   @ApiOperation({ summary: 'Record an exchange rate' })
   @Post('fx-rates')
-  @Roles('admin')
+  @Roles('user', 'admin')
   @RequirePermission('finance.fx.manage')
   recordFxRate(@Body() dto: UpsertFxRateDto) {
     return this.repo.upsertFxRate(dto);
@@ -100,7 +112,7 @@ export class FinanceController {
 
   @ApiOperation({ summary: 'Create an account' })
   @Post('accounts')
-  @Roles('admin')
+  @Roles('user', 'admin')
   @RequirePermission('finance.transaction.create')
   createAccount(@Body() dto: CreateAccountDto) {
     return this.ledger.createAccount(dto);
@@ -178,12 +190,8 @@ export class FinanceController {
   @Get('budgets')
   @Roles('user', 'admin')
   @RequirePermission('finance.read')
-  budgets(
-    @Query('projectId') projectId?: string,
-    @Query('page') page = '1',
-    @Query('limit') limit = '20',
-  ) {
-    return this.ledger.listBudgets(projectId, Number(page), Number(limit));
+  budgets(@Query() query: ListBudgetsDto) {
+    return this.budgetService.list(query.projectId, query.page, query.limit);
   }
 
   @ApiOperation({ summary: 'Create a budget' })
@@ -194,7 +202,7 @@ export class FinanceController {
     @Body() dto: CreateBudgetDto,
     @CurrentUser() principal: Principal,
   ) {
-    return this.ledger.createBudget(dto, principal);
+    return this.budgetService.create(dto, principal);
   }
 
   @ApiOperation({ summary: 'Budgets at or past their alert threshold' })
@@ -202,7 +210,7 @@ export class FinanceController {
   @Roles('user', 'admin')
   @RequirePermission('finance.read')
   budgetsAtRisk() {
-    return this.ledger.budgetsAtRisk();
+    return this.budgetService.atRisk();
   }
 
   // --- recurring ---
@@ -237,7 +245,7 @@ export class FinanceController {
 
   @ApiOperation({ summary: 'Generate due recurring transactions now' })
   @Post('recurring/materialize')
-  @Roles('admin')
+  @Roles('user', 'admin')
   @RequirePermission('finance.transaction.create')
   materialize() {
     return this.recurring.materializeDue();
@@ -258,7 +266,14 @@ export class FinanceController {
   @Roles('user', 'admin')
   @RequirePermission('finance.read')
   incomeByCategory(@Query() query: ReportDto) {
-    return this.ledger.categoryBreakdown(query.from, query.to, 'income');
+    // `projectId` is declared by ReportDto and advertised on this route; it was
+    // accepted and then dropped, so the filter silently did nothing.
+    return this.ledger.categoryBreakdown(
+      query.from,
+      query.to,
+      'income',
+      query.projectId,
+    );
   }
 
   @ApiOperation({ summary: 'Spending by category' })
@@ -266,7 +281,12 @@ export class FinanceController {
   @Roles('user', 'admin')
   @RequirePermission('finance.read')
   spendByCategory(@Query() query: ReportDto) {
-    return this.ledger.categoryBreakdown(query.from, query.to, 'expense');
+    return this.ledger.categoryBreakdown(
+      query.from,
+      query.to,
+      'expense',
+      query.projectId,
+    );
   }
 
   @ApiOperation({ summary: 'Expected income and expenses ahead' })

@@ -6,6 +6,7 @@ import { ActivityService } from '../shared/activity.service';
 import type { GrantPermissionDto, GrantRoleDto } from './dto/rbac.dto';
 import { PermissionCacheService } from './permission-cache.service';
 import { PermissionRepository } from './permission.repository';
+import { PermissionResolver } from './permission-resolver.service';
 
 /**
  * Administration of roles and grants.
@@ -24,6 +25,7 @@ export class RbacService {
     private readonly cache: PermissionCacheService,
     private readonly activity: ActivityService,
     private readonly errors: ExceptionService,
+    private readonly resolver: PermissionResolver,
   ) {}
 
   async listPermissions() {
@@ -120,19 +122,28 @@ export class RbacService {
     this.logger.warn(`Role "${role.key}" revoked from user ${userId}`);
   }
 
-  /** What a principal effectively holds — the "why can they do that?" answer. */
+  /**
+   * What a principal effectively holds — the "why can they do that?" answer.
+   *
+   * Delegates to `PermissionResolver`, the same code the guard runs, rather
+   * than re-deriving the answer from the grant tables. It used to do the
+   * latter, and the two disagreed precisely where it mattered most: the
+   * resolver short-circuits an admin to every permission without a lookup,
+   * while a grant-table walk found no `user_roles` rows and reported `[]`. An
+   * operator auditing an admin was told they held nothing, on the endpoint
+   * whose entire purpose is to explain why someone can do something.
+   *
+   * One implementation, so the report cannot drift from enforcement again.
+   */
   async effectiveFor(userId: string): Promise<string[]> {
-    if (!(await this.repo.userExists(userId))) {
-      throw this.errors.create(ErrorCode.USER_NOT_FOUND);
-    }
-    const [granted, overrides] = await Promise.all([
-      this.repo.permissionKeysForUser(userId),
-      this.repo.overridesForUser(userId),
-    ]);
-    const effective = new Set(granted);
-    for (const o of overrides) if (o.effect === 'allow') effective.add(o.key);
-    for (const o of overrides) if (o.effect === 'deny') effective.delete(o.key);
-    return [...effective].sort();
+    const role = await this.repo.findLiveUserRole(userId);
+    if (!role) throw this.errors.create(ErrorCode.USER_NOT_FOUND);
+    const principal: Principal = {
+      kind: 'user',
+      userId,
+      role: role === 'admin' ? 'admin' : 'user',
+    };
+    return [...(await this.resolver.effectivePermissions(principal))].sort();
   }
 
   /**

@@ -236,6 +236,25 @@ export class PermissionRepository {
     return rows.length > 0;
   }
 
+  /**
+   * The live user's base role, or null if there is no such user.
+   *
+   * `userExists` cannot answer the question `effectiveFor` actually has to ask:
+   * an admin's capabilities come from `users.role`, not from any `user_roles`
+   * row, so a report built only from grant tables describes an admin as holding
+   * nothing. Same no-import-UsersModule reasoning as above.
+   */
+  async findLiveUserRole(
+    userId: string,
+  ): Promise<(typeof users.$inferSelect)['role'] | null> {
+    const rows = await this.db
+      .select({ role: users.role })
+      .from(users)
+      .where(and(eq(users.id, userId), eq(users.isDeleted, false)))
+      .limit(1);
+    return rows[0]?.role ?? null;
+  }
+
   async countRoleMembers(roleId: string): Promise<number> {
     const totals = await this.db
       .select({ value: count() })

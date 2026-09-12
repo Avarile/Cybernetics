@@ -6,7 +6,10 @@ import {
   type Principal,
 } from '../../common/principal';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
-import type { ProjectRow } from '../../infrastructure/database/schema/project.schema';
+import type {
+  ProjectMemberRow,
+  ProjectRow,
+} from '../../infrastructure/database/schema/project.schema';
 import { ActivityService } from '../shared/activity.service';
 import { EntityCascadeService } from '../shared/entity-cascade.service';
 import { TagService } from '../shared/tag.service';
@@ -138,12 +141,30 @@ export class ProjectService {
             // `internal` projects the SQL predicate also matches.
             '00000000-0000-0000-0000-000000000000';
     const { rows, total } = await this.repo.list({ ...dto, visibleTo });
-    const enriched = await Promise.all(
-      rows.map(async (row) => ({
-        row,
-        access: await this.accessFor(row, principal),
-      })),
-    );
+
+    // Memberships for the whole page in one query, then resolve per row in
+    // memory. `accessFor` returns early for admins and the system principal, so
+    // the per-row lookup it would otherwise do was invisible in admin testing
+    // and only cost an ordinary user one query per project on the page.
+    const memberships: Map<string, ProjectMemberRow> =
+      principal.kind === 'user' && !isAdmin(principal)
+        ? await this.repo.membershipsForMany(
+            rows.map((r) => r.id),
+            principal.userId,
+          )
+        : new Map();
+
+    const enriched = rows.map((row) => ({
+      row,
+      access:
+        isAdmin(principal) || principal.kind === 'system'
+          ? ('owner' as const)
+          : resolveProjectAccess(
+              row,
+              principal,
+              memberships.get(row.id) ?? null,
+            ),
+    }));
     return {
       data: enriched.map((e) => this.toPublic(e.row, e.access)),
       total,
