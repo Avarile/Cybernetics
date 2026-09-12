@@ -112,6 +112,21 @@ export const logTimeSchema = z.object({
 
 export class LogTimeDto extends createZodDto(logTimeSchema) {}
 
+/**
+ * Correct a logged entry.
+ *
+ * `taskId` and `projectId` are deliberately absent: moving an hour between
+ * projects would change which budget it lands on and which invoice may bill
+ * it. Delete and re-log for that.
+ */
+export const updateTimeSchema = logTimeSchema
+  .partial()
+  .refine((v) => Object.keys(v).length > 0, {
+    message: 'At least one field must be provided',
+  });
+
+export class UpdateTimeDto extends createZodDto(updateTimeSchema) {}
+
 export const listTimeSchema = z.object({
   projectId: z.string().uuid().optional(),
   taskId: z.string().uuid().optional(),

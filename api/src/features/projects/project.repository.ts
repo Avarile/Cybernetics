@@ -27,6 +27,13 @@ import {
   type ProjectRow,
 } from '../../infrastructure/database/schema/project.schema';
 
+/**
+ * Assigns `updated_at` to itself, suppressing `baseColumns.updatedAt`'s
+ * `$onUpdate` for writes that are not edits. See `allocateTaskNumber` — the
+ * same guard `knowledge.bumpViewCount` uses for its counter.
+ */
+const KEEP_UPDATED_AT = sql`${projects.updatedAt}`;
+
 export interface ProjectQuery {
   search?: string;
   status?: ProjectRow['status'];
@@ -100,11 +107,20 @@ export class ProjectRepository extends BaseRepository<typeof projects> {
     return { rows, total: Number(totals[0]?.value ?? 0) };
   }
 
+  /**
+   * Patch a project.
+   *
+   * Takes an executor so a handover can move `owner_user_id` and the two
+   * membership rows that mirror it in one transaction — a partial handover
+   * leaves the project owned by one user and the `owner` membership held by
+   * another, and the access resolver honours both.
+   */
   async update(
     id: string,
     patch: Partial<NewProjectRow>,
+    executor: DrizzleExecutor = this.db,
   ): Promise<ProjectRow | null> {
-    const rows = await this.db
+    const rows = await executor
       .update(projects)
       .set(patch)
       .where(and(eq(projects.id, id), eq(projects.isDeleted, false)))
@@ -112,11 +128,32 @@ export class ProjectRepository extends BaseRepository<typeof projects> {
     return rows[0] ?? null;
   }
 
-  async softDelete(id: string): Promise<void> {
-    await this.db
+  async softDelete(
+    id: string,
+    executor: DrizzleExecutor = this.db,
+  ): Promise<void> {
+    await executor
       .update(projects)
       .set({ isDeleted: true, deletedAt: new Date() })
       .where(eq(projects.id, id));
+  }
+
+  /** Retire a project's memberships alongside it. */
+  async softDeleteMembersForProject(
+    projectId: string,
+    executor: DrizzleExecutor = this.db,
+  ): Promise<number> {
+    const rows = await executor
+      .update(projectMembers)
+      .set({ isDeleted: true, deletedAt: new Date() })
+      .where(
+        and(
+          eq(projectMembers.projectId, projectId),
+          eq(projectMembers.isDeleted, false),
+        ),
+      )
+      .returning({ id: projectMembers.id });
+    return rows.length;
   }
 
   /**
@@ -125,7 +162,14 @@ export class ProjectRepository extends BaseRepository<typeof projects> {
    * A counter incremented in place and returned, NOT `max(number) + 1`: two
    * concurrent creates both read the same maximum and then collide on
    * `tasks_number_idx`. `UPDATE ... RETURNING` serializes on the project row, so
-   * the numbers are gapless and unique under any concurrency.
+   * the numbers are unique under any concurrency — and gapless, provided the
+   * caller runs this in the same transaction as the insert, which is why the
+   * executor parameter exists. See `TaskService.create`.
+   *
+   * `KEEP_UPDATED_AT` because this is bookkeeping, not an edit to the project.
+   * Drizzle's `$onUpdate` would otherwise restamp `projects.updated_at` on
+   * every task creation — and `list()` orders by that column, so adding a task
+   * silently reordered the project list.
    */
   async allocateTaskNumber(
     projectId: string,
@@ -133,7 +177,10 @@ export class ProjectRepository extends BaseRepository<typeof projects> {
   ): Promise<number> {
     const rows = await executor
       .update(projects)
-      .set({ taskSeq: sql`${projects.taskSeq} + 1` })
+      .set({
+        taskSeq: sql`${projects.taskSeq} + 1`,
+        updatedAt: KEEP_UPDATED_AT,
+      })
       .where(eq(projects.id, projectId))
       .returning({ taskSeq: projects.taskSeq });
     if (!rows[0]) throw new Error(`Project ${projectId} not found`);
@@ -185,8 +232,9 @@ export class ProjectRepository extends BaseRepository<typeof projects> {
   async membership(
     projectId: string,
     userId: string,
+    executor: DrizzleExecutor = this.db,
   ): Promise<ProjectMemberRow | null> {
-    const rows = await this.db
+    const rows = await executor
       .select()
       .from(projectMembers)
       .where(
@@ -232,21 +280,49 @@ export class ProjectRepository extends BaseRepository<typeof projects> {
     userId: string,
     roleInProject: ProjectMemberRow['roleInProject'],
     addedBy: string | null,
+    executor: DrizzleExecutor = this.db,
   ): Promise<ProjectMemberRow> {
-    const existing = await this.membership(projectId, userId);
+    const existing = await this.membership(projectId, userId, executor);
     if (existing) {
-      const rows = await this.db
+      const rows = await executor
         .update(projectMembers)
         .set({ roleInProject })
         .where(eq(projectMembers.id, existing.id))
         .returning();
       return rows[0];
     }
-    const rows = await this.db
+    const rows = await executor
       .insert(projectMembers)
       .values({ projectId, userId, roleInProject, addedBy })
       .returning();
     return rows[0];
+  }
+
+  /**
+   * Step a member down to `roleInProject` if they currently hold a membership.
+   *
+   * The outgoing half of a handover. A no-op when the user has no row — an
+   * owner recorded only on `projects.owner_user_id` has nothing to demote,
+   * which is the normal case for a project created before membership existed.
+   */
+  async demoteMember(
+    projectId: string,
+    userId: string,
+    roleInProject: ProjectMemberRow['roleInProject'],
+    executor: DrizzleExecutor = this.db,
+  ): Promise<boolean> {
+    const rows = await executor
+      .update(projectMembers)
+      .set({ roleInProject })
+      .where(
+        and(
+          eq(projectMembers.projectId, projectId),
+          eq(projectMembers.userId, userId),
+          eq(projectMembers.isDeleted, false),
+        ),
+      )
+      .returning({ id: projectMembers.id });
+    return rows.length > 0;
   }
 
   async removeMember(projectId: string, userId: string): Promise<boolean> {

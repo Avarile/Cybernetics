@@ -3,6 +3,7 @@ import { and, asc, eq, isNull, or } from 'drizzle-orm';
 import {
   DRIZZLE,
   type DrizzleDB,
+  type DrizzleExecutor,
 } from '../../infrastructure/database/drizzle.constants';
 import {
   goals,
@@ -57,11 +58,50 @@ export class PlanningRepository {
     return rows[0] ?? null;
   }
 
-  async softDeleteMilestone(id: string): Promise<void> {
-    await this.db
+  async softDeleteMilestone(
+    id: string,
+    executor: DrizzleExecutor = this.db,
+  ): Promise<void> {
+    await executor
       .update(milestones)
       .set({ isDeleted: true, deletedAt: new Date() })
       .where(eq(milestones.id, id));
+  }
+
+  /** Retire every milestone under a project — one statement, for the cascade. */
+  async softDeleteMilestonesForProject(
+    projectId: string,
+    executor: DrizzleExecutor = this.db,
+  ): Promise<number> {
+    const rows = await executor
+      .update(milestones)
+      .set({ isDeleted: true, deletedAt: new Date() })
+      .where(
+        and(
+          eq(milestones.projectId, projectId),
+          eq(milestones.isDeleted, false),
+        ),
+      )
+      .returning({ id: milestones.id });
+    return rows.length;
+  }
+
+  /**
+   * Retire every goal under a project.
+   *
+   * Only project goals: `project_id IS NULL` marks an organizational goal that
+   * outlives any single project, and the cascade must not reach it.
+   */
+  async softDeleteGoalsForProject(
+    projectId: string,
+    executor: DrizzleExecutor = this.db,
+  ): Promise<number> {
+    const rows = await executor
+      .update(goals)
+      .set({ isDeleted: true, deletedAt: new Date() })
+      .where(and(eq(goals.projectId, projectId), eq(goals.isDeleted, false)))
+      .returning({ id: goals.id });
+    return rows.length;
   }
 
   // --- goals ---

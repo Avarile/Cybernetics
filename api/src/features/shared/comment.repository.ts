@@ -3,6 +3,7 @@ import { and, asc, count, eq, inArray, type SQL } from 'drizzle-orm';
 import {
   DRIZZLE,
   type DrizzleDB,
+  type DrizzleExecutor,
 } from '../../infrastructure/database/drizzle.constants';
 import { BaseRepository } from '../../infrastructure/database/repositories/base.repository';
 import { users } from '../../infrastructure/database/schema/identity.schema';
@@ -93,12 +94,19 @@ export class CommentRepository extends BaseRepository<typeof comments> {
     return rows.map((r) => r.id);
   }
 
-  /** Soft-delete every comment on one entity — the polymorphic cascade. */
+  /**
+   * Soft-delete every comment on one entity — the polymorphic cascade.
+   *
+   * Takes an executor so it can join the transaction that removes the parent.
+   * Run on its own connection, a crash between the two leaves a deleted record
+   * whose discussion is still live and reachable by entity id.
+   */
   async softDeleteForEntity(
     entityType: CommentRow['entityType'],
     entityId: string,
+    executor: DrizzleExecutor = this.db,
   ): Promise<number> {
-    const rows = await this.db
+    const rows = await executor
       .update(comments)
       .set({ isDeleted: true, deletedAt: new Date() })
       .where(

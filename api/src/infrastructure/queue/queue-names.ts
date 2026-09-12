@@ -21,6 +21,7 @@ export const QUEUE_NAMES = {
   systemRetention: 'system-retention',
   notificationSend: 'notification-send',
   scheduling: 'scheduling',
+  projectProjection: 'project-projection',
 } as const;
 
 export type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];

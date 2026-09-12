@@ -69,19 +69,46 @@ export function rankBetween(
  * Whether ranks have grown long enough to warrant a rebalance.
  *
  * Repeated insertion at the same point lengthens the string by a character each
- * time. Nothing breaks — comparison still works — but a sweep that rewrites the
- * list with fresh short ranks keeps the index small.
+ * time. Comparison keeps working, but `sort_rank` is `varchar(64)` and Postgres
+ * errors rather than truncates on overflow — measured at roughly one character
+ * per five "move to top" gestures, so a busy column reaches the limit in a few
+ * hundred drags and then starts rejecting them.
  */
 export function needsRebalance(ranks: string[], maxLength = 12): boolean {
   return ranks.some((r) => r.length > maxLength);
 }
 
-/** Evenly spaced ranks for `count` items — used when rebalancing a list. */
+/**
+ * Evenly spaced, strictly ascending ranks for `count` items.
+ *
+ * Fixed-width, in the smallest base-36 width that fits `count` values with room
+ * between them. The previous single-character version saturated: with
+ * `step = floor(36 / (count + 1))` and the index clamped to `BASE - 1`, every
+ * rank past the 35th came out `'z'`, so rebalancing a 40-card column produced
+ * duplicates and destroyed its order. The spec only ever asked for five, which
+ * is why that went unnoticed — and why the helper had no callers to break.
+ */
 export function evenlySpacedRanks(count: number): string[] {
   if (count <= 0) return [];
-  const step = Math.max(1, Math.floor(BASE / (count + 1)));
-  return Array.from({ length: count }, (_, i) => {
-    const idx = Math.min(BASE - 1, step * (i + 1));
-    return ALPHABET[idx];
-  });
+  // Leave `count + 1` gaps so there is room to insert at either end and between
+  // any pair without immediately lengthening the string again.
+  let width = 1;
+  let capacity = BASE;
+  while (capacity < count + 2) {
+    width += 1;
+    capacity *= BASE;
+  }
+  const step = Math.floor(capacity / (count + 1));
+  return Array.from({ length: count }, (_, i) => encode(step * (i + 1), width));
+}
+
+/** `value` as a fixed-width base-36 string, so all ranks compare bytewise. */
+function encode(value: number, width: number): string {
+  let out = '';
+  let n = value;
+  for (let i = 0; i < width; i++) {
+    out = ALPHABET[n % BASE] + out;
+    n = Math.floor(n / BASE);
+  }
+  return out;
 }

@@ -23,6 +23,7 @@ import {
   LogTimeDto,
   MoveTaskDto,
   UpdateTaskDto,
+  UpdateTimeDto,
 } from './dto/task.dto';
 import { ProjectLinkService } from './project-link.service';
 import { TaskService } from './task.service';
@@ -64,6 +65,18 @@ export class TaskController {
   @RequirePermission('project.time.log')
   listTime(@Query() query: ListTimeDto, @CurrentUser() principal: Principal) {
     return this.links.listTime(query, principal);
+  }
+
+  @ApiOperation({ summary: 'Correct a time entry' })
+  @Patch('time/:entryId')
+  @Roles('user', 'admin')
+  @RequirePermission('project.time.log')
+  updateTime(
+    @Param('entryId', ParseUUIDPipe) entryId: string,
+    @Body() dto: UpdateTimeDto,
+    @CurrentUser() principal: Principal,
+  ) {
+    return this.links.updateTime(entryId, dto, principal);
   }
 
   @ApiOperation({ summary: 'Delete a time entry' })

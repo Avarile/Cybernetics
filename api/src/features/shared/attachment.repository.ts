@@ -3,6 +3,7 @@ import { and, asc, count, eq } from 'drizzle-orm';
 import {
   DRIZZLE,
   type DrizzleDB,
+  type DrizzleExecutor,
 } from '../../infrastructure/database/drizzle.constants';
 import { BaseRepository } from '../../infrastructure/database/repositories/base.repository';
 import {
@@ -107,11 +108,13 @@ export class AttachmentRepository extends BaseRepository<
       .where(eq(entityAttachments.id, id));
   }
 
+  /** Takes an executor for the same reason `CommentRepository` does. */
   async softDeleteForEntity(
     entityType: EntityAttachmentRow['entityType'],
     entityId: string,
+    executor: DrizzleExecutor = this.db,
   ): Promise<number> {
-    const rows = await this.db
+    const rows = await executor
       .update(entityAttachments)
       .set({ isDeleted: true, deletedAt: new Date() })
       .where(

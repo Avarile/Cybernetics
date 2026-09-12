@@ -1,4 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  DRIZZLE,
+  type DrizzleDB,
+  type DrizzleExecutor,
+} from '../../infrastructure/database/drizzle.constants';
 import type { CommentRow } from '../../infrastructure/database/schema/shared.schema';
 import { AttachmentRepository } from './attachment.repository';
 import { CommentRepository } from './comment.repository';
@@ -23,6 +28,7 @@ export class EntityCascadeService {
   private readonly logger = new Logger(EntityCascadeService.name);
 
   constructor(
+    @Inject(DRIZZLE) private readonly db: DrizzleDB,
     private readonly comments: CommentRepository,
     private readonly attachments: AttachmentRepository,
   ) {}
@@ -36,15 +42,21 @@ export class EntityCascadeService {
   async purgeFor(
     entityType: CascadableType,
     entityId: string,
+    executor: DrizzleExecutor = this.db,
   ): Promise<{ comments: number; attachments: number }> {
     const removedComments = await this.comments.softDeleteForEntity(
       entityType,
       entityId,
+      executor,
     );
     // `attachable_type` lacks `goal` and `milestone`; those entities can be
     // commented on but never carry files, so there is nothing to purge.
     const removedAttachments = this.isAttachable(entityType)
-      ? await this.attachments.softDeleteForEntity(entityType, entityId)
+      ? await this.attachments.softDeleteForEntity(
+          entityType,
+          entityId,
+          executor,
+        )
       : 0;
 
     if (removedComments > 0 || removedAttachments > 0) {

@@ -75,3 +75,37 @@ describe('lexorank', () => {
     });
   });
 });
+
+/**
+ * `evenlySpacedRanks` at scale.
+ *
+ * The regression: `step = floor(36 / (count + 1))` with the index clamped to
+ * `BASE - 1` saturated past 35 items, so every rank after the 35th was `'z'`.
+ * Rebalancing a 40-card column would have collapsed its order into a tie. The
+ * original spec only asked for five ranks, and the helper had no callers, so
+ * nothing caught it until the rebalance sweep needed it.
+ */
+describe('evenlySpacedRanks at scale', () => {
+  for (const count of [1, 5, 34, 35, 36, 40, 60, 200, 1300]) {
+    it(`returns ${count} strictly ascending, unique ranks`, () => {
+      const ranks = evenlySpacedRanks(count);
+      expect(ranks).toHaveLength(count);
+      expect(new Set(ranks).size).toBe(count);
+      for (let i = 1; i < ranks.length; i++) {
+        expect(ranks[i - 1] < ranks[i]).toBe(true);
+      }
+    });
+  }
+
+  it('leaves room to insert above, below and between', () => {
+    const ranks = evenlySpacedRanks(40);
+    expect(rankBetween(null, ranks[0]) < ranks[0]).toBe(true);
+    expect(rankBetween(ranks[ranks.length - 1], null) > ranks[39]).toBe(true);
+    const mid = rankBetween(ranks[0], ranks[1]);
+    expect(mid > ranks[0] && mid < ranks[1]).toBe(true);
+  });
+
+  it('produces ranks short enough that a rebalance is worth doing', () => {
+    expect(needsRebalance(evenlySpacedRanks(1000))).toBe(false);
+  });
+});

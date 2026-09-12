@@ -35,7 +35,11 @@ export class ProjectsMemberAddCommand extends CommandRunner {
     return v;
   }
 
-  @Option({ flags: '--role <role>', description: 'owner|manager|contributor|viewer (default contributor)' })
+  // `owner` is deliberately absent: a project has one accountable owner, and
+  // ownership moves by editing `ownerUserId` through `projects edit`, which
+  // also maintains the membership row that mirrors it. Granting `owner` here
+  // let a manager promote themselves past the role that gated the endpoint.
+  @Option({ flags: '--role <role>', description: 'manager|contributor|viewer (default contributor)' })
   parseRole(v: string): string {
     return v;
   }

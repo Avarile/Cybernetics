@@ -1,5 +1,9 @@
-import { Injectable } from '@nestjs/common';
-import { userIdOrNull, type Principal } from '../../common/principal';
+import { Inject, Injectable } from '@nestjs/common';
+import { isAdmin, userIdOrNull, type Principal } from '../../common/principal';
+import {
+  DRIZZLE,
+  type DrizzleDB,
+} from '../../infrastructure/database/drizzle.constants';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import type {
   GoalRow,
@@ -14,12 +18,17 @@ import type {
 } from './dto/planning.dto';
 import { PlanningRepository } from './planning.repository';
 import { ProjectService } from './project.service';
+import { TaskRepository } from './task.repository';
 
 @Injectable()
 export class PlanningService {
   constructor(
+    // Deleting a milestone must also release the tasks that reference it, and
+    // the two writes have to land together.
+    @Inject(DRIZZLE) private readonly db: DrizzleDB,
     private readonly repo: PlanningRepository,
     private readonly projects: ProjectService,
+    private readonly tasks: TaskRepository,
     private readonly activity: ActivityService,
     private readonly errors: ExceptionService,
   ) {}
@@ -90,9 +99,48 @@ export class PlanningService {
     return row;
   }
 
+  /**
+   * Soft-delete a milestone and release the tasks pointing at it.
+   *
+   * One transaction, because a task whose `milestone_id` survives the milestone
+   * references a row nothing can reach: the milestone list no longer shows it,
+   * but `GET /tasks?milestoneId=<dead>` still returns the task, and the UI
+   * renders an assignment to a milestone that does not exist.
+   *
+   * Clearing rather than refusing: unlike `removeGoal`, where a key result is
+   * meaningless without its objective, a task is perfectly coherent with no
+   * milestone at all.
+   */
   async removeMilestone(id: string, principal: Principal): Promise<void> {
     await this.requireMilestone(id, principal, 'manager');
-    await this.repo.softDeleteMilestone(id);
+    await this.db.transaction(async (tx) => {
+      await this.repo.softDeleteMilestone(id, tx);
+      await this.tasks.clearMilestone(id, tx);
+    });
+  }
+
+  // --- access, for the entity registry ---
+
+  /** Whether a principal may read a milestone — its project decides. */
+  async canReadMilestone(id: string, principal: Principal): Promise<boolean> {
+    const row = await this.repo.findMilestone(id);
+    if (!row) return false;
+    return this.projects.canRead(row.projectId, principal);
+  }
+
+  /**
+   * Whether a principal may read a goal.
+   *
+   * A project goal inherits its project. An organizational goal belongs to no
+   * project, so there is no membership to consult and it stays admin-only —
+   * the same rule `requireGoal` applies to writes.
+   */
+  async canReadGoal(id: string, principal: Principal): Promise<boolean> {
+    const row = await this.repo.findGoal(id);
+    if (!row) return false;
+    if (!row.projectId)
+      return principal.kind === 'system' || isAdmin(principal);
+    return this.projects.canRead(row.projectId, principal);
   }
 
   private async requireMilestone(
@@ -182,6 +230,12 @@ export class PlanningService {
       progressPct: this.progressOf(currentValue, targetValue, direction),
       ...(dto.status === 'achieved' && existing.status !== 'achieved'
         ? { achievedAt: new Date() }
+        : {}),
+      // Clear it on the way back out, as `updateMilestone` does for `reachedAt`.
+      ...(dto.status &&
+      dto.status !== 'achieved' &&
+      existing.status === 'achieved'
+        ? { achievedAt: null }
         : {}),
     });
     if (!row) throw this.errors.create(ErrorCode.NOT_FOUND);

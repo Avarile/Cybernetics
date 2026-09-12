@@ -11,8 +11,25 @@ export const PROJECT_STATUSES = [
 ] as const;
 export const PRIORITIES = ['low', 'medium', 'high', 'urgent'] as const;
 export const PROJECT_VISIBILITIES = ['private', 'internal'] as const;
+/** Every role a membership row can hold, most- to least-capable. */
 export const MEMBER_ROLES = [
   'owner',
+  'manager',
+  'contributor',
+  'viewer',
+] as const;
+
+/**
+ * The roles membership management may grant.
+ *
+ * `owner` is deliberately absent. A project has exactly one accountable owner,
+ * recorded on `projects.owner_user_id`, and the `owner` membership row is a
+ * derived fact maintained by handover. Letting this endpoint write the row
+ * directly made the two disagree — and since the endpoint only required the
+ * `manager` role, a manager could grant themselves owner and delete a project
+ * they did not own. Ownership moves through `PATCH /projects/:id` alone.
+ */
+export const ASSIGNABLE_MEMBER_ROLES = [
   'manager',
   'contributor',
   'viewer',
@@ -59,6 +76,9 @@ export class UpdateProjectDto extends createZodDto(updateProjectSchema) {}
 export const listProjectsSchema = z.object({
   search: z.string().max(200).optional(),
   status: z.enum(PROJECT_STATUSES).optional(),
+  /** "Projects owned by X" — the repository and `projects_owner_idx` already
+   * supported this; nothing exposed it. */
+  ownerUserId: z.string().uuid().optional(),
   page: z.coerce.number().int().positive().default(1),
   limit: z.coerce.number().int().positive().max(100).default(20),
 });
@@ -67,7 +87,7 @@ export class ListProjectsDto extends createZodDto(listProjectsSchema) {}
 
 export const addMemberSchema = z.object({
   userId: z.string().uuid(),
-  roleInProject: z.enum(MEMBER_ROLES).default('contributor'),
+  roleInProject: z.enum(ASSIGNABLE_MEMBER_ROLES).default('contributor'),
 });
 
 export class AddMemberDto extends createZodDto(addMemberSchema) {}

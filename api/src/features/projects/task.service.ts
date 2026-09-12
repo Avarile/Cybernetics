@@ -1,5 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { userIdOrNull, type Principal } from '../../common/principal';
+import {
+  DRIZZLE,
+  type DrizzleDB,
+} from '../../infrastructure/database/drizzle.constants';
 import { ErrorCode, ExceptionService } from '../../infrastructure/exceptions';
 import type { TaskRow } from '../../infrastructure/database/schema/project.schema';
 import { ActivityService } from '../shared/activity.service';
@@ -13,6 +17,8 @@ import type {
   UpdateTaskDto,
 } from './dto/task.dto';
 import { initialRank, rankBetween } from './lexorank.util';
+import { PlanningRepository } from './planning.repository';
+import { TaskBoardService } from './task-board.service';
 import { ProjectProjectionService } from './project-projection.service';
 import { ProjectRepository } from './project.repository';
 import { ProjectService } from './project.service';
@@ -26,11 +32,17 @@ export class TaskService {
   private readonly logger = new Logger(TaskService.name);
 
   constructor(
+    // Number allocation and the insert have to land together — see `create`.
+    @Inject(DRIZZLE) private readonly db: DrizzleDB,
     private readonly repo: TaskRepository,
     private readonly projects: ProjectService,
     // The task-number counter lives on the project row, so allocating one is a
     // project write even though a task is what needs it.
     private readonly projectRepo: ProjectRepository,
+    // Needed to check that a milestone belongs to the task's project.
+    private readonly planning: PlanningRepository,
+    // Board ordering — where a card sits within its column.
+    private readonly board: TaskBoardService,
     private readonly projection: ProjectProjectionService,
     private readonly tags: TagService,
     private readonly activity: ActivityService,
@@ -50,20 +62,32 @@ export class TaskService {
       await this.tags.resolveForScope(dto.tagIds, 'task');
     }
 
+    await this.assertReferencesStayInProject(
+      dto.projectId,
+      null,
+      dto.milestoneId,
+      dto.parentTaskId,
+    );
+
     const { tagIds, ...rest } = dto;
-    const number = await this.projectRepo.allocateTaskNumber(dto.projectId);
     const ranks = await this.repo.ranksAround(dto.projectId, dto.status);
-    const row = await this.repo.create({
+    const sortRank =
+      ranks.length > 0
+        ? // New work lands at the bottom of its column.
+          rankBetween(ranks[ranks.length - 1], null)
+        : initialRank();
+
+    // Number allocation and insert in ONE statement, so a failed insert cannot
+    // leave the counter advanced and the number burned. The repository
+    // documents the numbers as gapless; this is what makes that true.
+    // (Uniqueness was never at risk — the counter serializes on the project
+    // row either way.)
+    const row = await this.repo.createWithNumber(dto.projectId, {
       ...rest,
-      number,
       startDate: this.toDateString(dto.startDate),
       dueDate: this.toDateString(dto.dueDate),
       reporterUserId: userIdOrNull(principal),
-      // New work lands at the bottom of its column.
-      sortRank:
-        ranks.length > 0
-          ? rankBetween(ranks[ranks.length - 1], null)
-          : initialRank(),
+      sortRank,
     });
 
     if (tagIds?.length) {
@@ -90,8 +114,10 @@ export class TaskService {
       const { rows, total } = await this.repo.list(dto);
       return { data: rows, total, page: dto.page, limit: dto.limit };
     }
-    const projectIds = await this.projects.visibleProjectIds(principal);
-    const { rows, total } = await this.repo.list({ ...dto, projectIds });
+    const { rows, total } = await this.repo.list({
+      ...dto,
+      visibleTo: this.projects.taskVisibilityScope(principal),
+    });
     return { data: rows, total, page: dto.page, limit: dto.limit };
   }
 
@@ -109,34 +135,11 @@ export class TaskService {
     if (dto.tagIds?.length) {
       await this.tags.resolveForScope(dto.tagIds, 'task');
     }
-
-    const nextStatus = dto.status ?? task.status;
-    if (nextStatus === 'blocked') {
-      const reason = dto.blockedReason ?? task.blockedReason;
-      if (!reason) {
-        // A blocked task with no stated blocker is invisible work.
-        throw this.errors.validation([
-          {
-            path: 'blockedReason',
-            message: 'A blocked task must say what is blocking it',
-          },
-        ]);
-      }
-    }
-    if (
-      dto.status &&
-      !TERMINAL.includes(task.status) &&
-      dto.status === 'done'
-    ) {
-      const blockers = await this.repo.unfinishedPredecessors(id);
-      if (blockers.length > 0) {
-        throw this.errors.create(ErrorCode.CONFLICT, {
-          message:
-            `Cannot complete: ${blockers.length} predecessor task(s) are ` +
-            `still open`,
-        });
-      }
-    }
+    await this.assertReferencesStayInProject(
+      task.projectId,
+      id,
+      dto.milestoneId,
+    );
 
     const { tagIds, ...rest } = dto;
     const patch: Record<string, unknown> = {
@@ -144,10 +147,7 @@ export class TaskService {
       startDate: this.toDateString(dto.startDate),
       dueDate: this.toDateString(dto.dueDate),
     };
-    if (dto.status === 'done' && task.status !== 'done') {
-      patch.completedAt = new Date();
-    }
-    if (dto.status && dto.status !== 'blocked') patch.blockedReason = null;
+    await this.applyStatusChange(task, dto.status, patch, dto.blockedReason);
 
     const updated = await this.repo.update(id, patch);
     if (!updated) throw this.errors.create(ErrorCode.NOT_FOUND);
@@ -173,10 +173,65 @@ export class TaskService {
   }
 
   /**
+   * The invariants every status transition must satisfy, and the timestamps it
+   * implies — applied to `patch` in place.
+   *
+   * Extracted because `update()` enforced all of this and `move()` enforced
+   * none of it, while both wrote `tasks.status`. Dragging a card to the Done
+   * column is the ordinary way to finish work (it is what `cyb tasks mv
+   * --status done` does), so the unguarded path was the common one: it
+   * completed tasks with open predecessors, blocked them with no stated
+   * blocker, and never stamped `completedAt`.
+   *
+   * One method owns status transitions now. A second copy of these rules is
+   * how the first divergence happened.
+   */
+  private async applyStatusChange(
+    task: TaskRow,
+    next: TaskRow['status'] | undefined,
+    patch: Record<string, unknown>,
+    blockedReason?: string | null,
+  ): Promise<void> {
+    const nextStatus = next ?? task.status;
+
+    if (nextStatus === 'blocked' && !(blockedReason ?? task.blockedReason)) {
+      // A blocked task with no stated blocker is invisible work.
+      throw this.errors.validation([
+        {
+          path: 'blockedReason',
+          message: 'A blocked task must say what is blocking it',
+        },
+      ]);
+    }
+
+    if (next && next === 'done' && !TERMINAL.includes(task.status)) {
+      const blockers = await this.repo.unfinishedPredecessors(task.id);
+      if (blockers.length > 0) {
+        throw this.errors.create(ErrorCode.CONFLICT, {
+          message:
+            `Cannot complete: ${blockers.length} predecessor task(s) are ` +
+            `still open`,
+        });
+      }
+    }
+
+    if (!next) return;
+    if (next === 'done' && task.status !== 'done') {
+      patch.completedAt = new Date();
+    }
+    // Reopening has to clear the stamp, or the task reads as complete to
+    // anything querying `completed_at IS NOT NULL` and cycle-time reporting
+    // counts a completion that was undone.
+    if (next !== 'done' && task.status === 'done') patch.completedAt = null;
+    if (next !== 'blocked') patch.blockedReason = null;
+  }
+
+  /**
    * Move a task within or between board columns.
    *
    * Writes exactly one row: the new rank is computed between its neighbours,
-   * which is the entire reason ranks are strings rather than integers.
+   * which is the entire reason ranks are strings rather than integers. A status
+   * change goes through the same guards `update()` applies.
    */
   async move(
     id: string,
@@ -185,26 +240,18 @@ export class TaskService {
   ): Promise<TaskRow> {
     const { task } = await this.require(id, principal, 'contributor');
     const status = dto.status ?? task.status;
-    const ranks = (await this.repo.ranksAround(task.projectId, status)).filter(
-      (r) => r !== task.sortRank,
-    );
+    const sortRank = await this.board.rankFor(task, status, dto.afterTaskId);
 
-    let sortRank: string;
-    if (!dto.afterTaskId) {
-      sortRank = ranks.length > 0 ? rankBetween(null, ranks[0]) : initialRank();
-    } else {
-      const anchor = await this.repo.findLiveById(dto.afterTaskId);
-      if (!anchor || anchor.projectId !== task.projectId || !anchor.sortRank) {
-        throw this.errors.validation([
-          { path: 'afterTaskId', message: 'Anchor task is not on this board' },
-        ]);
-      }
-      const following = ranks.find((r) => r > anchor.sortRank!) ?? null;
-      sortRank = rankBetween(anchor.sortRank, following);
-    }
+    const patch: Record<string, unknown> = { status, sortRank };
+    await this.applyStatusChange(task, dto.status, patch);
 
-    const updated = await this.repo.update(id, { status, sortRank });
+    const updated = await this.repo.update(id, patch);
     if (!updated) throw this.errors.create(ErrorCode.NOT_FOUND);
+    // Ranks lengthen by a character whenever two neighbours are adjacent, and
+    // `sort_rank` is `varchar(64)`. Checked on the move that would otherwise
+    // push the column past the threshold, so the cost lands on one drag in a
+    // few hundred rather than on a sweep.
+    await this.board.rebalanceIfNeeded(task.projectId, status);
     await this.afterWrite(id, task.projectId);
     return updated;
   }
@@ -214,7 +261,8 @@ export class TaskService {
     await this.repo.softDelete(id);
     await this.cascade.purgeFor('task', id);
     await this.projection.removeTask(id);
-    await this.projects.require(task.projectId, principal, 'viewer');
+    // (A second `projects.require` used to sit here, after the delete — the
+    // same check `require` above already made, run too late to guard anything.)
     await this.activity.recordSafe({
       principal,
       entityType: 'task',
@@ -281,7 +329,9 @@ export class TaskService {
     principal: Principal,
   ): Promise<void> {
     await this.require(id, principal, 'contributor');
-    const removed = await this.repo.removeDependency(dependencyId);
+    // Scoped to the task just authorized: an edge id belonging to another
+    // project must not be reachable through a task the caller happens to hold.
+    const removed = await this.repo.removeDependency(dependencyId, id);
     if (!removed) throw this.errors.create(ErrorCode.NOT_FOUND);
   }
 
@@ -332,6 +382,75 @@ export class TaskService {
     return { task };
   }
 
+  /**
+   * Reject a milestone or parent task that belongs to a different project.
+   *
+   * `addDependency` already refuses a cross-project predecessor and says why —
+   * "Dependencies must stay within one project". The same reasoning was never
+   * applied to these two, which were validated as UUIDs and written straight
+   * through: a task could hang off a milestone in a project the caller could
+   * not see, or off a parent in an already-deleted one. The write succeeding
+   * also confirmed the id was real, which is a probe oracle on its own.
+   */
+  private async assertReferencesStayInProject(
+    projectId: string,
+    taskId: string | null,
+    milestoneId?: string | null,
+    parentTaskId?: string | null,
+  ): Promise<void> {
+    if (milestoneId) {
+      const milestone = await this.planning.findMilestone(milestoneId);
+      if (!milestone || milestone.projectId !== projectId) {
+        throw this.errors.validation([
+          {
+            path: 'milestoneId',
+            message: 'Milestones must belong to the same project',
+          },
+        ]);
+      }
+    }
+    if (parentTaskId) {
+      if (parentTaskId === taskId) {
+        throw this.errors.validation([
+          { path: 'parentTaskId', message: 'A task cannot be its own parent' },
+        ]);
+      }
+      const parent = await this.repo.findLiveById(parentTaskId);
+      if (!parent || parent.projectId !== projectId) {
+        throw this.errors.validation([
+          {
+            path: 'parentTaskId',
+            message: 'A parent task must be in the same project',
+          },
+        ]);
+      }
+      // Unlike `task_dependencies`, the subtask edge has no cycle guard at all
+      // and `parent_task_id` cascades on delete, so a loop is unbounded
+      // recursion for anything that walks the tree.
+      if (taskId && (await this.parentReaches(parentTaskId, taskId))) {
+        throw this.errors.validation([
+          {
+            path: 'parentTaskId',
+            message: 'That parent would create a cycle',
+          },
+        ]);
+      }
+    }
+  }
+
+  /** Whether `from` already sits beneath `target` in the subtask tree. */
+  private async parentReaches(from: string, target: string): Promise<boolean> {
+    const seen = new Set<string>();
+    let current: string | null = from;
+    while (current && !seen.has(current)) {
+      if (current === target) return true;
+      seen.add(current);
+      const row: TaskRow | null = await this.repo.findLiveById(current);
+      current = row?.parentTaskId ?? null;
+    }
+    return false;
+  }
+
   /** Whether a principal may read a task — the registry's resolver. */
   async canRead(id: string, principal: Principal): Promise<boolean> {
     const task = await this.repo.findLiveById(id);
@@ -351,9 +470,17 @@ export class TaskService {
     }
   }
 
-  /** Denormalizations and the index, kept in step after every task write. */
+  /**
+   * Denormalizations and the index, kept in step after every task write.
+   *
+   * Concurrent: the progress recount touches `projects`, the projection touches
+   * `search_records`, and neither reads the other's output. Run in series this
+   * was most of the ~90 ms a task write cost against ~30 ms for a read.
+   */
   private async afterWrite(taskId: string, projectId: string): Promise<void> {
-    await this.projects.repoRefreshProgress(projectId);
-    await this.projection.projectTask(taskId);
+    await Promise.all([
+      this.projects.repoRefreshProgress(projectId),
+      this.projection.projectTask(taskId),
+    ]);
   }
 }

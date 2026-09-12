@@ -1,6 +1,14 @@
+import { InjectQueue } from '@nestjs/bullmq';
 import { Injectable, Logger } from '@nestjs/common';
+import { Queue } from 'bullmq';
 import type { FieldSpec } from '../../infrastructure/database/schema/search.schema';
 import { SearchRecordService } from '../search-service/search-record.service';
+import {
+  DEPROJECT_PROJECT_JOB,
+  PROJECT_PROJECTION_QUEUE,
+  PROJECTION_JOB_OPTS,
+  REPROJECT_PROJECT_JOB,
+} from './project.constants';
 import { ProjectRepository } from './project.repository';
 import { TaskRepository } from './task.repository';
 
@@ -58,7 +66,52 @@ export class ProjectProjectionService {
     private readonly records: SearchRecordService,
     private readonly projects: ProjectRepository,
     private readonly tasks: TaskRepository,
+    @InjectQueue(PROJECT_PROJECTION_QUEUE) private readonly queue: Queue,
   ) {}
+
+  /**
+   * Hand the per-task fan-out to the queue.
+   *
+   * The producers — adding a member, removing one, changing ownership or
+   * visibility — all need the project's own document refreshed immediately
+   * (that is the row whose scope just changed and which the caller will read
+   * back) but can let the tasks converge behind them.
+   *
+   * A failed handoff is logged, not thrown: the caller's write already
+   * committed, and refusing their request because Redis blinked would be worse
+   * than briefly stale search results. The search reconciliation sweep is the
+   * backstop, exactly as it is for `SearchRecordService.enqueueIndexJobs`.
+   */
+  async enqueueReprojection(projectId: string): Promise<void> {
+    await this.projectProject(projectId);
+    await this.enqueue(REPROJECT_PROJECT_JOB, { projectId });
+  }
+
+  /** Drop a deleted project's tasks from the index, off the request path. */
+  async enqueueDeprojection(
+    projectId: string,
+    taskIds: string[],
+  ): Promise<void> {
+    await this.removeProject(projectId);
+    if (taskIds.length === 0) return;
+    await this.enqueue(DEPROJECT_PROJECT_JOB, { projectId, taskIds });
+  }
+
+  private async enqueue(
+    job: string,
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    try {
+      await this.queue.add(job, data, PROJECTION_JOB_OPTS);
+    } catch (error) {
+      this.logger.warn(
+        `Projection handoff failed for "${job}" — leaving it to the ` +
+          `reconciliation sweep: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+      );
+    }
+  }
 
   async projectProject(projectId: string): Promise<void> {
     const row = await this.projects.findLiveById(projectId);
@@ -138,6 +191,11 @@ export class ProjectProjectionService {
     await this.records.remove(TASKS_COLLECTION, taskId);
   }
 
+  /** Drop a batch of tasks from the index — the deprojection job's body. */
+  async removeTasks(taskIds: string[]): Promise<void> {
+    for (const id of taskIds) await this.removeTask(id);
+  }
+
   async removeProject(projectId: string): Promise<void> {
     await this.records.remove(PROJECTS_COLLECTION, projectId);
   }
@@ -148,6 +206,10 @@ export class ProjectProjectionService {
    * Called after a membership change, which invalidates the scope array on all
    * of them. Bounded by page so one enormous project cannot hold the event loop;
    * the reconciliation sweep repairs anything a failure leaves behind.
+   *
+   * This is the QUEUE JOB's body, not something a request handler calls —
+   * {@link enqueueReprojection} is the producers' entry point. Inlined, this
+   * cost ~32 ms per task inside the HTTP request that changed the membership.
    */
   async reprojectProjectAndTasks(projectId: string): Promise<void> {
     await this.projectProject(projectId);

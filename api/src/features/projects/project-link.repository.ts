@@ -65,13 +65,22 @@ export class ProjectLinkRepository {
     return rows[0];
   }
 
-  async unlinkKnowledge(id: string): Promise<boolean> {
+  /**
+   * Remove a knowledge reference belonging to `projectId`.
+   *
+   * Scoped to the project the caller was authorized against, not to the link id
+   * alone: the route checks `projectId` and then deletes `id`, so without this
+   * predicate a contributor on one project can unlink a reference from any
+   * other. Returning false for a foreign id lets the caller 404 it.
+   */
+  async unlinkKnowledge(id: string, projectId: string): Promise<boolean> {
     const rows = await this.db
       .update(projectKnowledgeLinks)
       .set({ isDeleted: true, deletedAt: new Date() })
       .where(
         and(
           eq(projectKnowledgeLinks.id, id),
+          eq(projectKnowledgeLinks.projectId, projectId),
           eq(projectKnowledgeLinks.isDeleted, false),
         ),
       )
@@ -120,18 +129,83 @@ export class ProjectLinkRepository {
     return rows[0];
   }
 
-  async unlinkContact(id: string): Promise<boolean> {
+  /** Remove a contact link belonging to `projectId`. Scoped for the same reason
+   * as {@link unlinkKnowledge}. */
+  async unlinkContact(id: string, projectId: string): Promise<boolean> {
     const rows = await this.db
       .update(projectContactLinks)
       .set({ isDeleted: true, deletedAt: new Date() })
       .where(
         and(
           eq(projectContactLinks.id, id),
+          eq(projectContactLinks.projectId, projectId),
           eq(projectContactLinks.isDeleted, false),
         ),
       )
       .returning({ id: projectContactLinks.id });
     return rows.length > 0;
+  }
+
+  /**
+   * Retire every knowledge and contact reference under a project.
+   *
+   * Two statements, both in the caller's transaction. A link that outlives its
+   * project is unreachable — every read goes through `projects.require` — but
+   * still counts against the unique indexes, so re-creating the project's key
+   * and re-linking the same article would collide with a row nobody can see.
+   */
+  async softDeleteLinksForProject(
+    projectId: string,
+    executor: DrizzleExecutor = this.db,
+  ): Promise<{ knowledge: number; contacts: number }> {
+    const stamp = { isDeleted: true as const, deletedAt: new Date() };
+    const knowledge = await executor
+      .update(projectKnowledgeLinks)
+      .set(stamp)
+      .where(
+        and(
+          eq(projectKnowledgeLinks.projectId, projectId),
+          eq(projectKnowledgeLinks.isDeleted, false),
+        ),
+      )
+      .returning({ id: projectKnowledgeLinks.id });
+    const contacts = await executor
+      .update(projectContactLinks)
+      .set(stamp)
+      .where(
+        and(
+          eq(projectContactLinks.projectId, projectId),
+          eq(projectContactLinks.isDeleted, false),
+        ),
+      )
+      .returning({ id: projectContactLinks.id });
+    return { knowledge: knowledge.length, contacts: contacts.length };
+  }
+
+  /**
+   * Retire a project's time entries — except any already billed.
+   *
+   * `invoice_line_item_id IS NOT NULL` is the double-billing lock and also the
+   * link an invoice line has back to the work it charges for. Soft-deleting a
+   * billed entry would leave an invoice billing hours that no longer exist,
+   * which is exactly what `removeTime` refuses to do one entry at a time.
+   */
+  async softDeleteTimeEntriesForProject(
+    projectId: string,
+    executor: DrizzleExecutor = this.db,
+  ): Promise<number> {
+    const rows = await executor
+      .update(timeEntries)
+      .set({ isDeleted: true, deletedAt: new Date() })
+      .where(
+        and(
+          eq(timeEntries.projectId, projectId),
+          isNull(timeEntries.invoiceLineItemId),
+          eq(timeEntries.isDeleted, false),
+        ),
+      )
+      .returning({ id: timeEntries.id });
+    return rows.length;
   }
 
   // --- time entries ---
