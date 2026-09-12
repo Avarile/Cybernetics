@@ -10,6 +10,7 @@ import {
   rewritePath,
   wouldCycle,
 } from '../shared/materialized-path.util';
+import { deriveKey, keyConflictMessage } from '../shared/vocabulary-key.util';
 import { ContactVocabularyRepository } from './contact-vocabulary.repository';
 import type {
   CreateCategoryDto,
@@ -35,12 +36,15 @@ export class ContactVocabularyService {
   }
 
   async createType(dto: CreateContactTypeDto): Promise<ContactTypeRow> {
-    if (await this.repo.findTypeByKey(dto.key)) {
+    const key = deriveKey(dto);
+    if (await this.repo.findTypeByKey(key)) {
       throw this.errors.create(ErrorCode.CONFLICT, {
-        message: `Contact type "${dto.key}" already exists`,
+        message: keyConflictMessage('Contact type', key, dto),
       });
     }
-    return this.repo.createType(dto);
+    // `key` after the spread: an explicit `{ key: undefined }` would otherwise
+    // clobber the derived value.
+    return this.repo.createType({ ...dto, key });
   }
 
   async updateType(
@@ -77,9 +81,10 @@ export class ContactVocabularyService {
   }
 
   async createCategory(dto: CreateCategoryDto): Promise<ContactCategoryRow> {
-    if (await this.repo.findCategoryByKey(dto.key)) {
+    const key = deriveKey(dto);
+    if (await this.repo.findCategoryByKey(key)) {
       throw this.errors.create(ErrorCode.CONFLICT, {
-        message: `Category "${dto.key}" already exists`,
+        message: keyConflictMessage('Category', key, dto),
       });
     }
     const parent = dto.parentId
@@ -96,8 +101,9 @@ export class ContactVocabularyService {
     }
     return this.repo.createCategory({
       ...dto,
+      key,
       depth,
-      path: childPath(parent?.path ?? null, dto.key),
+      path: childPath(parent?.path ?? null, key),
     });
   }
 

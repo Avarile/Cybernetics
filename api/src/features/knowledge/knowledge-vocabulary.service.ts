@@ -10,6 +10,7 @@ import {
   rewritePath,
   wouldCycle,
 } from '../shared/materialized-path.util';
+import { deriveKey, keyConflictMessage } from '../shared/vocabulary-key.util';
 import { KnowledgeVocabularyRepository } from './knowledge-vocabulary.repository';
 import type {
   CreateCategoryDto,
@@ -32,12 +33,15 @@ export class KnowledgeVocabularyService {
   }
 
   async createType(dto: CreateKnowledgeTypeDto): Promise<KnowledgeTypeRow> {
-    if (await this.repo.findTypeByKey(dto.key)) {
+    const key = deriveKey(dto);
+    if (await this.repo.findTypeByKey(key)) {
       throw this.errors.create(ErrorCode.CONFLICT, {
-        message: `Knowledge type "${dto.key}" already exists`,
+        message: keyConflictMessage('Knowledge type', key, dto),
       });
     }
-    return this.repo.createType(dto);
+    // `key` after the spread: an explicit `{ key: undefined }` would otherwise
+    // clobber the derived value.
+    return this.repo.createType({ ...dto, key });
   }
 
   async updateType(
@@ -71,9 +75,10 @@ export class KnowledgeVocabularyService {
   }
 
   async createCategory(dto: CreateCategoryDto): Promise<KnowledgeCategoryRow> {
-    if (await this.repo.findCategoryByKey(dto.key)) {
+    const key = deriveKey(dto);
+    if (await this.repo.findCategoryByKey(key)) {
       throw this.errors.create(ErrorCode.CONFLICT, {
-        message: `Category "${dto.key}" already exists`,
+        message: keyConflictMessage('Category', key, dto),
       });
     }
     const parent = dto.parentId
@@ -90,8 +95,9 @@ export class KnowledgeVocabularyService {
     }
     return this.repo.createCategory({
       ...dto,
+      key,
       depth,
-      path: childPath(parent?.path ?? null, dto.key),
+      path: childPath(parent?.path ?? null, key),
     });
   }
 

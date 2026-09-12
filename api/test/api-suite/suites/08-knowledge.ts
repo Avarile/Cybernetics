@@ -49,6 +49,42 @@ async function vocabulary(ctx: Ctx): Promise<void> {
   });
   if (category.ok) ctx.ids.knowledgeCategoryId = category.body.id;
 
+  // `key` is optional: omitted, the server slugifies `name` into both the key
+  // and the category's path segment.
+  const derived = await client.call({
+    name: 'admin creates a knowledge category without a key',
+    method: 'POST',
+    path: '/knowledge-vocabulary/categories',
+    actor: 'admin',
+    body: { name: `API Suite Derived ${stamp}` },
+    expect: 201,
+    assert: (body) => {
+      const expected = `api-suite-derived-${stamp}`.toLowerCase();
+      if (body.key !== expected)
+        return `expected key ${expected}, got ${body.key}`;
+      if (body.path !== `/${expected}`)
+        return `expected path /${expected}, got ${body.path}`;
+    },
+  });
+  if (derived.ok) {
+    await client.call({
+      name: 'a name that derives a taken key conflicts rather than auto-suffixing',
+      method: 'POST',
+      path: '/knowledge-vocabulary/categories',
+      actor: 'admin',
+      body: { name: `API Suite Derived ${stamp}` },
+      expect: 409,
+    });
+    await client.call({
+      name: 'admin deletes the derived-key knowledge category',
+      method: 'DELETE',
+      path: '/knowledge-vocabulary/categories/{id}',
+      params: { id: derived.body.id },
+      actor: 'admin',
+      expect: 204,
+    });
+  }
+
   await client.call({
     name: 'a standard user cannot extend the knowledge vocabulary',
     method: 'POST',

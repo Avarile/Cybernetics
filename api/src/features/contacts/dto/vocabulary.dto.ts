@@ -1,14 +1,10 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
-
-const keySchema = z
-  .string()
-  .min(1)
-  .max(60)
-  .regex(/^[a-z0-9][a-z0-9_-]*$/, 'key must be lower_snake_case');
+import { optionalKeySchema } from '../../shared/vocabulary-key.util';
 
 export const createContactTypeSchema = z.object({
-  key: keySchema,
+  /** Omit and the server derives it from `name`. Immutable once set. */
+  key: optionalKeySchema,
   name: z.string().min(1).max(120),
   description: z.string().max(500).optional(),
   color: z.string().max(16).optional(),
@@ -31,7 +27,8 @@ export class UpdateContactTypeDto extends createZodDto(
 ) {}
 
 export const createCategorySchema = z.object({
-  key: keySchema,
+  /** Omit and the server derives it from `name`. Immutable once set. */
+  key: optionalKeySchema,
   name: z.string().min(1).max(120),
   description: z.string().max(500).optional(),
   parentId: z.string().uuid().optional(),

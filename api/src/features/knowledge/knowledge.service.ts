@@ -5,6 +5,7 @@ import type { KnowledgeRow } from '../../infrastructure/database/schema/knowledg
 import { ActivityService } from '../shared/activity.service';
 import { EntityCascadeService } from '../shared/entity-cascade.service';
 import { TagService } from '../shared/tag.service';
+import { slugify } from '../shared/slug.util';
 import type {
   CreateKnowledgeDto,
   ListKnowledgeDto,
@@ -24,6 +25,12 @@ import {
   KnowledgeRepository,
   type KnowledgeQuery,
 } from './knowledge.repository';
+
+/**
+ * Room for `uniqueSlug`'s suffix inside the column's 255, so a derived slug
+ * that collides can still grow a `-2` without truncation.
+ */
+const SLUG_MAX_LENGTH = 200;
 
 export interface PublicKnowledge {
   id: string;
@@ -115,7 +122,9 @@ export class KnowledgeService {
     if (dto.tagIds?.length) {
       await this.tags.resolveForScope(dto.tagIds, 'knowledge');
     }
-    const slug = await this.uniqueSlug(dto.slug ?? this.slugify(dto.title));
+    const slug = await this.uniqueSlug(
+      dto.slug ?? slugify(dto.title, SLUG_MAX_LENGTH),
+    );
     const reviewDueAt =
       dto.reviewDueAt ?? (await this.defaultReviewDue(dto.typeId));
 
@@ -335,17 +344,6 @@ export class KnowledgeService {
         : Promise.resolve([]),
     ]);
     return resolveKnowledgeAccess(row, principal, grants, roleIds);
-  }
-
-  /** `Title Case Words` -> `title-case-words`. */
-  private slugify(title: string): string {
-    return (
-      title
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/^-+|-+$/g, '')
-        .slice(0, 200) || 'untitled'
-    );
   }
 
   /**
