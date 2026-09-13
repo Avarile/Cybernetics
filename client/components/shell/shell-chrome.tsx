@@ -1,6 +1,7 @@
 "use client"
 
 import {
+  LockIcon,
   LogOutIcon,
   MicIcon,
   PanelRightIcon,
@@ -44,6 +45,25 @@ export function ShellChrome() {
         <span className="pointer-events-auto select-none text-xs font-semibold tracking-widest text-white/60">
           ◆ CYBERNETICS
         </span>
+
+        {/*
+          The way back to a dismissed gate. The auth window is closable like
+          every other window over the core, so signing in has to be reachable
+          from the chrome — otherwise dismissing it would strand a signed-out
+          visitor in front of a machine with no door. `openWindow` is a
+          singleton for this kind, so it focuses and restores an open gate
+          rather than stacking a second one.
+        */}
+        {!authed && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="pointer-events-auto h-7 gap-1.5 text-xs text-white/70 hover:bg-white/10 hover:text-white"
+            onClick={() => openWindow({ kind: "auth" })}
+          >
+            <LockIcon className="size-3.5" /> Sign in
+          </Button>
+        )}
 
         {authed && (
           <div className="pointer-events-auto flex items-center gap-1">

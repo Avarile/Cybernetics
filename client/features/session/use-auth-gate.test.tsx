@@ -86,19 +86,35 @@ describe("useAuthGate", () => {
   })
 
   /**
-   * Successor to the old `use-auth-window.test.tsx`'s test of the same name
-   * (deleted in Task 14). The behaviour survives the rewrite via `gateId`'s
-   * presence in the effect's dependency array — a dismissed gate means
-   * `gateId` goes back to `null`, which re-triggers the reconciliation.
+   * Inverts the old `use-auth-window.test.tsx` expectation of the same name.
+   * The gate used to reopen itself the instant it went missing — `gateId` sat
+   * in the effect's dependency array — which is what made it the one window
+   * over the core that could not be closed. It is now offered once per
+   * signed-out episode, and "Sign in" in the shell chrome summons it back.
    */
-  it("reopens the gate if it is dismissed while still signed out", async () => {
-    renderHook(() => useAuthGate(true), { wrapper: wrapper(vi.fn()) })
+  it("stays closed once dismissed while still signed out", async () => {
+    const { rerender } = renderHook(() => useAuthGate(true), { wrapper: wrapper(vi.fn()) })
     await waitFor(() => expect(gate()).toBeDefined())
-    const dismissedId = gate()!.id
 
-    act(() => useWorkspaceStore.getState().closeWindow(dismissedId))
+    act(() => useWorkspaceStore.getState().closeWindow(gate()!.id))
+    rerender()
+    rerender()
 
+    expect(gate()).toBeUndefined()
+  })
+
+  it("raises the gate again on a later sign-out", async () => {
+    // The episode latch has to re-arm, or an expiry mid-session would drop the
+    // user onto an inert surface with no prompt.
+    renderHook(() => useAuthGate(true), { wrapper: wrapper(async () => PRINCIPAL) })
     await waitFor(() => expect(gate()).toBeDefined())
-    expect(gate()!.id).not.toBe(dismissedId)
+
+    act(() =>
+      useSessionStore.getState().setTokens({ accessToken: "a", refreshToken: "r", expiresIn: 60 }),
+    )
+    await waitFor(() => expect(gate()).toBeUndefined())
+
+    act(() => useSessionStore.getState().clear())
+    await waitFor(() => expect(gate()).toBeDefined())
   })
 })

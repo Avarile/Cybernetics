@@ -6,8 +6,14 @@ import { selectMinimised, selectOpenWindows, selectTopModal, useWorkspaceStore }
 import { useViewportStore } from "@/stores/viewport.store"
 
 /**
- * The open workspace: windows in z-order, the minimised dock, and whichever
- * modal currently owns the scrim.
+ * The open workspace: windows in z-order, the minimised dock, whichever modal
+ * currently owns the scrim, and the two actions that are not about one
+ * particular window — opening a kind, and closing by id.
+ *
+ * `closeWindow` is here, rather than reached for through the store, because
+ * WindowLayer's two global dismissal gestures (Escape on the topmost window,
+ * a click on the scrim) act on a window it does not render as a component and
+ * so cannot call `useWindowControls` for.
  */
 export function useWorkspace() {
   // useShallow is required, not stylistic: these selectors filter and sort, so
@@ -17,7 +23,8 @@ export function useWorkspace() {
   const minimised = useWorkspaceStore(useShallow(selectMinimised))
   const topModal = useWorkspaceStore(selectTopModal)
   const openWindow = useWorkspaceStore((s) => s.openWindow)
-  return { windows, minimised, topModal, openWindow }
+  const closeWindow = useWorkspaceStore((s) => s.closeWindow)
+  return { windows, minimised, topModal, openWindow, closeWindow }
 }
 
 /**

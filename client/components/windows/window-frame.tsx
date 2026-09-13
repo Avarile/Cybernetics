@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, type ReactNode } from "react"
+import type { ReactNode } from "react"
 import { MinusIcon, SquareIcon, XIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
@@ -54,16 +54,9 @@ export function WindowFrame({
     onCommit: onMove,
   })
 
-  // Escape closes a non-modal window. Modal windows are dismissed by their own
-  // affordances — an auth dialog you can Escape out of is not a gate.
-  useEffect(() => {
-    if (win.modal) return
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose()
-    }
-    document.addEventListener("keydown", onKey)
-    return () => document.removeEventListener("keydown", onKey)
-  }, [win.modal, onClose])
+  // Escape is deliberately NOT handled here. One listener per frame meant one
+  // keystroke closed every open window at once; WindowLayer owns the gesture
+  // now and applies it to the topmost window only.
 
   if (isMobile) {
     return (
@@ -110,15 +103,21 @@ export function WindowFrame({
       >
         <span className="truncate text-xs font-medium text-muted-foreground">{win.title}</span>
         <div className="flex items-center gap-0.5">
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="Minimise"
-            onClick={onMinimise}
-            className="size-6"
-          >
-            <MinusIcon className="size-3.5" />
-          </Button>
+          {/* A modal cannot be minimised: its scrim is painted by WindowLayer
+              from the window's existence, not its visibility, so minimising
+              one left a blocking scrim over the core with nothing on top of it
+              to dismiss. Close and the dock are the ways out instead. */}
+          {!win.modal && (
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Minimise"
+              onClick={onMinimise}
+              className="size-6"
+            >
+              <MinusIcon className="size-3.5" />
+            </Button>
+          )}
           <Button
             variant="ghost"
             size="icon"

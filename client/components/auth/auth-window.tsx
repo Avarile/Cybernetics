@@ -17,7 +17,9 @@ const REGISTER_ENABLED = process.env.NEXT_PUBLIC_ENABLE_REGISTER === "true"
 
 /**
  * The card is the whole dialog: WindowLayer renders this kind chromeless and
- * centres it, so there is no frame, no title bar and no close button around it.
+ * centres it, so there is no frame and no title bar around it — only a Close
+ * floated over its top-right corner, which is why the header is centred and
+ * that corner is left clear.
  */
 const HEADINGS = {
   signin: {

@@ -83,16 +83,26 @@ describe("WindowFrame", () => {
     expect(h.onFocus).toHaveBeenCalled()
   })
 
-  it("Escape closes a non-modal window", async () => {
+  it("leaves Escape to WindowLayer", async () => {
+    // The frame used to register its own document listener, so one Escape
+    // closed every open window at once. WindowLayer owns the gesture now and
+    // applies it to the topmost window only — covered in window-layer.test.
     const h = setup()
     await userEvent.keyboard("{Escape}")
+    expect(h.onClose).not.toHaveBeenCalled()
+  })
+
+  it("offers Close on a modal window", async () => {
+    const h = setup({ modal: true })
+    await userEvent.click(screen.getByRole("button", { name: /close/i }))
     expect(h.onClose).toHaveBeenCalledTimes(1)
   })
 
-  it("Escape does NOT close a modal window", async () => {
-    const h = setup({ modal: true })
-    await userEvent.keyboard("{Escape}")
-    expect(h.onClose).not.toHaveBeenCalled()
+  it("hides Minimise on a modal window", () => {
+    // A minimised modal left its scrim over the core with nothing on top of it
+    // to dismiss — the app read as frozen. Close, or the dock, instead.
+    setup({ modal: true })
+    expect(screen.queryByRole("button", { name: /minimise/i })).not.toBeInTheDocument()
   })
 
   it("a maximised window fills the viewport", () => {

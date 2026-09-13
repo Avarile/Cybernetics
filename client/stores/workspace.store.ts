@@ -265,8 +265,18 @@ export const selectOpenWindows = (st: WorkspaceState): WindowInstance[] =>
 export const selectMinimised = (st: WorkspaceState): WindowInstance[] =>
   st.windows.filter((w) => w.state === "minimised")
 
+/**
+ * Which modal owns the scrim. Minimised windows are excluded: the scrim is
+ * drawn from a modal's existence, so a minimised one would dim and block the
+ * whole surface with nothing visible on top of it to dismiss. WindowFrame
+ * hides Minimise on a modal for the same reason; this is the backstop for a
+ * state that reaches the store by another route (a restored payload, a direct
+ * `minimiseWindow` call).
+ */
 export const selectTopModal = (st: WorkspaceState): WindowInstance | null =>
-  st.windows.filter((w) => w.modal).sort((a, b) => b.zIndex - a.zIndex)[0] ?? null
+  st.windows
+    .filter((w) => w.modal && w.state !== "minimised")
+    .sort((a, b) => b.zIndex - a.zIndex)[0] ?? null
 
 /** What survives a reload: the user's workspace, never their in-flight work. */
 export function serialiseForPersist(windows: WindowInstance[]): WindowInstance[] {

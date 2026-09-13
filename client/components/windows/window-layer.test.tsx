@@ -70,17 +70,37 @@ describe("WindowLayer", () => {
 
   it("renders a chromeless window as a bare centred dialog", () => {
     // The auth gate: still a labelled dialog for assistive tech, but with no
-    // frame around it — and crucially no Close, so the gate cannot be waved
-    // away without signing in. Synchronous queries only: the body is `lazy`,
-    // and awaiting it would mount AuthWindow outside an ApiProvider.
+    // frame around it — no title bar, no minimise, no maximise, no grips.
+    // Synchronous queries only: the body is `lazy`, and awaiting it would
+    // mount AuthWindow outside an ApiProvider.
     s().openWindow({ kind: "auth", title: "Access", modal: true })
     const { container } = render(<WindowLayer />)
 
     expect(screen.getByRole("dialog", { name: "Access" })).toBeInTheDocument()
-    for (const name of [/close/i, /minimise/i, /maximise/i]) {
+    for (const name of [/minimise/i, /maximise/i]) {
       expect(screen.queryByRole("button", { name })).not.toBeInTheDocument()
     }
     expect(container.querySelector('[data-testid^="resize-"]')).toBeNull()
+  })
+
+  it("gives a chromeless window a Close of its own", async () => {
+    // Chromeless means undecorated, not undismissable. Without this the auth
+    // gate was the one window over the core with no way out but signing in.
+    s().openWindow({ kind: "auth", title: "Access", modal: true })
+    render(<WindowLayer />)
+
+    await userEvent.click(screen.getByRole("button", { name: /close/i }))
+    expect(s().windows).toHaveLength(0)
+  })
+
+  it("dismisses the modal that owns the scrim when the scrim is clicked", async () => {
+    s().openWindow({ kind: "terminal", title: "Terminal" })
+    s().openWindow({ kind: "confirm", title: "Confirm", modal: true })
+    const { container } = render(<WindowLayer />)
+
+    await userEvent.click(container.querySelector<HTMLElement>(".bg-black\\/50")!)
+
+    expect(s().windows.map((w) => w.kind)).toEqual(["terminal"])
   })
 
   it("still frames a normal window", () => {
@@ -90,6 +110,42 @@ describe("WindowLayer", () => {
 
     expect(screen.getByRole("button", { name: /close/i })).toBeInTheDocument()
     expect(container.querySelector('[data-testid="resize-se"]')).not.toBeNull()
+  })
+
+  it("Escape closes the topmost window and leaves the rest alone", async () => {
+    // Regression: each WindowFrame registered its own document listener, so a
+    // single Escape closed every open non-modal window at once.
+    s().openWindow({ kind: "terminal", title: "Terminal" })
+    const top = s().openWindow({ kind: "voice", title: "Live" })
+    render(<WindowLayer />)
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(s().windows.map((w) => w.id)).not.toContain(top)
+    expect(s().windows).toHaveLength(1)
+  })
+
+  it("Escape reaches a modal before anything underneath it", async () => {
+    s().openWindow({ kind: "terminal", title: "Terminal" })
+    s().openWindow({ kind: "confirm", title: "Confirm", modal: true })
+    render(<WindowLayer />)
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(s().windows.map((w) => w.kind)).toEqual(["terminal"])
+  })
+
+  it("ignores an Escape a window body already handled", async () => {
+    // A select or popover inside a body closes itself on Escape and marks the
+    // event handled; taking the window down with it would be one gesture too
+    // many.
+    s().openWindow({ kind: "terminal", title: "Terminal" })
+    render(<WindowLayer />)
+
+    document.addEventListener("keydown", (e) => e.preventDefault(), { capture: true, once: true })
+    await userEvent.keyboard("{Escape}")
+
+    expect(s().windows).toHaveLength(1)
   })
 
   it("skips a kind that has no registry entry rather than crashing", () => {
@@ -116,7 +172,19 @@ describe("Dock", () => {
     s().minimiseWindow(id)
     render(<Dock />)
 
-    await userEvent.click(screen.getByRole("button", { name: /Terminal/ }))
+    // Exact name: the entry now carries a "Close Terminal" button too.
+    await userEvent.click(screen.getByRole("button", { name: "Terminal" }))
     expect(s().windows[0].state).toBe("normal")
+  })
+
+  it("closes a minimised window from the dock without restoring it first", async () => {
+    // Minimising used to be a one-way door: the only way to be rid of a window
+    // in the dock was to bring it back up and then close it.
+    const id = s().openWindow({ kind: "terminal", title: "Terminal" })
+    s().minimiseWindow(id)
+    render(<Dock />)
+
+    await userEvent.click(screen.getByRole("button", { name: "Close Terminal" }))
+    expect(s().windows).toHaveLength(0)
   })
 })
