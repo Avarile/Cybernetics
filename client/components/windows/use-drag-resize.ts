@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import type { PointerEvent as ReactPointerEvent } from "react"
 import type { Rect } from "@/lib/windows/types"
 
@@ -17,6 +17,22 @@ export interface Size {
 }
 
 const DEFAULT_MIN: Size = { w: 320, h: 200 }
+
+/**
+ * Things a pointer-down must reach instead of starting a drag.
+ *
+ * The window controls live INSIDE the title bar, which is the drag handle, so
+ * their pointer-down bubbles to `begin` below. That used to be fatal rather
+ * than merely untidy: `begin` calls `setPointerCapture` on the handle, and
+ * pointer capture retargets every later pointer event — `pointerup` included —
+ * to the capturing element. The browser then dispatches `click` at the nearest
+ * common ancestor of the down and up targets, i.e. the title bar, so the
+ * button's own `onClick` was never reached and the close button did nothing.
+ *
+ * jsdom implements neither pointer capture nor click retargeting, which is why
+ * `window-frame.test.tsx` clicked all three controls and passed throughout.
+ */
+const INTERACTIVE = "button, a, input, select, textarea, [role='button'], [data-no-drag]"
 
 /** Pure: translate a rect. */
 export function applyDrag(rect: Rect, d: Delta): Rect {
@@ -83,11 +99,27 @@ export function useDragResize(opts: {
   const [liveRect, setLiveRect] = useState<Rect | null>(null)
   const origin = useRef<{ x: number; y: number; rect: Rect } | null>(null)
 
+  // Detaches whatever the gesture in flight attached. Held in a ref so the
+  // unmount effect below can reach it: the listeners live on `window`, and a
+  // frame that closes mid-drag (Escape, a close from another window, a section
+  // remount) would otherwise leave all three attached for the life of the page,
+  // each retaining the DOM node, the origin rect and — through `onCommit` — the
+  // whole component closure.
+  const detach = useRef<(() => void) | null>(null)
+  useEffect(() => () => detach.current?.(), [])
+
   const begin = useCallback(
     (e: ReactPointerEvent, transform: (start: Rect, d: Delta) => Rect) => {
       if (disabled || e.button !== 0) return
+      // A pointer-down on one of the title bar's own controls is that control's
+      // to handle. Returning BEFORE preventDefault and setPointerCapture is the
+      // whole point — see INTERACTIVE above.
+      if ((e.target as HTMLElement).closest?.(INTERACTIVE)) return
+
       e.preventDefault()
-      e.stopPropagation()
+      // Deliberately NOT stopPropagation: the frame root's own `onPointerDown`
+      // is what raises the window, and swallowing this event here meant
+      // dragging a background window by its title bar never brought it forward.
 
       const target = e.currentTarget as HTMLElement
       target.setPointerCapture?.(e.pointerId)
@@ -99,17 +131,26 @@ export function useDragResize(opts: {
         setLiveRect(transform(o.rect, { dx: ev.clientX - o.x, dy: ev.clientY - o.y }))
       }
 
-      const onUp = (ev: PointerEvent) => {
-        const o = origin.current
-        if (o) {
-          onCommit(transform(o.rect, { dx: ev.clientX - o.x, dy: ev.clientY - o.y }))
-        }
+      const release = () => {
         origin.current = null
         setLiveRect(null)
-        target.releasePointerCapture?.(ev.pointerId)
         window.removeEventListener("pointermove", onMove)
         window.removeEventListener("pointerup", onUp)
         window.removeEventListener("pointercancel", onUp)
+        detach.current = null
+      }
+
+      const onUp = (ev: PointerEvent) => {
+        const o = origin.current
+        const d = o ? { dx: ev.clientX - o.x, dy: ev.clientY - o.y } : null
+        // A pointer that never moved is a click, not a gesture. Committing it
+        // anyway wrote an identical rect back to the persisted workspace store
+        // on every click of the title bar.
+        if (o && d && (d.dx !== 0 || d.dy !== 0)) {
+          onCommit(transform(o.rect, d))
+        }
+        target.releasePointerCapture?.(ev.pointerId)
+        release()
       }
 
       window.addEventListener("pointermove", onMove)
@@ -117,6 +158,7 @@ export function useDragResize(opts: {
       // A cancelled pointer (browser gesture, focus loss) would otherwise leave
       // the listeners attached and the window stuck to the cursor.
       window.addEventListener("pointercancel", onUp)
+      detach.current = release
     },
     [disabled, rect, onCommit],
   )

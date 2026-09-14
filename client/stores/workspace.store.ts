@@ -4,7 +4,7 @@ import { persist } from "zustand/middleware"
 import { immer } from "zustand/middleware/immer"
 import { createLegacyAwareStorage } from "@/lib/state/persist-storage"
 import { readLegacyWindows } from "@/lib/state/legacy-storage"
-import { cascade, clampToViewport } from "@/lib/windows/geometry"
+import { cascade, centreInViewport, clampToViewport } from "@/lib/windows/geometry"
 import { WINDOW_META } from "@/lib/windows/meta"
 import type { JsonObject } from "@/lib/state/json"
 import { useViewportStore } from "./viewport.store"
@@ -76,9 +76,6 @@ interface WorkspaceState {
   patchWindowProps: (id: string, patch: JsonObject) => void
   closeWindow: (id: string) => void
   focusWindow: (id: string) => void
-  minimiseWindow: (id: string) => void
-  restoreWindow: (id: string) => void
-  toggleMaximise: (id: string) => void
   moveWindow: (id: string, rect: Rect) => void
   closeAll: () => void
 }
@@ -122,6 +119,11 @@ export function isRestorable(v: unknown): v is WindowInstance {
     // Finite, not merely numeric: an Infinity here would poison zSeq for the
     // whole session, since every later nextZ derives from it.
     Number.isFinite(w.zIndex) &&
+    // Any of the three states a previous build could have written. A payload
+    // saying "minimised" is still a restorable window — `merge` normalises it
+    // to "normal" below rather than dropping it, because a window this rejects
+    // is gone for good and the dock that could have brought it back no longer
+    // exists.
     (w.state === "normal" || w.state === "minimised" || w.state === "maximised") &&
     w.modal === false &&
     isRect(w.rect) &&
@@ -148,9 +150,6 @@ export const useWorkspaceStore = create<WorkspaceState>()(
 
         if (existing) {
           get().focusWindow(existing.id)
-          if (get().windows.find((w) => w.id === existing.id)?.state === "minimised") {
-            get().restoreWindow(existing.id)
-          }
           return existing.id
         }
 
@@ -163,8 +162,17 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           { ...DEFAULT_RECT, ...meta?.defaultRect, ...input.rect },
           viewport,
         )
-        // An explicit x means the caller placed it; only auto-placed windows cascade.
-        const rect = input.rect?.x != null ? base : cascade(get().windows.length, base, viewport)
+        // An explicit x means the caller placed it and nothing here may move it.
+        // Otherwise the kind's declared placement decides: "centre" for the
+        // singleton windows that are the task (terminal, data, confirm), and
+        // the cascade offset for everything else, where several instances can
+        // be open at once and stacking them exactly would hide all but the last.
+        const rect =
+          input.rect?.x != null
+            ? base
+            : meta?.placement === "centre"
+              ? centreInViewport(base, viewport)
+              : cascade(get().windows.length, base, viewport)
 
         const instance: WindowInstance = {
           id,
@@ -206,36 +214,53 @@ export const useWorkspaceStore = create<WorkspaceState>()(
           state.windows = state.windows.filter((w) => w.id !== id)
         }),
 
+      /**
+       * Raise a window — and do NOTHING when it is already raised.
+       *
+       * The early return is load-bearing, not a micro-optimisation. Every
+       * WindowFrame calls this from `onPointerDown` on its root, so it fires on
+       * every click ANYWHERE inside a window: a checkbox, a tab, a row, a menu
+       * item. Without the guard each of those bumped zSeq and reassigned
+       * zIndex, and because this store is persisted, every one of them cost a
+       * full `JSON.stringify` of the window array plus the read-back that
+       * `createLegacyAwareStorage.setItem` does for its same-key legacy guard —
+       * and re-rendered every `useWorkspace()` subscriber, which includes one
+       * `useRecordWindows` per mounted table and every domain `useExtras` hook.
+       * Clicking a checkbox in a data table re-sorted and re-rendered the whole
+       * table. It also left zSeq climbing without bound across a session.
+       */
       focusWindow: (id) =>
         set((state) => {
           const win = state.windows.find((w) => w.id === id)
           if (!win) return
+          // Top of its OWN band: a non-modal window is never asked to out-rank
+          // the modal band, so comparing against every window would leave a
+          // non-modal window rewriting its zIndex forever while a modal is up.
+          const top = state.windows.reduce(
+            (max, w) => (w.modal === win.modal ? Math.max(max, w.zIndex) : max),
+            0,
+          )
+          if (win.zIndex === top) return
           state.zSeq += 1
           win.zIndex = win.modal ? MODAL_Z_BASE + state.zSeq : state.zSeq
-        }),
-
-      minimiseWindow: (id) =>
-        set((state) => {
-          const win = state.windows.find((w) => w.id === id)
-          if (win) win.state = "minimised"
-        }),
-
-      restoreWindow: (id) =>
-        set((state) => {
-          const win = state.windows.find((w) => w.id === id)
-          if (win) win.state = "normal"
-        }),
-
-      toggleMaximise: (id) =>
-        set((state) => {
-          const win = state.windows.find((w) => w.id === id)
-          if (win) win.state = win.state === "maximised" ? "normal" : "maximised"
         }),
 
       moveWindow: (id, rect) =>
         set((state) => {
           const win = state.windows.find((w) => w.id === id)
-          if (win) win.rect = clampToViewport(rect, useViewportStore.getState())
+          if (!win) return
+          const next = clampToViewport(rect, useViewportStore.getState())
+          // Same reasoning as focusWindow: a drag that ends where it started
+          // must not cost a serialise and a re-render of every subscriber.
+          if (
+            win.rect.x === next.x &&
+            win.rect.y === next.y &&
+            win.rect.w === next.w &&
+            win.rect.h === next.h
+          ) {
+            return
+          }
+          win.rect = next
         }),
 
       closeAll: () =>
@@ -273,7 +298,21 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         // which `skipHydration` makes an ordinary ordering rather than an
         // exotic one. The default merge is a no-op on this path; so is this.
         if (saved == null) return current
-        const windows = (Array.isArray(saved.windows) ? saved.windows : []).filter(isRestorable)
+        const viewport = useViewportStore.getState()
+        const windows = (Array.isArray(saved.windows) ? saved.windows : [])
+          .filter(isRestorable)
+          .map((w) => ({
+            ...w,
+            // Minimise and maximise are gone. A payload written by an older
+            // build can still carry either, and leaving it would resurrect a
+            // window in a state nothing can render or escape from.
+            state: "normal" as const,
+            // Re-clamped on the way in, not merely on the way out. A layout
+            // saved on a wide monitor restores on a laptop with the same
+            // 1140x720 rect at the same offset — half of it off-screen, and
+            // nothing re-clamps until the user drags it.
+            rect: clampToViewport(w.rect, viewport),
+          }))
         return {
           ...current,
           windows,
@@ -290,10 +329,7 @@ export const useWorkspaceStore = create<WorkspaceState>()(
 )
 
 export const selectOpenWindows = (st: WorkspaceState): WindowInstance[] =>
-  st.windows.filter((w) => w.state !== "minimised").sort((a, b) => a.zIndex - b.zIndex)
-
-export const selectMinimised = (st: WorkspaceState): WindowInstance[] =>
-  st.windows.filter((w) => w.state === "minimised")
+  [...st.windows].sort((a, b) => a.zIndex - b.zIndex)
 
 export const selectTopModal = (st: WorkspaceState): WindowInstance | null =>
   st.windows.filter((w) => w.modal).sort((a, b) => b.zIndex - a.zIndex)[0] ?? null

@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest"
 import {
   MODAL_Z_BASE,
-  selectMinimised,
   selectOpenWindows,
   selectTopModal,
   serialiseForPersist,
@@ -34,14 +33,6 @@ describe("workspace.store", () => {
     expect(s().windows).toHaveLength(2)
     const top = [...s().windows].sort((a, b) => b.zIndex - a.zIndex)[0]
     expect(top.id).toBe(first)
-  })
-
-  it("re-opening a minimised singleton restores it", () => {
-    const id = s().openWindow({ kind: "terminal" })
-    s().minimiseWindow(id)
-    expect(s().windows[0].state).toBe("minimised")
-    s().openWindow({ kind: "terminal" })
-    expect(s().windows[0].state).toBe("normal")
   })
 
   it("keys non-singletons so the same record opens once but two records coexist", () => {
@@ -94,11 +85,42 @@ describe("workspace.store", () => {
     )
   })
 
-  it("cascades so two windows do not sit exactly on top of each other", () => {
-    s().openWindow({ kind: "terminal" })
-    s().openWindow({ kind: "data" })
+  it("cascades so two windows of a cascading kind do not sit exactly on top of each other", () => {
+    // Record kinds, not terminal/data: those two declare `placement: "centre"`
+    // and are singletons, so they can never stack in the first place.
+    s().openWindow({ kind: "record-edit", singletonKey: "e:1" })
+    s().openWindow({ kind: "record-edit", singletonKey: "e:2" })
     const [a, b] = s().windows
     expect({ x: b.rect.x, y: b.rect.y }).not.toEqual({ x: a.rect.x, y: a.rect.y })
+  })
+
+  it("centres the kinds that declare it, and only those", () => {
+    // 1400x900 viewport, from beforeEach.
+    const term = s().openWindow({ kind: "terminal" })
+    const rec = s().openWindow({ kind: "record-edit", singletonKey: "e:1" })
+
+    const t = s().windows.find((w) => w.id === term)!.rect
+    expect(t.x).toBe(Math.round((1400 - t.w) / 2))
+    expect(t.y).toBe(Math.round((900 - t.h) / 2))
+
+    // A cascading kind still starts from the corner default.
+    const r = s().windows.find((w) => w.id === rec)!.rect
+    expect(r.x).not.toBe(Math.round((1400 - r.w) / 2))
+  })
+
+  it("centres the modal confirm rather than cascading it into the corner", () => {
+    const id = s().openWindow({ kind: "confirm", singletonKey: "c:1" })
+    const r = s().windows.find((w) => w.id === id)!.rect
+    expect({ x: r.x, y: r.y }).toEqual({
+      x: Math.round((1400 - r.w) / 2),
+      y: Math.round((900 - r.h) / 2),
+    })
+  })
+
+  it("lets an explicit rect.x beat the declared centring", () => {
+    const id = s().openWindow({ kind: "terminal", rect: { x: 7, y: 9 } })
+    const r = s().windows.find((w) => w.id === id)!.rect
+    expect({ x: r.x, y: r.y }).toEqual({ x: 7, y: 9 })
   })
 
   it("closes a window", () => {
@@ -107,12 +129,55 @@ describe("workspace.store", () => {
     expect(s().windows).toHaveLength(0)
   })
 
-  it("toggles maximise and back to normal", () => {
+  it("focusWindow is a no-op when the window is already on top", () => {
+    // Every WindowFrame calls focus from onPointerDown, so this fires on every
+    // click anywhere inside a window. Without the guard each one bumped zSeq,
+    // wrote the whole workspace to localStorage and re-rendered every
+    // subscriber — and zSeq climbed without bound across a session.
+    s().openWindow({ kind: "terminal" })
+    const top = s().openWindow({ kind: "data" })
+    const seq = s().zSeq
+    const z = s().windows.find((w) => w.id === top)!.zIndex
+
+    s().focusWindow(top)
+    s().focusWindow(top)
+
+    expect(s().zSeq).toBe(seq)
+    expect(s().windows.find((w) => w.id === top)!.zIndex).toBe(z)
+  })
+
+  it("focusWindow still raises a window that is not on top", () => {
+    const under = s().openWindow({ kind: "terminal" })
+    const over = s().openWindow({ kind: "data" })
+
+    s().focusWindow(under)
+
+    expect(s().windows.find((w) => w.id === under)!.zIndex).toBeGreaterThan(
+      s().windows.find((w) => w.id === over)!.zIndex,
+    )
+  })
+
+  it("focusWindow compares within a band, so a non-modal under a modal settles", () => {
+    // The top-most window overall is the modal. A non-modal that compared
+    // against it could never reach the top and would rewrite its zIndex on
+    // every single click — the exact churn the guard exists to stop.
+    s().openWindow({ kind: "auth", modal: true })
+    const term = s().openWindow({ kind: "terminal" })
+    s().focusWindow(term)
+    const seq = s().zSeq
+
+    s().focusWindow(term)
+
+    expect(s().zSeq).toBe(seq)
+  })
+
+  it("moveWindow is a no-op when the rect is unchanged", () => {
     const id = s().openWindow({ kind: "terminal" })
-    s().toggleMaximise(id)
-    expect(s().windows[0].state).toBe("maximised")
-    s().toggleMaximise(id)
-    expect(s().windows[0].state).toBe("normal")
+    const before = s().windows[0]
+    s().moveWindow(id, { ...before.rect })
+    // Same object identity: immer produced no new draft, so persist wrote
+    // nothing and no subscriber re-rendered.
+    expect(s().windows[0]).toBe(before)
   })
 
   it("moveWindow records a new rect", () => {
@@ -129,13 +194,14 @@ describe("workspace.store", () => {
     expect(r.y + r.h).toBeLessThanOrEqual(900)
   })
 
-  it("selectors split normal from minimised", () => {
+  it("selectOpenWindows sorts by z-index without mutating the store array", () => {
     const a = s().openWindow({ kind: "terminal" })
     s().openWindow({ kind: "data" })
-    s().minimiseWindow(a)
+    s().focusWindow(a)
 
-    expect(selectOpenWindows(s()).map((w) => w.kind)).toEqual(["data"])
-    expect(selectMinimised(s()).map((w) => w.kind)).toEqual(["terminal"])
+    expect(selectOpenWindows(s()).map((w) => w.kind)).toEqual(["data", "terminal"])
+    // The store's own array keeps insertion order — the selector copies first.
+    expect(s().windows.map((w) => w.kind)).toEqual(["terminal", "data"])
   })
 
   it("excludes modal and record-* windows from persistence", () => {
@@ -259,6 +325,68 @@ describe("workspace.store persistence", () => {
     // And zSeq comes from what survived, so the next window opens at 5 rather
     // than behind an unreachable z-index.
     expect(useWorkspaceStore.getState().zSeq).toBe(4)
+  })
+
+  it("normalises a window persisted as minimised by an older build", async () => {
+    // Minimise is gone and so is the dock. Restoring one in that state would
+    // put a window on screen that nothing can render and nothing can recover.
+    localStorage.setItem(
+      "cyb.windows",
+      JSON.stringify({
+        version: 1,
+        state: {
+          windows: [
+            {
+              id: "w1",
+              kind: "data",
+              title: "Data",
+              rect: { x: 10, y: 10, w: 400, h: 300 },
+              zIndex: 4,
+              state: "minimised",
+              modal: false,
+            },
+          ],
+          zSeq: 4,
+        },
+      }),
+    )
+
+    await useWorkspaceStore.persist.rehydrate()
+
+    expect(useWorkspaceStore.getState().windows.map((w) => w.state)).toEqual(["normal"])
+  })
+
+  it("re-clamps a restored rect against the current viewport", async () => {
+    // A layout saved on a wide monitor, reopened on a laptop. Nothing re-clamps
+    // after rehydrate, so an oversized rect stayed half off-screen until the
+    // user dragged it.
+    useViewportStore.getState().setViewport({ w: 800, h: 600 })
+    localStorage.setItem(
+      "cyb.windows",
+      JSON.stringify({
+        version: 1,
+        state: {
+          windows: [
+            {
+              id: "w1",
+              kind: "data",
+              title: "Data",
+              rect: { x: 1200, y: 900, w: 1600, h: 1000 },
+              zIndex: 4,
+              state: "normal",
+              modal: false,
+            },
+          ],
+          zSeq: 4,
+        },
+      }),
+    )
+
+    await useWorkspaceStore.persist.rehydrate()
+
+    const r = useWorkspaceStore.getState().windows[0].rect
+    expect(r.x + r.w).toBeLessThanOrEqual(800)
+    expect(r.y + r.h).toBeLessThanOrEqual(600)
   })
 
   it("leaves an already-open workspace alone when storage is empty", async () => {

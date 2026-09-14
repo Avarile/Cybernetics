@@ -22,6 +22,7 @@ import {
 import {
   AccountName,
   CategoryName,
+  FinanceLookupProvider,
   FinanceReports,
   useAccountExtras,
   useInvoiceExtras,
@@ -400,6 +401,10 @@ export const financeDomain: DomainSpec = {
         config: transactionsConfig,
         titleOf: (r: Transaction) => r.description,
         useExtras: useTransactionExtras,
+        // The Account and Category columns are foreign keys. The wrapper
+        // resolves both lookups once for the whole table instead of once per
+        // cell — see FinanceLookupProvider.
+        wrapper: FinanceLookupProvider,
       },
     },
     {

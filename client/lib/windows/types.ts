@@ -31,7 +31,14 @@ export interface Rect {
   h: number
 }
 
-export type WindowState = "normal" | "minimised" | "maximised"
+/**
+ * One state, deliberately.
+ *
+ * Minimise and maximise were removed along with the dock: a window is either
+ * open or closed. Kept as a named union rather than folded away so the field
+ * stays greppable and a future state has somewhere to go.
+ */
+export type WindowState = "normal"
 
 export interface WindowInstance {
   id: string
@@ -77,6 +84,21 @@ export interface WindowMeta {
    * where the body is already a Card and there is nothing legitimate to close.
    */
   chrome?: "frame" | "none"
+  /**
+   * Where an auto-placed window lands.
+   *
+   * "cascade" (the default) offsets each new window from its predecessor, which
+   * is right for the record windows — several can be open at once and stacking
+   * them exactly would hide all but the last.
+   *
+   * "centre" is for the windows that ARE the task and are singletons: the data
+   * tables, the terminal, and a modal confirm, which under a scrim in the
+   * top-left corner reads as a rendering fault rather than a dialog.
+   *
+   * Ignored when the opener passes an explicit `rect.x` — a caller that placed
+   * the window means it.
+   */
+  placement?: "cascade" | "centre"
   defaultRect?: Partial<Rect>
   minSize?: { w: number; h: number }
 }

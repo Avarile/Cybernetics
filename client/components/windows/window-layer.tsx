@@ -16,8 +16,8 @@ import { WindowFrame } from "./window-frame"
  * `.map()` below without breaking the rules of hooks across a list whose
  * length changes as windows open and close.
  */
-function WindowItem({ win }: { win: WindowInstance }) {
-  const { close, focus, minimise, toggleMaximise, move } = useWindowControls(win.id)
+function WindowItem({ win, escapeCloses }: { win: WindowInstance; escapeCloses: boolean }) {
+  const { close, focus, move } = useWindowControls(win.id)
   const Body = WINDOW_COMPONENTS[win.kind]
   // A kind declared but not yet registered simply does not render.
   if (!Body) return null
@@ -71,9 +71,8 @@ function WindowItem({ win }: { win: WindowInstance }) {
         window={win}
         onClose={close}
         onFocus={focus}
-        onMinimise={minimise}
-        onToggleMaximise={toggleMaximise}
         onMove={move}
+        escapeCloses={escapeCloses}
       >
         {body}
       </WindowFrame>
@@ -86,6 +85,11 @@ export function WindowLayer() {
   useViewportSync()
 
   if (windows.length === 0) return null
+
+  // `windows` is sorted ascending by zIndex, so the last non-modal one is the
+  // top-most. It alone answers Escape — every frame binding its own document
+  // listener meant a single Escape closed all of them.
+  const escapeOwner = windows.filter((w) => !w.modal).at(-1)?.id
 
   return (
     <div className="pointer-events-none absolute inset-0 z-10">
@@ -105,7 +109,7 @@ export function WindowLayer() {
         />
       )}
       {windows.map((win) => (
-        <WindowItem key={win.id} win={win} />
+        <WindowItem key={win.id} win={win} escapeCloses={win.id === escapeOwner} />
       ))}
     </div>
   )

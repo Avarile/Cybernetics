@@ -2,22 +2,21 @@
 
 import { useEffect, useRef } from "react"
 import { useShallow } from "zustand/react/shallow"
-import { selectMinimised, selectOpenWindows, selectTopModal, useWorkspaceStore } from "@/stores/workspace.store"
+import { selectOpenWindows, selectTopModal, useWorkspaceStore } from "@/stores/workspace.store"
 import { useViewportStore } from "@/stores/viewport.store"
 
 /**
- * The open workspace: windows in z-order, the minimised dock, and whichever
- * modal currently owns the scrim.
+ * The open workspace: windows in z-order, and whichever modal currently owns
+ * the scrim.
  */
 export function useWorkspace() {
   // useShallow is required, not stylistic: these selectors filter and sort, so
   // they return a NEW array reference on every call. Under zustand v5 that
   // fails the getSnapshot identity check and re-renders forever.
   const windows = useWorkspaceStore(useShallow(selectOpenWindows))
-  const minimised = useWorkspaceStore(useShallow(selectMinimised))
   const topModal = useWorkspaceStore(selectTopModal)
   const openWindow = useWorkspaceStore((s) => s.openWindow)
-  return { windows, minimised, topModal, openWindow }
+  return { windows, topModal, openWindow }
 }
 
 /**

@@ -11,7 +11,8 @@ import {
 import { Switch } from "@/components/ui/switch"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { useCellMutation } from "@/features/records/use-cell-mutation"
-import { useLookup } from "@/features/records/use-lookup"
+import { useLookup, type Lookup } from "@/features/records/use-lookup"
+import { LookupCell } from "./cells"
 import type { RowAction } from "@/components/data-table/types"
 import type { Notification, NotificationPreference } from "./notifications.config"
 
@@ -196,15 +197,34 @@ export function QuietHoursCell({ row }: { row: NotificationPreference }) {
 }
 
 /**
+ * The event-type lookup, resolved once for the whole suppressions table.
+ *
+ * Same reasoning as FinanceLookupProvider: `SuppressionEvent` used to call
+ * `useLookup` — and so `useSWR` — per cell, which is one subscription and one
+ * rebuilt id→label Map per row, re-established on every render of the table.
+ */
+const EventCtx = createContext<Lookup | null>(null)
+
+export function SuppressionLookupProvider({ children }: { children: React.ReactNode }) {
+  const events = useLookup("/system/notifications/event-types", "name")
+  return <EventCtx.Provider value={events}>{children}</EventCtx.Provider>
+}
+
+/**
  * A suppression's event, resolved from its id.
  *
  * The row carries `eventTypeId` and no key — verified live; the column
  * rendered an em dash for every row before this.
+ *
+ * A null id is not a missing label: the API uses it for a blanket suppression,
+ * so it reads "All events" rather than going through the lookup at all.
  */
 export function SuppressionEvent({ id }: { id: string | null }) {
-  const events = useLookup("/system/notifications/event-types", "name")
+  const events = useContext(EventCtx)
   if (!id) return <span className="text-xs text-muted-foreground">All events</span>
-  return <span className="text-xs">{events.label(id)}</span>
+  // No provider above us — quiet rather than wrong, and never a per-cell hook.
+  if (!events) return <span className="text-xs text-muted-foreground">—</span>
+  return <LookupCell id={id} lookup={events} />
 }
 
 /**

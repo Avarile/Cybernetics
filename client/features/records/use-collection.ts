@@ -49,12 +49,20 @@ export function useCollection<T extends HasId>(
   // when it started answering with `items`.
   const shapeError = !isInline && data !== undefined && !Array.isArray(data)
 
+  // Keyed on the two fields `applyCollectionQuery` actually reads, not on the
+  // whole config. `config` reaches here as `{ ...config, ...extras }` from
+  // SectionHost — a different object every render before that merge was
+  // memoised — and depending on it meant this filtered, searched, sorted and
+  // sliced the entire collection on every render of the window, including the
+  // one every click triggers through focusWindow.
+  const columns = config.columns
+  const tabs = config.tabs
   const { rows, total } = useMemo(
     () =>
       Array.isArray(data)
-        ? applyCollectionQuery(data, query, config)
+        ? applyCollectionQuery(data, query, { columns, tabs })
         : { rows: [] as T[], total: 0 },
-    [data, query, config],
+    [data, query, columns, tabs],
   )
 
   const setQuery = useCallback((patch: Partial<TableQuery>) => {

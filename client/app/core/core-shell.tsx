@@ -2,13 +2,13 @@
 
 import { ShellChrome } from "@/components/shell/shell-chrome"
 import { SystemCoreCanvas } from "@/components/system-core/system-core-canvas"
-import { Dock } from "@/components/windows/dock"
 import { WindowLayer } from "@/components/windows/window-layer"
 import { useAuthGate } from "@/features/session/use-auth-gate"
 import { useSession } from "@/features/session/use-session"
 import { useSessionBootstrap } from "@/features/session/use-session-bootstrap"
 import { useStateHydration } from "@/features/state-hydration"
 import { useSceneControls } from "@/features/workspace/use-scene-controls"
+import { useWorkspace } from "@/features/workspace/use-workspace"
 import { cn } from "@/lib/utils"
 
 export function CoreShell() {
@@ -22,6 +22,13 @@ export function CoreShell() {
 
   // The reference's three viewport controls, same defaults.
   const { panelOpen, scannerVisible, resetToken } = useSceneControls()
+
+  // Any open window means the canvas is being looked past, not at. The scene
+  // renders `frameloop="always"` at dpr up to 2 across the whole viewport, and
+  // it kept doing so at full rate underneath a maximised data table — competing
+  // for the main thread with exactly the re-renders that table was doing.
+  const { windows } = useWorkspace()
+  const obscured = windows.length > 0
 
   return (
     <main className="relative h-[100dvh] w-full overflow-hidden bg-[#00001c]">
@@ -44,12 +51,12 @@ export function CoreShell() {
           panelOpen={authed && panelOpen}
           resetToken={resetToken}
           active={authed}
+          obscured={obscured}
         />
       </div>
 
       <WindowLayer />
       <ShellChrome />
-      <Dock />
     </main>
   )
 }

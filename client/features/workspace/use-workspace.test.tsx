@@ -12,18 +12,17 @@ describe("useWorkspace", () => {
     useViewportStore.getState().setViewport({ w: 1400, h: 900 })
   })
 
-  it("returns open windows sorted by z-index, minimised excluded", () => {
+  it("returns open windows sorted by z-index", () => {
     const a = s().openWindow({ kind: "terminal" })
     const b = s().openWindow({ kind: "data" })
     const c = s().openWindow({ kind: "voice" })
-    s().minimiseWindow(a)
     // Focusing b after c raises its zIndex above c's, so a sort-by-insertion
     // (rather than by zIndex) would report the two in the wrong order.
     s().focusWindow(b)
 
     const { result } = renderHook(() => useWorkspace())
 
-    expect(result.current.windows.map((w) => w.id)).toEqual([c, b])
+    expect(result.current.windows.map((w) => w.id)).toEqual([a, c, b])
   })
 
   it("returns a stable array identity when nothing changed", () => {

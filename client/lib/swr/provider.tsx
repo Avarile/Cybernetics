@@ -1,10 +1,11 @@
 "use client"
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, type ReactNode } from "react"
-import { SWRConfig, useSWRConfig } from "swr"
+import { SWRConfig, useSWRConfig, type SWRConfiguration } from "swr"
 import { createApiClient, type ApiClient } from "@/lib/api/client"
 import { createAuthApi, type AuthApi } from "@/lib/api/endpoints/auth"
 import { useSessionStore } from "@/stores/session.store"
+import { createBoundedCache } from "./bounded-cache"
 import { createFetcher } from "./fetcher"
 
 interface ApiContextValue {
@@ -52,10 +53,22 @@ export function StateProvider({
   baseUrl,
   fetchImpl,
   onAuthFailure,
+  cacheProvider,
 }: {
   children: ReactNode
   baseUrl?: string
   fetchImpl?: typeof fetch
+  /**
+   * The SWR cache provider. Defaults to a size-bounded wrapper around whatever
+   * cache this provider inherits.
+   *
+   * Injectable because a test that wants raw, unevicted Map semantics should
+   * not have to reason about the cap — and because the provider SWR hands in
+   * is the parent's cache, so composing rather than replacing keeps an outer
+   * `SWRConfig value={{ provider }}` (which is how the tests isolate
+   * themselves) doing its job.
+   */
+  cacheProvider?: SWRConfiguration["provider"]
   // Design §5.3: on refresh failure, the caller must clear both tokens and
   // close every window. Tearing down the workspace without this left the user
   // on a dimmed, inert canvas with no way back in short of a reload —
@@ -101,6 +114,11 @@ export function StateProvider({
     <ApiContext.Provider value={value}>
       <SWRConfig
         value={{
+          // Bounded rather than SWR's default unbounded Map — see
+          // bounded-cache.ts. The cast is SWR's own provider signature: it
+          // hands in the parent cache typed as a Map and accepts anything with
+          // get/set/delete/keys back.
+          provider: cacheProvider ?? ((cache) => createBoundedCache(cache)),
           fetcher: createFetcher(value.client),
           revalidateOnFocus: false,
           // client.ts already owns the only retry that matters (401 → refresh →

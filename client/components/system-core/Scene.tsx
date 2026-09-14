@@ -42,6 +42,19 @@ export interface SceneProps {
   scannerVisible: boolean;
   /** Bumped to re-run the framing pass. */
   resetToken: number;
+  /**
+   * Nothing is looking: a window covers the canvas.
+   *
+   * Drops the render loop to "demand" rather than unmounting. The stack keeps
+   * its state, its materials and its WebGL context, and Orbit still invalidates
+   * on interaction, so the frame under the window stays correct — it simply
+   * stops being redrawn sixty times a second behind something opaque while
+   * React is re-rendering a table on the same thread.
+   *
+   * Affects the render loop and nothing else — in particular not `animate`,
+   * which owns the tone bus and must stay session-constant.
+   */
+  paused?: boolean;
 }
 
 /** The one default view: the framing direction, at the framed distance, looking
@@ -296,7 +309,13 @@ export default function Scene(props: SceneProps) {
 
   return (
     <Canvas
-      frameloop={animate ? 'always' : 'demand'}
+      // `paused` deliberately does NOT feed `animate` below. `animate` gates
+      // `createToneBus`, which owns an AudioContext, so routing a per-window
+      // flag through it tore the whole bus down and rebuilt it every time a
+      // window opened or closed — and the bus's deferred teardown throws
+      // InvalidAccessError when it is churned that fast. `animate` is a
+      // session-long property of the user's motion preference; this is not.
+      frameloop={animate && !props.paused ? 'always' : 'demand'}
       dpr={[1, 2]}
       gl={{ antialias: true, alpha: true }}
       camera={{

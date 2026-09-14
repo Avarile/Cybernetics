@@ -8,6 +8,7 @@ import {
   PreferenceProvider,
   QuietHoursCell,
   SuppressionEvent,
+  SuppressionLookupProvider,
   useNotificationExtras,
 } from "./notifications-actions"
 
@@ -322,6 +323,9 @@ export const notificationsDomain: DomainSpec = {
         kind: "table",
         config: suppressionsConfig,
         titleOf: (r: Suppression) => r.email,
+        // The Event column is a foreign key. The wrapper resolves the lookup
+        // once for the whole table instead of once per cell.
+        wrapper: SuppressionLookupProvider,
       },
     },
     {

@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo } from "react"
+import { createContext, useContext, useMemo, type ReactNode } from "react"
 import {
   CheckIcon,
   FileTextIcon,
@@ -11,7 +11,8 @@ import {
   XIcon,
 } from "lucide-react"
 import type { RowAction } from "@/components/data-table/types"
-import { useLookup } from "@/features/records/use-lookup"
+import { LookupCell } from "./cells"
+import { useLookup, type Lookup } from "@/features/records/use-lookup"
 import { useRowAction } from "@/features/records/use-row-action"
 import { useWorkspace } from "@/features/workspace/use-workspace"
 import type { FinancialAccount, Invoice, Recurring, Transaction } from "./finance.types"
@@ -23,12 +24,56 @@ export function useCategoryLookup() {
   return useLookup("/finance/categories", "name")
 }
 
+/**
+ * Both finance lookups, resolved ONCE for a whole table.
+ *
+ * `AccountName` and `CategoryName` used to call `useLookup` — and therefore
+ * `useSWR` — inside the cell renderer. A twenty-row ledger page was forty
+ * subscriptions against two cache keys, re-subscribed on every render of the
+ * table, and `useLookup` rebuilt its id→label Map and its options array once
+ * per call site. SWR deduplicated the *requests*, which is what hid this; it
+ * does not deduplicate the subscription or the per-call memo.
+ *
+ * Context is the seam the table already provides for this (`SectionBody.wrapper`,
+ * data-window/types.ts): a `cell()` callback cannot call hooks, so a provider
+ * above the table is the only way for every cell to share one instance.
+ */
+interface FinanceLookups {
+  accounts: Lookup
+  categories: Lookup
+}
+
+const FinanceLookupCtx = createContext<FinanceLookups | null>(null)
+
+export function FinanceLookupProvider({ children }: { children: ReactNode }) {
+  const accounts = useAccountLookup()
+  const categories = useCategoryLookup()
+  const value = useMemo(() => ({ accounts, categories }), [accounts, categories])
+  return <FinanceLookupCtx.Provider value={value}>{children}</FinanceLookupCtx.Provider>
+}
+
+/**
+ * The em dash, for a cell rendered outside the provider.
+ *
+ * Not a fallback `useLookup()` call — a hook cannot be called conditionally,
+ * and reinstating one here would put the per-cell subscription straight back.
+ * Every config that uses these columns declares the wrapper; this is what a
+ * future one that forgets renders, and it is quiet rather than wrong.
+ */
+const NO_LOOKUP: Lookup = {
+  label: () => "—",
+  has: () => false,
+  options: [],
+  isLoading: false,
+  truncated: false,
+}
+
 export function AccountName({ id }: { id: string | null }) {
-  return <span className="text-xs">{useAccountLookup().label(id)}</span>
+  return <LookupCell id={id} lookup={useContext(FinanceLookupCtx)?.accounts ?? NO_LOOKUP} />
 }
 
 export function CategoryName({ id }: { id: string | null }) {
-  return <span className="text-xs">{useCategoryLookup().label(id)}</span>
+  return <LookupCell id={id} lookup={useContext(FinanceLookupCtx)?.categories ?? NO_LOOKUP} />
 }
 
 /**

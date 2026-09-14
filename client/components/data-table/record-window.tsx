@@ -82,10 +82,12 @@ export function RecordWindow({
   // *changed*) would call `setValues` with a fresh object every pass and loop
   // forever, since each `next` is a new reference even when its content is
   // identical to what's already in `values`. Gating on identity is safe here
-  // specifically because SWR only ever hands back a new `record` reference
+  // specifically because SWR only ever hands back a new `response` reference
   // when the fetched content actually changed (see the `dequal`-based
   // `compare` note in the round-1 test) — so this can't loop the way an
-  // unconditional re-seed would.
+  // unconditional re-seed would. It tracks `response` rather than the
+  // unwrapped `record` for exactly that reason: `unwrap` is a derivation and
+  // has no identity to key on.
   const [seeded, setSeeded] = useState(false)
   const [seededFrom, setSeededFrom] = useState<Record<string, unknown> | null>(null)
   const [conflict, setConflict] = useState(false)
@@ -108,9 +110,15 @@ export function RecordWindow({
   // change is the documented React pattern for this: it re-renders once, before
   // anything paints, rather than committing stale values and then correcting
   // them a frame later the way an effect-driven `setValues` would.
-  if (mode === "detail" ? record !== seededFrom : record && !seeded) {
+  // Gated on `response`, NOT on `record`. `record` is `spec.unwrap(response)`
+  // when the form declares one, and `unwrap` returns a fresh object every
+  // render — so `record !== seededFrom` could never become false and the
+  // component would set state during render forever. No form sets `unwrap`
+  // today, which is the only reason this was latent; `response` is the
+  // SWR-stable value the identity argument below actually holds for.
+  if (mode === "detail" ? response !== seededFrom : record && !seeded) {
     setSeeded(true)
-    setSeededFrom(record ?? null)
+    setSeededFrom(response ?? null)
     if (record) {
       const next: Record<string, string> = {}
       for (const f of spec?.fields ?? []) {

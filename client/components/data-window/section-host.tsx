@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, type ReactNode } from "react"
+import { useMemo, useState, type ReactNode } from "react"
 import { DataTable } from "@/components/data-table/data-table"
 import { RecordForm } from "@/components/data-table/record-form"
 import { omitBlank } from "@/components/data-table/record-form-spec"
@@ -62,8 +62,9 @@ export function SectionHost({
         )
       }
       return (
-        <TableSection
-          config={body.config(scopeId)}
+        <ScopedTableSection
+          build={body.config}
+          scopeId={scopeId}
           titleOf={body.titleOf}
           useExtras={body.useExtras}
           wrapper={body.wrapper}
@@ -76,6 +77,36 @@ export function SectionHost({
     case "custom":
       return <>{body.render()}</>
   }
+}
+
+/**
+ * A scoped section's config, built once per parent id rather than per render.
+ *
+ * `config` is a FACTORY here, because the endpoint embeds the parent id. Calling
+ * it in the render body — which is what this component exists to stop — handed
+ * every render a brand-new config object, a new `columns` array and a new
+ * closure for every `cell`, `canEdit` and `deleteKey`. Nothing downstream could
+ * then memoise: `useCollection` re-ran its whole filter/search/sort/slice,
+ * `DataTable` rebuilt its column list, and `useRecordWindows` rebuilt the four
+ * openers, on every single render of the window.
+ *
+ * A separate component rather than a `useMemo` inside `SectionHost`, because
+ * `SectionHost` returns before this point for three of its four body kinds and
+ * a hook cannot live behind that switch.
+ */
+function ScopedTableSection<T extends HasId>({
+  build,
+  scopeId,
+  ...rest
+}: {
+  build: (parentId: string) => DomainTableConfig<T>
+  scopeId: string
+  titleOf: (row: T) => string
+  useExtras?: TableExtras<T>
+  wrapper?: React.ComponentType<{ children: ReactNode }>
+}) {
+  const config = useMemo(() => build(scopeId), [build, scopeId])
+  return <TableSection config={config} {...rest} />
 }
 
 function TableSection<T extends HasId>({
@@ -91,8 +122,12 @@ function TableSection<T extends HasId>({
 }) {
   // Called unconditionally: `useExtras` is fixed per section, and a section
   // switch remounts this component rather than swapping the hook underneath it.
-  const extras = useExtras?.() ?? {}
-  const merged = { ...config, ...extras }
+  const extras = useExtras?.()
+  // Memoised, not spread inline. The merge result is the `config` every hook
+  // below keys its memo on, and a fresh object each render defeated all of
+  // them — see ScopedTableSection. Every `useExtras` in the codebase already
+  // returns a `useMemo`d object, so this is stable in practice.
+  const merged = useMemo(() => ({ ...config, ...extras }), [config, extras])
   const nav = useRecordWindows(merged, titleOf)
 
   const table = <DataTable config={merged} {...nav} />

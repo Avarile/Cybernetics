@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, type ReactNode } from "react"
-import { MinusIcon, SquareIcon, XIcon } from "lucide-react"
+import { XIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -13,9 +13,15 @@ export interface WindowFrameProps {
   window: WindowInstance
   onClose: () => void
   onFocus: () => void
-  onMinimise: () => void
-  onToggleMaximise: () => void
   onMove: (rect: Rect) => void
+  /**
+   * Whether this frame owns the Escape key.
+   *
+   * Every frame used to register its own `document` keydown listener that
+   * closed itself, so one Escape closed every non-modal window at once. Only
+   * the top-most non-modal window should answer.
+   */
+  escapeCloses?: boolean
   children: ReactNode
 }
 
@@ -34,36 +40,38 @@ const GRIPS: { handle: ResizeHandle; className: string }[] = [
  * All window chrome lives here, so no feature component ever draws a title bar
  * or knows its breakpoint. Below `md` the same children render inside a
  * full-screen Sheet instead of a floating frame.
+ *
+ * Close is the only control. Minimise and maximise were removed along with the
+ * dock: a window is either open or closed, so there is no state a user can put
+ * one into and then fail to find again.
  */
 export function WindowFrame({
   window: win,
   onClose,
   onFocus,
-  onMinimise,
-  onToggleMaximise,
   onMove,
+  escapeCloses = true,
   children,
 }: WindowFrameProps) {
   const isMobile = useIsMobile()
-  const isMaximised = win.state === "maximised"
 
   const { liveRect, isInteracting, dragProps, resizeProps } = useDragResize({
     rect: win.rect,
     minSize: win.minSize,
-    disabled: isMobile || isMaximised,
+    disabled: isMobile,
     onCommit: onMove,
   })
 
   // Escape closes a non-modal window. Modal windows are dismissed by their own
   // affordances — an auth dialog you can Escape out of is not a gate.
   useEffect(() => {
-    if (win.modal) return
+    if (win.modal || !escapeCloses) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose()
     }
     document.addEventListener("keydown", onKey)
     return () => document.removeEventListener("keydown", onKey)
-  }, [win.modal, onClose])
+  }, [win.modal, escapeCloses, onClose])
 
   if (isMobile) {
     return (
@@ -84,17 +92,13 @@ export function WindowFrame({
       aria-label={win.title}
       aria-modal={win.modal || undefined}
       onPointerDown={onFocus}
-      style={
-        isMaximised
-          ? { left: 0, top: 0, right: 0, bottom: 0, zIndex: win.zIndex }
-          : {
-              left: liveRect.x,
-              top: liveRect.y,
-              width: liveRect.w,
-              height: liveRect.h,
-              zIndex: win.zIndex,
-            }
-      }
+      style={{
+        left: liveRect.x,
+        top: liveRect.y,
+        width: liveRect.w,
+        height: liveRect.h,
+        zIndex: win.zIndex,
+      }}
       className={cn(
         "absolute flex flex-col overflow-hidden rounded-xl border border-border",
         "bg-popover/95 text-popover-foreground shadow-2xl backdrop-blur-xl",
@@ -103,54 +107,27 @@ export function WindowFrame({
     >
       <div
         {...dragProps}
-        className={cn(
-          "flex shrink-0 items-center justify-between gap-2 border-b border-border px-3 py-2",
-          isMaximised ? "cursor-default" : "cursor-grab active:cursor-grabbing",
-        )}
+        className="flex shrink-0 cursor-grab items-center justify-between gap-2 border-b border-border px-3 py-2 active:cursor-grabbing"
       >
         <span className="truncate text-xs font-medium text-muted-foreground">{win.title}</span>
-        <div className="flex items-center gap-0.5">
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="Minimise"
-            onClick={onMinimise}
-            className="size-6"
-          >
-            <MinusIcon className="size-3.5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="Maximise"
-            onClick={onToggleMaximise}
-            className="size-6"
-          >
-            <SquareIcon className="size-3" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            aria-label="Close"
-            onClick={onClose}
-            className="size-6"
-          >
-            <XIcon className="size-3.5" />
-          </Button>
-        </div>
+        {/* Inside the drag handle, and safe there only because `useDragResize`
+            refuses to start a gesture on an interactive target — without that
+            guard the handle's pointer capture swallows this button's click. */}
+        <Button variant="ghost" size="icon" aria-label="Close" onClick={onClose} className="size-6">
+          <XIcon className="size-3.5" />
+        </Button>
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">{children}</div>
 
-      {!isMaximised &&
-        GRIPS.map(({ handle, className }) => (
-          <div
-            key={handle}
-            data-testid={`resize-${handle}`}
-            {...resizeProps(handle)}
-            className={cn("absolute z-10", className)}
-          />
-        ))}
+      {GRIPS.map(({ handle, className }) => (
+        <div
+          key={handle}
+          data-testid={`resize-${handle}`}
+          {...resizeProps(handle)}
+          className={cn("absolute z-10", className)}
+        />
+      ))}
     </div>
   )
 }

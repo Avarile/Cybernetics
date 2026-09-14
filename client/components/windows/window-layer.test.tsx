@@ -3,7 +3,6 @@ import userEvent from "@testing-library/user-event"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { useViewportStore } from "@/stores/viewport.store"
 import { useWorkspaceStore } from "@/stores/workspace.store"
-import { Dock } from "./dock"
 import { WindowLayer } from "./window-layer"
 
 vi.mock("@/hooks/use-mobile", () => ({ useIsMobile: () => false }))
@@ -27,13 +26,6 @@ describe("WindowLayer", () => {
     render(<WindowLayer />)
     expect(await screen.findByRole("dialog", { name: "Terminal" })).toBeInTheDocument()
     expect(await screen.findByRole("dialog", { name: "Live" })).toBeInTheDocument()
-  })
-
-  it("does not render a minimised window", () => {
-    const id = s().openWindow({ kind: "terminal", title: "Terminal" })
-    s().minimiseWindow(id)
-    render(<WindowLayer />)
-    expect(screen.queryByRole("dialog", { name: "Terminal" })).not.toBeInTheDocument()
   })
 
   it("closing a window removes it from the store", async () => {
@@ -92,32 +84,24 @@ describe("WindowLayer", () => {
     expect(container.querySelector('[data-testid="resize-se"]')).not.toBeNull()
   })
 
+  it("only the top-most non-modal window answers Escape", async () => {
+    // Every frame used to bind its own document keydown listener that closed
+    // itself, so one Escape closed the whole workspace at once.
+    s().openWindow({ kind: "terminal", title: "Terminal" })
+    s().openWindow({ kind: "voice", title: "Live" })
+    render(<WindowLayer />)
+    await screen.findByRole("dialog", { name: "Live" })
+
+    await userEvent.keyboard("{Escape}")
+
+    expect(s().windows.map((w) => w.kind)).toEqual(["terminal"])
+  })
+
   it("skips a kind that has no registry entry rather than crashing", () => {
     // `mailbox` is a declared WindowKind with no component behind it yet —
     // declaring a kind ahead of its implementation has to stay safe.
     s().openWindow({ kind: "mailbox", title: "Mailbox" })
     render(<WindowLayer />)
     expect(screen.queryByRole("dialog", { name: "Mailbox" })).not.toBeInTheDocument()
-  })
-})
-
-describe("Dock", () => {
-  beforeEach(() => {
-    s().closeAll()
-    useViewportStore.getState().setViewport({ w: 1400, h: 900 })
-  })
-
-  it("is hidden when nothing is minimised", () => {
-    render(<Dock />)
-    expect(screen.queryByRole("toolbar", { name: /minimised/i })).not.toBeInTheDocument()
-  })
-
-  it("lists a minimised window and restores it on click", async () => {
-    const id = s().openWindow({ kind: "terminal", title: "Terminal" })
-    s().minimiseWindow(id)
-    render(<Dock />)
-
-    await userEvent.click(screen.getByRole("button", { name: /Terminal/ }))
-    expect(s().windows[0].state).toBe("normal")
   })
 })

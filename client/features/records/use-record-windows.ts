@@ -100,5 +100,9 @@ export function useRecordWindows<T extends HasId>(
         })
       },
     }
+    // `config.deleteKey` is a function identity. It is stable now that
+    // SectionHost memoises the config it builds; before that it changed every
+    // render for a scoped table and rebuilt all four openers each time, which
+    // re-rendered DataTable with new props on every pass.
   }, [openWindow, key, endpoint, title, titleOf, config.deleteKey, config.noItemEndpoint])
 }

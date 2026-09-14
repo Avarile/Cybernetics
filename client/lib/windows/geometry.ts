@@ -38,3 +38,26 @@ export function clampToViewport(rect: Rect, viewport: Viewport): Rect {
 
   return { x, y, w, h }
 }
+
+/**
+ * Centres a rect in the viewport.
+ *
+ * For the windows that ARE the task — the data tables, the terminal, a modal
+ * confirm — where cascading from a corner offset is wrong: there is only ever
+ * one of each on screen, so the offset buys nothing and costs the composition.
+ *
+ * Runs the result through `clampToViewport` rather than trusting the maths, so
+ * the degenerate-viewport guards live in exactly one place: on a viewport
+ * narrower than the rect, `(viewport.w - rect.w) / 2` is negative and would
+ * place the window off the left edge.
+ */
+export function centreInViewport(rect: Rect, viewport: Viewport): Rect {
+  return clampToViewport(
+    {
+      ...rect,
+      x: Math.round((viewport.w - rect.w) / 2),
+      y: Math.round((viewport.h - rect.h) / 2),
+    },
+    viewport,
+  )
+}
