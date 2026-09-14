@@ -6,19 +6,13 @@ const s = () => useSceneStore.getState()
 describe("scene.store", () => {
   beforeEach(() => s().reset())
 
-  it("starts with the panel and scanner on, matching the reference defaults", () => {
-    expect(s().panelOpen).toBe(true)
-    expect(s().scannerVisible).toBe(true)
+  it("starts with the panel closed", () => {
+    expect(s().panelOpen).toBe(false)
   })
 
   it("toggles the panel", () => {
     s().togglePanel()
-    expect(s().panelOpen).toBe(false)
-  })
-
-  it("toggles the scanner", () => {
-    s().toggleScanner()
-    expect(s().scannerVisible).toBe(false)
+    expect(s().panelOpen).toBe(true)
   })
 
   it("bumps a token to request a view reset", () => {
@@ -31,7 +25,10 @@ describe("scene.store", () => {
     s().togglePanel()
     s().resetView()
     s().reset()
-    expect({ panelOpen: s().panelOpen, resetToken: s().resetToken }).toEqual({ panelOpen: true, resetToken: 0 })
+    expect({ panelOpen: s().panelOpen, resetToken: s().resetToken }).toEqual({
+      panelOpen: false,
+      resetToken: 0,
+    })
   })
 
   it("writes nothing to localStorage", () => {

@@ -1,9 +1,11 @@
 "use client"
 
 import dynamic from "next/dynamic"
-import { useCallback, useState } from "react"
+import { useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Spinner } from "@/components/ui/spinner"
+import { MODULE_PANEL_W } from "@/components/shell/panel-metrics"
+import { cn } from "@/lib/utils"
 import Boundary from "./Boundary"
 import Panel from "./Panel"
 import useLive from "./hooks/useLive"
@@ -91,7 +93,13 @@ export function SystemCoreCanvas({
       </div>
 
       {panelOpen && (
-        <div className="hidden w-[320px] shrink-0 md:block">
+        // Above the chrome, not under it. The header is `absolute ... z-20` and
+        // spans the full width, so at the rail's own stacking level its right
+        // cluster painted straight over this panel's header row — the module
+        // count, the live chip and the Add/Delete buttons. `relative` is not
+        // decoration: z-index does nothing to a static element. The chrome
+        // reserves MODULE_PANEL_PR to match, so nothing is buried either way.
+        <div className={cn("relative z-30 hidden shrink-0 md:block", MODULE_PANEL_W)}>
           <Panel
             modules={modules.modules}
             readings={live.readings}

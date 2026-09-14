@@ -31,7 +31,7 @@ describe("resetClientState", () => {
     expect(useSessionStore.getState().refreshToken).toBeNull()
     expect(useWorkspaceStore.getState().windows).toHaveLength(0)
     expect(useUploadStore.getState().items).toHaveLength(0)
-    expect(useSceneStore.getState().panelOpen).toBe(true)
+    expect(useSceneStore.getState().panelOpen).toBe(false)
     expect(useTurnStore.getState().activeId).toBeNull()
     expect(useTurnStore.getState().optimistic).toHaveLength(0)
     expect(useTurnStore.getState().turn).toBeNull()

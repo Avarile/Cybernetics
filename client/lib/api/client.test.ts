@@ -156,6 +156,43 @@ describe("createApiClient", () => {
     expect(h.onAuthFailure).toHaveBeenCalledTimes(1)
   })
 
+  it("ends the session on a generic UNAUTHORIZED without spending a refresh", async () => {
+    // The exact shape of the original bug: before JwtAuthGuard named the reason,
+    // an expired access token arrived as this generic code. It must not trigger
+    // a refresh — and it must not fail silently either, or the app sits there
+    // looking signed in with every pane reading "Unauthorized".
+    const h = harness()
+    h.fetchImpl.mockResolvedValueOnce(jsonResponse(envelope("UNAUTHORIZED", 401), 401))
+
+    await expect(h.client.get("/records/tasks")).rejects.toMatchObject({
+      code: "UNAUTHORIZED",
+    })
+    expect(h.fetchImpl).toHaveBeenCalledTimes(1)
+    expect(h.onAuthFailure).toHaveBeenCalledTimes(1)
+  })
+
+  it("ends the session on an invalid token without spending a refresh", async () => {
+    const h = harness()
+    h.fetchImpl.mockResolvedValueOnce(jsonResponse(envelope("AUTH_TOKEN_INVALID", 401), 401))
+
+    await expect(h.client.get("/records/tasks")).rejects.toBeInstanceOf(ApiError)
+    expect(h.fetchImpl).toHaveBeenCalledTimes(1)
+    expect(h.onAuthFailure).toHaveBeenCalledTimes(1)
+  })
+
+  it("leaves the session alone when a login is rejected", async () => {
+    // AUTH_INVALID_CREDENTIALS is a 401 too, but it comes from a signed-out
+    // user mistyping a password. Clearing state here would close the very
+    // window they are typing into.
+    const h = harness()
+    h.fetchImpl.mockResolvedValueOnce(
+      jsonResponse(envelope("AUTH_INVALID_CREDENTIALS", 401), 401),
+    )
+
+    await expect(h.client.post("/auth/login", {})).rejects.toBeInstanceOf(ApiError)
+    expect(h.onAuthFailure).not.toHaveBeenCalled()
+  })
+
   it("does not attempt a refresh when there is no refresh token", async () => {
     const h = harness({ refresh: null })
     h.fetchImpl.mockResolvedValueOnce(jsonResponse(envelope("AUTH_TOKEN_EXPIRED", 401), 401))

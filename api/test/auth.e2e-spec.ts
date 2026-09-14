@@ -9,6 +9,7 @@ import { RolesGuard } from '../src/common/guards/roles.guard';
 import { ConfigModule } from '../src/config/config.module';
 import type { AuthConfig } from '../src/config/configurations/auth.config';
 import { AuthModule } from '../src/features/auth/auth.module';
+import { TokenService } from '../src/features/auth/token.service';
 import { UsersModule } from '../src/features/users/users.module';
 import { UsersService } from '../src/features/users/users.service';
 import { DatabaseModule } from '../src/infrastructure/database/database.module';
@@ -36,6 +37,7 @@ describe('Auth API (e2e)', () => {
   let userEmail: string;
   let userAccess: string;
   let userRefresh: string;
+  let userId: string;
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
@@ -80,7 +82,10 @@ describe('Auth API (e2e)', () => {
   const server = () => app.getHttpServer();
 
   it('rejects unauthenticated access to a protected route', async () => {
-    await request(server()).get('/users').expect(401);
+    const res = await request(server()).get('/users').expect(401);
+    // Not merely 401: the code is the contract. The browser client refreshes on
+    // AUTH_TOKEN_EXPIRED and only on that, so a missing token must NOT wear it.
+    expect(res.body.error.code).toBe('AUTH_TOKEN_INVALID');
   });
 
   it('logs the admin in and returns a token pair', async () => {
@@ -122,6 +127,41 @@ describe('Auth API (e2e)', () => {
       .set('Authorization', `Bearer ${userAccess}`)
       .expect(200);
     expect(res.body.role).toBe('user');
+    userId = res.body.id;
+  });
+
+  it('reports an expired access token as AUTH_TOKEN_EXPIRED, not a bare 401', async () => {
+    // Signed through the real TokenService, so the secret, issuer and audience
+    // are all correct and expiry is the ONLY thing wrong with this token.
+    const expired = app
+      .get(TokenService)
+      .signAccessToken(
+        { sub: userId, role: 'user', kind: 'user', sid: 'expired-e2e' },
+        -60,
+      );
+
+    const res = await request(server())
+      .get('/auth/me')
+      .set('Authorization', `Bearer ${expired}`)
+      .expect(401);
+
+    // The whole point of the test. This used to come back as the generic
+    // UNAUTHORIZED, which the client does not treat as refreshable — so every
+    // session died silently once its 15-minute access token aged out.
+    expect(res.body.error.code).toBe('AUTH_TOKEN_EXPIRED');
+  });
+
+  it('reports a token signed with the wrong secret as AUTH_TOKEN_INVALID', async () => {
+    // The counterpart: a forged token must not be reported as recoverable, or
+    // the client would burn its refresh token retrying.
+    const [header, payload] = userAccess.split('.');
+    const forged = `${header}.${payload}.${'A'.repeat(43)}`;
+
+    const res = await request(server())
+      .get('/auth/me')
+      .set('Authorization', `Bearer ${forged}`)
+      .expect(401);
+    expect(res.body.error.code).toBe('AUTH_TOKEN_INVALID');
   });
 
   it('forbids a non-admin from the admin route', async () => {

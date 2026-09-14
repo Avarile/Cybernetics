@@ -3,24 +3,26 @@ import { immer } from "zustand/middleware/immer"
 
 interface SceneState {
   panelOpen: boolean
-  scannerVisible: boolean
   /** Bumped to ask the canvas for a camera reset; it has no readable value. */
   resetToken: number
   togglePanel: () => void
-  toggleScanner: () => void
   resetView: () => void
   reset: () => void
 }
 
-const DEFAULTS = { panelOpen: true, scannerVisible: true, resetToken: 0 }
+// The panel starts closed. It is a 320px rail over a scene that is the point of
+// the page, and opening it by default spent a third of the viewport before the
+// user had asked for anything.
+const DEFAULTS = { panelOpen: false, resetToken: 0 }
 
 /**
- * The three System Core viewport controls, previously `useState` in CoreShell
- * and prop-drilled into two children.
+ * The System Core viewport controls, previously `useState` in CoreShell and
+ * prop-drilled into two children.
  *
  * Not persisted, and deliberately not part of the workspace store: a persisted
  * store writes on every set, and toggling a panel has no business rewriting the
- * window layout.
+ * window layout. Not persisting is also what makes the closed default hold on
+ * every visit rather than only the first.
  */
 export const useSceneStore = create<SceneState>()(
   immer((set) => ({
@@ -28,10 +30,6 @@ export const useSceneStore = create<SceneState>()(
     togglePanel: () =>
       set((state) => {
         state.panelOpen = !state.panelOpen
-      }),
-    toggleScanner: () =>
-      set((state) => {
-        state.scannerVisible = !state.scannerVisible
       }),
     resetView: () =>
       set((state) => {

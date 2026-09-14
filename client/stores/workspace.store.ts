@@ -309,9 +309,19 @@ export const useWorkspaceStore = create<WorkspaceState>()(
             state: "normal" as const,
             // Re-clamped on the way in, not merely on the way out. A layout
             // saved on a wide monitor restores on a laptop with the same
-            // 1140x720 rect at the same offset — half of it off-screen, and
+            // 1920x1080 rect at the same offset — half of it off-screen, and
             // nothing re-clamps until the user drags it.
-            rect: clampToViewport(w.rect, viewport),
+            //
+            // A kind declaring `placement: "centre"` is re-centred rather than
+            // merely clamped, so "always centred when opened" survives a reload.
+            // Without this the declaration held for exactly the first open and
+            // never again: the rect persists, so a window dragged into a corner
+            // came back in that corner for the rest of the profile's life.
+            // Position only — the saved w/h is the size the user chose.
+            rect:
+              WINDOW_META[w.kind as WindowKind]?.placement === "centre"
+                ? centreInViewport(w.rect, viewport)
+                : clampToViewport(w.rect, viewport),
           }))
         return {
           ...current,

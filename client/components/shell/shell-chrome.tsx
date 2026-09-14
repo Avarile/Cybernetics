@@ -3,9 +3,10 @@
 import {
   DatabaseIcon,
   LogOutIcon,
+  MaximizeIcon,
   MicIcon,
+  MinimizeIcon,
   PanelRightIcon,
-  RadarIcon,
   RotateCcwIcon,
   TerminalIcon,
 } from "lucide-react"
@@ -17,6 +18,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { MODULE_PANEL_PR } from "@/components/shell/panel-metrics"
+import { useFullscreen } from "@/hooks/use-fullscreen"
 import { useSignOut } from "@/features/session/use-sign-out"
 import { useSession } from "@/features/session/use-session"
 import { useSceneControls } from "@/features/workspace/use-scene-controls"
@@ -36,7 +39,8 @@ const SCENE_BUTTON =
 export function ShellChrome() {
   const { principal, authed } = useSession()
   const { openWindow } = useWorkspace()
-  const { panelOpen, scannerVisible, togglePanel, toggleScanner, resetView } = useSceneControls()
+  const { panelOpen, togglePanel, resetView } = useSceneControls()
+  const fullscreen = useFullscreen()
   const signOut = useSignOut()
 
   return (
@@ -47,16 +51,27 @@ export function ShellChrome() {
         </span>
 
         {authed && (
-          <div className="pointer-events-auto flex items-center gap-1">
+          // The panel paints over this bar (z-30 against our z-20), so while it
+          // is open the cluster steps aside by exactly the rail's width. Without
+          // this the buttons would still be *there* — just unreachable
+          // underneath, and that includes the toggle that closes the panel.
+          <div
+            className={cn(
+              "pointer-events-auto flex items-center gap-1",
+              panelOpen && MODULE_PANEL_PR,
+            )}
+          >
             <div
               role="toolbar"
               aria-label="System core"
               aria-orientation="horizontal"
               className="mr-1 flex items-center gap-0.5 rounded-lg bg-white/5 p-0.5 backdrop-blur-sm"
             >
-              {/* Same three viewport controls as the reference's toolbar, with
-                  its aria-labels: Toggle module panel / Scanner deck / Reset
-                  view. (Its fourth, Close, dismisses the modal — the core here
+              {/* Three viewport controls: Toggle module panel / full screen /
+                  Reset view. The middle slot was the reference's "Scanner deck"
+                  toggle; the deck is the stack's floor rather than a view
+                  option, so the slot went to something worth a click. (The
+                  reference's fourth, Close, dismissed its modal — the core here
                   is the surface itself, so there is nothing to close.) */}
               <Tooltip>
                 <TooltipTrigger asChild>
@@ -79,15 +94,21 @@ export function ShellChrome() {
                   <Button
                     variant="ghost"
                     size="icon"
-                    aria-label="Scanner deck"
-                    aria-pressed={scannerVisible}
-                    onClick={toggleScanner}
-                    className={cn(SCENE_BUTTON, scannerVisible && "text-white")}
+                    aria-label={fullscreen.active ? "Exit full screen" : "Enter full screen"}
+                    aria-pressed={fullscreen.active}
+                    onClick={fullscreen.toggle}
+                    className={cn(SCENE_BUTTON, fullscreen.active && "text-white")}
                   >
-                    <RadarIcon className="size-3.5" />
+                    {fullscreen.active ? (
+                      <MinimizeIcon className="size-3.5" />
+                    ) : (
+                      <MaximizeIcon className="size-3.5" />
+                    )}
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>Scanner deck</TooltipContent>
+                <TooltipContent>
+                  {fullscreen.active ? "Exit full screen" : "Full screen"}
+                </TooltipContent>
               </Tooltip>
 
               <Tooltip>

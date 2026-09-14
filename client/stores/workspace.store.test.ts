@@ -389,6 +389,75 @@ describe("workspace.store persistence", () => {
     expect(r.y + r.h).toBeLessThanOrEqual(600)
   })
 
+  it("re-centres a restored window whose kind declares placement: centre", async () => {
+    // `placement: "centre"` has to mean every open, not just the first. The
+    // rect persists, so without this a window dragged into a corner came back
+    // in that corner forever.
+    useViewportStore.getState().setViewport({ w: 1440, h: 900 })
+    localStorage.setItem(
+      "cyb.windows",
+      JSON.stringify({
+        version: 1,
+        state: {
+          windows: [
+            {
+              id: "w1",
+              kind: "data",
+              title: "Data",
+              rect: { x: 0, y: 0, w: 1000, h: 700 },
+              zIndex: 1,
+              state: "normal",
+              modal: false,
+            },
+          ],
+          zSeq: 1,
+        },
+      }),
+    )
+
+    await useWorkspaceStore.persist.rehydrate()
+
+    const r = useWorkspaceStore.getState().windows[0].rect
+    // Size is the user's; only the position is reclaimed.
+    expect({ w: r.w, h: r.h }).toEqual({ w: 1000, h: 700 })
+    expect(r.x).toBe(Math.round((1440 - 1000) / 2))
+    expect(r.y).toBe(Math.round((900 - 700) / 2))
+  })
+
+  it("leaves a cascading kind's restored position alone", async () => {
+    // The mirror of the test above: only centred kinds get repositioned.
+    useViewportStore.getState().setViewport({ w: 1440, h: 900 })
+    localStorage.setItem(
+      "cyb.windows",
+      JSON.stringify({
+        version: 1,
+        state: {
+          windows: [
+            {
+              id: "w1",
+              kind: "voice",
+              title: "Live",
+              rect: { x: 40, y: 60, w: 420, h: 480 },
+              zIndex: 1,
+              state: "normal",
+              modal: false,
+            },
+          ],
+          zSeq: 1,
+        },
+      }),
+    )
+
+    await useWorkspaceStore.persist.rehydrate()
+
+    expect(useWorkspaceStore.getState().windows[0].rect).toEqual({
+      x: 40,
+      y: 60,
+      w: 420,
+      h: 480,
+    })
+  })
+
   it("leaves an already-open workspace alone when storage is empty", async () => {
     // `skipHydration` means windows can be opened before `rehydrate()` runs,
     // and zustand applies `merge`'s result with `set(state, true)` — a replace.

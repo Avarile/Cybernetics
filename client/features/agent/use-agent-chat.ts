@@ -6,6 +6,7 @@ import { streamChat } from "@/lib/agent/stream"
 import type { ChatStreamRequest } from "@/lib/agent/types"
 import { ApiError } from "@/lib/api/errors"
 import { keys, scopes } from "@/lib/swr/keys"
+import { useApi } from "@/lib/swr/provider"
 import { useInvalidate } from "@/lib/swr/use-invalidate"
 import { useSessionStore } from "@/stores/session.store"
 import { useTurnStore } from "@/stores/turn.store"
@@ -19,6 +20,10 @@ import { useTurnStore } from "@/stores/turn.store"
 export function useAgentChat() {
   const { mutate } = useSWRConfig()
   const invalidate = useInvalidate()
+  // Taken from the provider rather than constructed here: `client.refresh` is
+  // the process-wide single-flight latch, and a stream that refreshed on its own
+  // would race the ordinary requests into a family revocation.
+  const { client } = useApi()
   const abortRef = useRef<AbortController | null>(null)
 
   // Abort any in-flight turn when the window unmounts, so the socket is not
@@ -47,6 +52,7 @@ export function useAgentChat() {
         const result = await streamChat({
           baseUrl: process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3000",
           getAccessToken: () => useSessionStore.getState().accessToken,
+          refresh: client.refresh,
           body,
           signal: controller.signal,
           onEvent: (event) => useTurnStore.getState().applyEvent(event),
@@ -89,7 +95,7 @@ export function useAgentChat() {
         await invalidate(scopes.conversations())
       }
     },
-    [mutate, invalidate],
+    [mutate, invalidate, client],
   )
 
   const sendMessage = useCallback(

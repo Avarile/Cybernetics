@@ -81,7 +81,6 @@ function Frame({
   controlsRef: MutableRefObject<OrbitControls | null>;
   resetToken: number;
 }) {
-  const camera = useThree((state) => state.camera) as THREE.PerspectiveCamera;
   const invalidate = useThree((state) => state.invalidate);
 
   useEffect(() => {
@@ -89,6 +88,13 @@ function Frame({
     if (!controls) {
       return;
     }
+    // The camera comes off the controls rather than out of `useThree`. A value
+    // read during render is frozen — react-hooks/immutability rejects writing to
+    // it from an effect — and a camera is an object made to be mutated. The ref
+    // is the escape hatch for exactly that, and reading through the controls is
+    // the stronger guarantee besides: the camera framed here is by construction
+    // the one `controls.target` orbits, so the two can never disagree.
+    const camera = controls.object as THREE.PerspectiveCamera;
     camera.position.copy(DEFAULT_VIEW);
     camera.near = Math.max(FRAME_DISTANCE / 100, 0.01);
     camera.far = FRAME_DISTANCE * 100;
@@ -96,7 +102,7 @@ function Frame({
     controls.target.set(0, 0, 0);
     controls.update();
     invalidate();
-  }, [camera, invalidate, controlsRef, resetToken]);
+  }, [invalidate, controlsRef, resetToken]);
 
   return null;
 }

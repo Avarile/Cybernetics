@@ -20,8 +20,7 @@ export function CoreShell() {
 
   const { authed } = useSession()
 
-  // The reference's three viewport controls, same defaults.
-  const { panelOpen, scannerVisible, resetToken } = useSceneControls()
+  const { panelOpen, resetToken } = useSceneControls()
 
   // Any open window means the canvas is being looked past, not at. The scene
   // renders `frameloop="always"` at dpr up to 2 across the whole viewport, and
@@ -47,7 +46,9 @@ export function CoreShell() {
         )}
       >
         <SystemCoreCanvas
-          scannerVisible={scannerVisible}
+          // The deck is the stack's floor, not a view option: it used to have a
+          // toolbar toggle and that slot is the full-screen button now.
+          scannerVisible
           panelOpen={authed && panelOpen}
           resetToken={resetToken}
           active={authed}

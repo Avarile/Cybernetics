@@ -16,6 +16,15 @@ export interface ApiClientConfig {
 }
 
 export interface ApiClient {
+  /**
+   * Runs the shared single-flight refresh and resolves to whether it succeeded.
+   *
+   * Exposed for the transports that cannot go through `request` — `streamChat`
+   * reads the body incrementally, which this wrapper cannot do. They must reuse
+   * THIS latch rather than posting to /auth/refresh themselves; see the note on
+   * `inFlightRefresh` for why a second concurrent refresh ends the session.
+   */
+  refresh(): Promise<boolean>
   request<T>(path: string, init?: RequestInit): Promise<T>
   get<T>(path: string, init?: RequestInit): Promise<T>
   post<T>(path: string, body?: unknown, init?: RequestInit): Promise<T>
@@ -104,7 +113,17 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
       const err = parseErrorEnvelope(401, await readBody(res))
       // Only an expiry is worth refreshing. INVALID and REUSE mean the session
       // is already gone.
-      if (!err.isAuthExpiry()) throw err
+      if (!err.isAuthExpiry()) {
+        // ...and "already gone" has to be ANNOUNCED, not just thrown. Without
+        // this, the teardown path only ever ran when a refresh attempt failed,
+        // so a dead-session 401 on an ordinary request left the tokens in place
+        // and `useSession`'s cached /auth/me still reporting `authed` — an app
+        // that looks signed in while every pane renders the server's error.
+        // `isSessionDead()` is deliberately narrower than "not an expiry": a
+        // failed login is a 401 too, and must not clear the store.
+        if (err.isSessionDead()) config.onAuthFailure()
+        throw err
+      }
 
       const refreshed = await refreshOnce()
       if (!refreshed) throw err
@@ -134,6 +153,7 @@ export function createApiClient(config: ApiClientConfig): ApiClient {
   }
 
   return {
+    refresh: refreshOnce,
     request,
     get: <T,>(path: string, init: RequestInit = {}) =>
       request<T>(path, { ...init, method: "GET" }),

@@ -25,7 +25,11 @@ export const WINDOW_META: Partial<Record<WindowKind, WindowMeta>> = {
   terminal: { kind: "terminal", title: "Terminal", icon: TerminalIcon, singleton: true, modal: false, placement: "centre", defaultRect: { w: 900, h: 600 }, minSize: { w: 420, h: 320 } },
   // Wider and taller than the domain windows it replaces: it carries a sideNav
   // rail (16rem) and a section tab row before the table gets any space.
-  data: { kind: "data", title: "Data", icon: DatabaseIcon, singleton: true, modal: false, placement: "centre", defaultRect: { w: 1140, h: 720 }, minSize: { w: 640, h: 420 } },
+  // defaultRect is a *request*, not a promise: `clampToViewport` shrinks it to
+  // the viewport less a 16px margin, so 1920x1080 means "open as large as this
+  // screen allows" on anything smaller. Keep defaultRect >= minSize, or the
+  // window would open smaller than the first resize drag is allowed to make it.
+  data: { kind: "data", title: "Data", icon: DatabaseIcon, singleton: true, modal: false, placement: "centre", defaultRect: { w: 1920, h: 1080 }, minSize: { w: 960, h: 760 } },
   "record-create": { kind: "record-create", title: "New record", icon: FilePlusIcon, singleton: false, modal: false, defaultRect: { w: 460, h: 600 } },
   "record-edit": { kind: "record-edit", title: "Edit record", icon: PencilIcon, singleton: false, modal: false, defaultRect: { w: 460, h: 600 } },
   "record-detail": { kind: "record-detail", title: "Record", icon: FileTextIcon, singleton: false, modal: false, defaultRect: { w: 460, h: 600 } },

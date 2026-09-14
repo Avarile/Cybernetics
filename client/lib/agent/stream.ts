@@ -6,6 +6,12 @@ export interface StreamOptions {
   baseUrl: string
   /** Read at call time, not captured: a refresh may have rotated it. */
   getAccessToken: () => string | null
+  /**
+   * `ApiClient.refresh` — the shared single-flight latch, not a refresh of this
+   * module's own. Optional so a test (or a caller with no session) can leave the
+   * retry out; omitting it restores the old "report the 401" behaviour.
+   */
+  refresh?: () => Promise<boolean>
   body: ChatStreamRequest
   signal?: AbortSignal
   onEvent: (event: SseEvent) => void
@@ -27,54 +33,67 @@ export interface StreamResult {
  * This is `fetch` plus a manual reader instead.
  *
  * Deliberately outside the ApiClient: that wrapper buffers the whole body to
- * parse JSON, which would defeat streaming entirely. The cost is that the
- * single-flight refresh does not apply here — see the 401 note below.
+ * parse JSON, which would defeat streaming entirely. It still borrows that
+ * client's refresh latch rather than owning one — see the 401 note below.
  */
 export async function streamChat(opts: StreamOptions): Promise<StreamResult> {
-  const { baseUrl, getAccessToken, body, signal, onEvent } = opts
+  const { baseUrl, getAccessToken, refresh, body, signal, onEvent } = opts
 
-  const headers = new Headers({
-    "content-type": "application/json",
-    accept: "text/event-stream",
-  })
-  const token = getAccessToken()
-  if (token) headers.set("authorization", `Bearer ${token}`)
+  /** One attempt at opening the stream. `null` means the caller aborted. */
+  async function open(): Promise<Response | null> {
+    const headers = new Headers({
+      "content-type": "application/json",
+      accept: "text/event-stream",
+    })
+    // Read the token per attempt rather than once above: the retry below exists
+    // precisely because a refresh rotated it between the two.
+    const token = getAccessToken()
+    if (token) headers.set("authorization", `Bearer ${token}`)
 
-  let res: Response
-  try {
-    res = await fetch(`${baseUrl}/agent/chat/stream`, {
-      method: "POST",
-      credentials: "omit",
-      headers,
-      body: JSON.stringify(body),
-      signal,
-    })
-  } catch (err) {
-    if (isAbort(err, signal)) return { truncated: false, aborted: true }
-    throw new ApiError({
-      code: "NETWORK",
-      message: err instanceof Error ? err.message : "Could not reach the agent",
-      statusCode: 0,
-    })
+    try {
+      return await fetch(`${baseUrl}/agent/chat/stream`, {
+        method: "POST",
+        credentials: "omit",
+        headers,
+        body: JSON.stringify(body),
+        signal,
+      })
+    } catch (err) {
+      if (isAbort(err, signal)) return null
+      throw new ApiError({
+        code: "NETWORK",
+        message: err instanceof Error ? err.message : "Could not reach the agent",
+        statusCode: 0,
+      })
+    }
+  }
+
+  let res = await open()
+  if (!res) return { truncated: false, aborted: true }
+
+  // A 401 before the stream opens is worth exactly one retry: the access token
+  // went stale while the terminal sat idle, and no turn has started yet, so a
+  // replay costs nothing and is not visible in the transcript.
+  //
+  // `refresh` is ApiClient's single-flight latch. This path must NOT post to
+  // /auth/refresh itself — auth.service.ts rotates with a compare-and-set and
+  // reads a second concurrent use of one refresh token as theft, revoking the
+  // whole family. Borrowing the latch means a stream racing an ordinary request
+  // waits on the same promise instead of starting a rival rotation.
+  //
+  // This used to rely on the caller having made an ordinary request first (the
+  // conversation list does), which held right up until the first thing a user
+  // did after idling was start a turn.
+  if (res.status === 401 && refresh) {
+    const err = parseErrorEnvelope(401, await readEnvelope(res))
+    if (!err.isAuthExpiry() || !(await refresh())) throw err
+    res = await open()
+    if (!res) return { truncated: false, aborted: true }
   }
 
   // A failure before the stream opens is a normal JSON error envelope, not an
   // SSE frame — surface it as one rather than as a message in the transcript.
-  //
-  // A 401 here is not retried. The refresh latch lives in ApiClient, and racing
-  // a second refresh from this path is exactly what revokes the token family.
-  // The caller should have made an ordinary request first (the conversation
-  // list does), so an expired token is refreshed before a turn is ever started.
-  if (!res.ok) {
-    const text = await res.text().catch(() => "")
-    let parsed: unknown = text
-    try {
-      parsed = JSON.parse(text)
-    } catch {
-      /* leave as text; parseErrorEnvelope falls back */
-    }
-    throw parseErrorEnvelope(res.status, parsed)
-  }
+  if (!res.ok) throw parseErrorEnvelope(res.status, await readEnvelope(res))
 
   if (!res.body) {
     throw new ApiError({
@@ -122,4 +141,18 @@ export async function streamChat(opts: StreamOptions): Promise<StreamResult> {
 function isAbort(err: unknown, signal?: AbortSignal): boolean {
   if (signal?.aborted) return true
   return err instanceof Error && err.name === "AbortError"
+}
+
+/**
+ * Reads a non-streaming error body. A proxy can answer with HTML instead of the
+ * envelope, so the text is handed back as-is on a parse failure and
+ * `parseErrorEnvelope` falls through to its UNKNOWN branch.
+ */
+async function readEnvelope(res: Response): Promise<unknown> {
+  const text = await res.text().catch(() => "")
+  try {
+    return JSON.parse(text)
+  } catch {
+    return text
+  }
 }

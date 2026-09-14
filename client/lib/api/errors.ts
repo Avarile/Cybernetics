@@ -8,6 +8,8 @@
 
 export const ErrorCodes = {
   VALIDATION_FAILED: "VALIDATION_FAILED",
+  /** The backend's generic 401 bucket, for a 401 with no more specific code. */
+  UNAUTHORIZED: "UNAUTHORIZED",
   AUTH_INVALID_CREDENTIALS: "AUTH_INVALID_CREDENTIALS",
   AUTH_TOKEN_INVALID: "AUTH_TOKEN_INVALID",
   AUTH_TOKEN_EXPIRED: "AUTH_TOKEN_EXPIRED",
@@ -48,6 +50,29 @@ export class ApiError extends Error {
    */
   isAuthExpiry(): boolean {
     return this.code === ErrorCodes.AUTH_TOKEN_EXPIRED
+  }
+
+  /**
+   * A 401 meaning the session itself is over, so the client should tear down and
+   * raise the login gate.
+   *
+   * Not "any 401": AUTH_INVALID_CREDENTIALS (a wrong password) and
+   * AUTH_RESET_CODE_INVALID (a stale reset code) are 401s too, and both are
+   * raised by endpoints the user reaches while signed OUT. Clearing state on
+   * those would wipe the store out from under a failed login attempt.
+   *
+   * UNAUTHORIZED is in the list because it is what the API's STATUS_TO_CODE
+   * fallback produces for any framework-thrown 401 — a bucket that should no
+   * longer catch an expired access token now that JwtAuthGuard names the reason,
+   * but which still means "the server rejected this credential and did not tell
+   * us it was merely stale".
+   */
+  isSessionDead(): boolean {
+    return (
+      this.code === ErrorCodes.AUTH_TOKEN_INVALID ||
+      this.code === ErrorCodes.AUTH_TOKEN_REUSE ||
+      this.code === ErrorCodes.UNAUTHORIZED
+    )
   }
 }
 

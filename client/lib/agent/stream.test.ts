@@ -33,6 +33,14 @@ function hangingResponse(pieces: string[], signal: AbortSignal) {
   return new Response(body, { status: 200 })
 }
 
+/** A 401 carrying the API's error envelope, as the guard sends it. */
+function authError(code: string) {
+  return new Response(
+    JSON.stringify({ error: { code, message: code, statusCode: 401 } }),
+    { status: 401, headers: { "content-type": "application/json" } },
+  )
+}
+
 const EVENTS: SseEvent[] = [
   { type: "start", conversationId: "c1", runId: "r1" },
   { type: "text-delta", delta: "Hello" },
@@ -149,16 +157,64 @@ describe("streamChat", () => {
     })
   })
 
-  it("does NOT retry a 401 — refreshing here would race the ApiClient latch", async () => {
-    fetchImpl.mockResolvedValueOnce(
-      new Response(
-        JSON.stringify({
-          error: { code: "AUTH_TOKEN_EXPIRED", message: "expired", statusCode: 401 },
-        }),
-        { status: 401, headers: { "content-type": "application/json" } },
-      ),
-    )
+  it("does NOT retry a 401 when no refresh latch was supplied", async () => {
+    fetchImpl.mockResolvedValueOnce(authError("AUTH_TOKEN_EXPIRED"))
     await expect(run().promise).rejects.toBeInstanceOf(ApiError)
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it("refreshes once through the supplied latch and replays the turn", async () => {
+    let token = "access-1"
+    const refresh = vi.fn(async () => {
+      token = "access-2"
+      return true
+    })
+    fetchImpl
+      .mockResolvedValueOnce(authError("AUTH_TOKEN_EXPIRED"))
+      .mockResolvedValueOnce(streamingResponse(EVENTS.map(frame)))
+
+    const { seen, promise } = run({ getAccessToken: () => token, refresh })
+    await expect(promise).resolves.toEqual({ truncated: false, aborted: false })
+
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    // The replay must carry the rotated token, not the one read before refresh.
+    expect((fetchImpl.mock.calls[1][1].headers as Headers).get("authorization")).toBe(
+      "Bearer access-2",
+    )
+    // The caller sees a clean turn — the expiry never reached the transcript.
+    expect(seen).toEqual(EVENTS)
+  })
+
+  it("retries only once — a second 401 after the refresh throws", async () => {
+    const refresh = vi.fn(async () => true)
+    fetchImpl
+      .mockResolvedValueOnce(authError("AUTH_TOKEN_EXPIRED"))
+      .mockResolvedValueOnce(authError("AUTH_TOKEN_EXPIRED"))
+
+    await expect(run({ refresh }).promise).rejects.toBeInstanceOf(ApiError)
+    expect(refresh).toHaveBeenCalledTimes(1)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  it("does not spend a refresh on a 401 that is not an expiry", async () => {
+    const refresh = vi.fn(async () => true)
+    fetchImpl.mockResolvedValueOnce(authError("AUTH_TOKEN_INVALID"))
+
+    await expect(run({ refresh }).promise).rejects.toMatchObject({
+      code: "AUTH_TOKEN_INVALID",
+    })
+    expect(refresh).not.toHaveBeenCalled()
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it("throws the original expiry when the refresh fails", async () => {
+    const refresh = vi.fn(async () => false)
+    fetchImpl.mockResolvedValueOnce(authError("AUTH_TOKEN_EXPIRED"))
+
+    await expect(run({ refresh }).promise).rejects.toMatchObject({
+      code: "AUTH_TOKEN_EXPIRED",
+    })
     expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
 
