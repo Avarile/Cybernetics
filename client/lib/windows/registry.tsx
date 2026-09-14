@@ -37,14 +37,9 @@ export const WINDOW_COMPONENTS: Partial<Record<WindowKind, LazyExoticComponent<W
       default: m.TerminalWindow,
     })),
   ),
-  contacts: lazy(() =>
-    import("@/components/domains/contacts-window").then((m) => ({
-      default: m.ContactsWindow,
-    })),
-  ),
-  files: lazy(() =>
-    import("@/components/domains/files-window").then((m) => ({
-      default: m.FilesWindow,
+  data: lazy(() =>
+    import("@/components/data-window/data-window").then((m) => ({
+      default: m.DataWindow,
     })),
   ),
   "record-create": lazy(() =>

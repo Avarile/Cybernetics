@@ -13,8 +13,11 @@ export interface TableQuery {
 export const DEFAULT_LIMIT = 20
 export const PAGE_SIZES = [10, 20, 30, 40, 50] as const
 
-export function initialQuery(tabs?: TabSpec[]): TableQuery {
-  return { page: 1, limit: DEFAULT_LIMIT, tab: tabs?.[0]?.value, filters: {} }
+export function initialQuery(
+  tabs?: TabSpec[],
+  sort?: TableQuery["sort"],
+): TableQuery {
+  return { page: 1, limit: DEFAULT_LIMIT, tab: tabs?.[0]?.value, filters: {}, sort }
 }
 
 /**

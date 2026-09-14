@@ -9,7 +9,7 @@ import { resetClientState } from "./reset"
 describe("resetClientState", () => {
   it("clears every client store and evicts the whole swr cache", () => {
     useSessionStore.getState().setTokens({ accessToken: "a", refreshToken: "r", expiresIn: 60 })
-    useWorkspaceStore.getState().openWindow({ kind: "contacts" })
+    useWorkspaceStore.getState().openWindow({ kind: "data" })
     useUploadStore.getState().add({
       localId: "u", filename: "f", size: 1, mimeType: "text/plain",
       phase: "uploading", percent: 10, ingestable: true,

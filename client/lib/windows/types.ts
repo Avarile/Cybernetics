@@ -7,18 +7,17 @@ export type WindowKind =
   | "terminal"
   | "voice"
   | "settings"
-  | "notifications"
-  | "profile"
-  | "files"
-  | "contacts"
-  | "knowledge"
-  | "projects"
-  | "tasks"
+  /**
+   * Every data domain, in one window.
+   *
+   * Replaces the per-domain kinds (`contacts`, `files`, and the never-built
+   * `knowledge` / `projects` / `finance` / …). Six domains span ~28 distinct
+   * resources between them; a kind each would mean 28 registry entries, 28
+   * dock chips, and a user hunting for where Budgets lives. The sideNav inside
+   * this one window routes them instead.
+   */
+  | "data"
   | "mailbox"
-  | "finance"
-  | "invoices"
-  | "tags"
-  | "activity"
   | "search"
   | "record-create"
   | "record-edit"

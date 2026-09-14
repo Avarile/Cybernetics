@@ -27,7 +27,7 @@ describe("readLegacyRefresh", () => {
 describe("readLegacyWindows", () => {
   const win = {
     id: "w1",
-    kind: "contacts",
+    kind: "data",
     title: "Contacts",
     rect: { x: 0, y: 0, w: 900, h: 600 },
     zIndex: 3,

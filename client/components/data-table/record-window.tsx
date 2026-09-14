@@ -2,23 +2,17 @@
 
 import { useCallback, useState } from "react"
 import { Button } from "@/components/ui/button"
-import { Field, FieldDescription, FieldGroup, FieldLabel } from "@/components/ui/field"
-import { Input } from "@/components/ui/input"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
 import { Skeleton } from "@/components/ui/skeleton"
-import { Textarea } from "@/components/ui/textarea"
 import { ApiError } from "@/lib/api/errors"
 import { useWindowControls } from "@/features/workspace/use-window-controls"
 import { useRecord } from "@/features/records/use-record"
 import { useRecordMutations } from "@/features/records/use-record-mutations"
+import { scopes } from "@/lib/swr/keys"
+import { useInvalidate } from "@/lib/swr/use-invalidate"
 import { RECORD_FORMS } from "./record-forms"
-import { omitBlank, type FormFieldSpec } from "./record-form"
+import { RecordForm } from "./record-form"
+import { RecordTabs } from "./record-relations"
+import { omitBlank } from "./record-form-spec"
 
 export type RecordMode = "create" | "edit" | "detail"
 
@@ -27,6 +21,14 @@ export interface RecordWindowProps {
   endpoint: string
   mode: RecordMode
   id?: string
+  /**
+   * Render from a row already in hand instead of fetching.
+   *
+   * For a domain with a list endpoint but no item endpoint — `/notifications`
+   * is the case: `GET /notifications/:id` does not exist, so a row click
+   * would 404 if this window insisted on fetching.
+   */
+  seed?: Record<string, unknown>
   __windowId?: string
 }
 
@@ -37,6 +39,7 @@ export function RecordWindow({
   endpoint,
   mode,
   id,
+  seed,
   __windowId,
 }: RecordWindowProps) {
   // `__windowId` is only absent when this component is rendered outside a
@@ -44,8 +47,18 @@ export function RecordWindow({
   // call the hook with, and closing a window that doesn't exist is a no-op.
   const { close: closeWindow } = useWindowControls(__windowId ?? "")
   const spec = RECORD_FORMS[domain]
-  const { record, isLoading, error: loadError } = useRecord(endpoint, mode === "create" ? undefined : id)
+  // A seeded window holds its row already; keying the fetch null leaves the
+  // hook idle rather than requesting an endpoint that does not exist.
+  const fetched = useRecord(endpoint, mode === "create" || seed ? undefined : id)
+  const response = seed ?? fetched.record
+  // `unwrap` exists for responses that nest the record under a key. The
+  // relations still need the whole response, because that is where their
+  // rows live.
+  const record = response && spec?.unwrap ? spec.unwrap(response) : response
+  const isLoading = seed ? false : fetched.isLoading
+  const loadError = seed ? undefined : fetched.error
   const { create, update } = useRecordMutations(endpoint)
+  const invalidate = useInvalidate()
 
   const [values, setValues] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
@@ -75,11 +88,17 @@ export function RecordWindow({
   // unconditional re-seed would.
   const [seeded, setSeeded] = useState(false)
   const [seededFrom, setSeededFrom] = useState<Record<string, unknown> | null>(null)
+  const [conflict, setConflict] = useState(false)
 
   // A save error takes priority once the user has tried to act; otherwise
   // fall back to whatever kept the record from loading in the first place.
   const displayError =
-    error ?? (loadError ? (loadError instanceof ApiError ? loadError.message : "Could not load this record") : null)
+    error ??
+    (loadError
+      ? loadError instanceof ApiError
+        ? loadError.message
+        : "Could not load this record"
+      : null)
 
   const close = useCallback(() => {
     if (__windowId) closeWindow()
@@ -91,7 +110,7 @@ export function RecordWindow({
   // them a frame later the way an effect-driven `setValues` would.
   if (mode === "detail" ? record !== seededFrom : record && !seeded) {
     setSeeded(true)
-    setSeededFrom(record)
+    setSeededFrom(record ?? null)
     if (record) {
       const next: Record<string, string> = {}
       for (const f of spec?.fields ?? []) {
@@ -127,7 +146,16 @@ export function RecordWindow({
       else await update(id!, body)
       close()
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : "Could not save")
+      // A 409 is not a generic failure: someone else saved this record since
+      // it was loaded, and `expectedVersion` caught it. Saying "could not
+      // save" would invite a retry that either fails again or — if the form
+      // dropped the version — silently overwrites their work.
+      if (err instanceof ApiError && err.statusCode === 409) {
+        setConflict(true)
+        setError("This was changed by someone else since you opened it.")
+      } else {
+        setError(err instanceof ApiError ? err.message : "Could not save")
+      }
     } finally {
       setSaving(false)
     }
@@ -143,96 +171,55 @@ export function RecordWindow({
     )
   }
 
-  const fields = spec.fields.filter((f) => !(f.createOnly && mode !== "create"))
+  const form = (
+    <RecordForm
+      spec={spec}
+      values={values}
+      creating={mode === "create"}
+      readOnly={readOnly}
+      saving={saving}
+      error={displayError}
+      onChange={(key, v) => setValues((prev) => ({ ...prev, [key]: v }))}
+      onSave={() => void save()}
+      onCancel={close}
+    />
+  )
+
+  /** Discard the stale form and re-seed from whatever is current. */
+  function reload() {
+    setConflict(false)
+    setError(null)
+    setSeeded(false)
+    setSeededFrom(null)
+    void invalidate(scopes.allRecords(endpoint))
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="min-h-0 flex-1 overflow-y-auto p-5">
-        <FieldGroup>
-          {fields.map((f) => (
-            <RecordField
-              key={f.key}
-              spec={f}
-              value={values[f.key] ?? ""}
-              readOnly={readOnly || f.readOnly}
-              onChange={(v) => setValues((prev) => ({ ...prev, [f.key]: v }))}
-            />
-          ))}
-        </FieldGroup>
-
-        {displayError && (
-          <p role="alert" className="mt-3 text-sm text-destructive">
-            {displayError}
+      {conflict && (
+        <div
+          role="alert"
+          className="flex shrink-0 items-center justify-between gap-3 border-b border-border bg-destructive/10 px-5 py-2"
+        >
+          <p className="text-xs text-destructive">
+            Someone else changed this record. Reload to see the current version.
           </p>
-        )}
-      </div>
-
-      <div className="flex shrink-0 items-center justify-end gap-2 border-t border-border p-3">
-        <Button variant="outline" size="sm" onClick={close}>
-          {readOnly ? "Close" : "Cancel"}
-        </Button>
-        {!readOnly && (
-          <Button size="sm" onClick={() => void save()} disabled={saving}>
-            {saving ? "Saving…" : mode === "create" ? "Create" : "Save"}
+          <Button variant="outline" size="sm" className="h-7 text-xs" onClick={reload}>
+            Reload
           </Button>
+        </div>
+      )}
+      <div className="min-h-0 flex-1">
+        {/* Relations need a saved parent to hang off, so they appear on an
+            existing record and not while one is being created. */}
+        {spec.relations?.length && id && mode !== "create" ? (
+          <RecordTabs recordId={id} relations={spec.relations} record={response ?? {}}>
+            {form}
+          </RecordTabs>
+        ) : (
+          form
         )}
       </div>
     </div>
-  )
-}
-
-function RecordField({
-  spec,
-  value,
-  readOnly,
-  onChange,
-}: {
-  spec: FormFieldSpec
-  value: string
-  readOnly?: boolean
-  onChange: (v: string) => void
-}) {
-  const id = `field-${spec.key}`
-
-  return (
-    <Field>
-      <FieldLabel htmlFor={id}>{spec.label}</FieldLabel>
-
-      {spec.kind === "textarea" ? (
-        <Textarea
-          id={id}
-          value={value}
-          readOnly={readOnly}
-          maxLength={spec.maxLength}
-          placeholder={spec.placeholder}
-          onChange={(e) => onChange(e.target.value)}
-        />
-      ) : spec.kind === "select" ? (
-        <Select value={value} onValueChange={onChange} disabled={readOnly}>
-          <SelectTrigger id={id}>
-            <SelectValue placeholder={spec.placeholder ?? "Choose…"} />
-          </SelectTrigger>
-          <SelectContent>
-            {spec.options?.map((o) => (
-              <SelectItem key={o.value} value={o.value}>
-                {o.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      ) : (
-        <Input
-          id={id}
-          type={spec.kind === "date" ? "date" : spec.kind}
-          value={value}
-          readOnly={readOnly}
-          maxLength={spec.maxLength}
-          placeholder={spec.placeholder}
-          onChange={(e) => onChange(e.target.value)}
-        />
-      )}
-
-      {spec.help && <FieldDescription>{spec.help}</FieldDescription>}
-    </Field>
   )
 }

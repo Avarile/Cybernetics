@@ -21,6 +21,16 @@ export function createFetcher(client: ApiClient) {
         return client.get(key[2] as string)
       case "record":
         return client.get(`${key[1] as string}/${key[2] as string}`)
+      case "collection":
+        return client.get(key[1] as string)
+      case "lookup":
+        // One fixed page, at the cap every list DTO declares. Past 100 rows a
+        // lookup cannot resolve every id and says so (`truncated`) rather than
+        // labelling the first page and leaving the rest as raw uuids. A bare
+        // array endpoint ignores the unknown query param.
+        return client.get(`${key[1] as string}?limit=100`)
+      case "report":
+        return client.get(key[1] as string)
       default:
         throw new Error(`Unknown SWR key: ${JSON.stringify(key)}`)
     }

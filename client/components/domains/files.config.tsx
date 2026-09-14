@@ -1,6 +1,13 @@
+"use client"
+
+import { useMemo } from "react"
+import { DownloadIcon, FileIcon } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import type { DomainTableConfig } from "@/components/data-table/types"
+import type { DomainSpec } from "@/components/data-window/types"
+import { useFileDownload } from "@/features/files/use-file-download"
 import { isIngestable, type FileMetadata } from "@/lib/files/upload"
+import { FileDropzone } from "./file-dropzone"
 
 export type FileRow = FileMetadata
 
@@ -101,6 +108,50 @@ export const filesConfig: DomainTableConfig<FileRow> = {
           {new Date(r.createdAt).toLocaleDateString()}
         </span>
       ),
+    },
+  ],
+}
+
+/**
+ * The dropzone and the Download action, which a static config cannot hold.
+ *
+ * The dropzone invalidates its own list through SWR (`useFileUploads`), so a
+ * finished upload is visible in every open view of this domain — the same
+ * prefix-invalidation the mutations use, not a callback threaded to one opener.
+ */
+function useFilesExtras() {
+  const download = useFileDownload()
+  return useMemo(
+    () => ({
+      toolbarExtra: <FileDropzone />,
+      rowActions: [
+        {
+          label: "Download",
+          icon: DownloadIcon,
+          onSelect: (row: FileRow) => void download(row.id),
+        },
+      ],
+    }),
+    // `download` is a useCallback in the hook, so this rebuilds only when the
+    // API client itself does.
+    [download],
+  )
+}
+
+export const filesDomain: DomainSpec = {
+  key: "files",
+  label: "Files",
+  icon: FileIcon,
+  sections: [
+    {
+      key: "files",
+      label: "Files",
+      body: {
+        kind: "table",
+        config: filesConfig,
+        titleOf: (r: FileRow) => r.filename,
+        useExtras: useFilesExtras,
+      },
     },
   ],
 }

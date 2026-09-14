@@ -25,6 +25,33 @@ export interface FormFieldSpec {
   help?: string
 }
 
+/**
+ * A per-record collection, rendered as a tab beside Details.
+ *
+ * The "multiple schemas → tabs" rule applied one level down: a contact has
+ * channels, relationships and interactions; an invoice has lines and
+ * payments; a task has dependencies and watchers. None of them is reachable
+ * from a list, because none of them exists without its parent.
+ *
+ * `config` is a factory because the endpoint embeds the parent id.
+ */
+export interface RecordRelationSpec {
+  key: string
+  label: string
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  config: (recordId: string) => import("./types").DomainTableConfig<any>
+  /**
+   * Read the rows off the parent record instead of fetching them.
+   *
+   * `GET /invoices/:id` answers `{ invoice, lineItems, payments }` and there
+   * is NO list route for either collection — verified live, both 404. The
+   * rows are already in hand, so fetching them again is impossible rather
+   * than merely wasteful.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  rows?: (record: Record<string, unknown>) => any[]
+}
+
 export interface RecordFormSpec {
   fields: FormFieldSpec[]
   /** Client-side mirror of the DTO's cross-field `.refine()`. */
@@ -32,6 +59,16 @@ export interface RecordFormSpec {
   /** Strips empty strings so an untouched optional field is omitted rather
    *  than sent as "", which most of the DTOs reject. */
   serialize?: (values: Record<string, string>) => Record<string, unknown>
+  /** Per-record collections, shown as tabs beside the fields. */
+  relations?: RecordRelationSpec[]
+  /**
+   * Pick the record out of a wrapper response.
+   *
+   * `GET /invoices/:id` returns `{ invoice, lineItems, payments }` rather
+   * than the invoice's own fields at the top level, so a form reading
+   * `record.number` finds nothing without this.
+   */
+  unwrap?: (response: Record<string, unknown>) => Record<string, unknown>
 }
 
 /** Drops blank values. Shared default for every domain. */

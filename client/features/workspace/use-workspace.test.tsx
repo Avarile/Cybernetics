@@ -14,7 +14,7 @@ describe("useWorkspace", () => {
 
   it("returns open windows sorted by z-index, minimised excluded", () => {
     const a = s().openWindow({ kind: "terminal" })
-    const b = s().openWindow({ kind: "contacts" })
+    const b = s().openWindow({ kind: "data" })
     const c = s().openWindow({ kind: "voice" })
     s().minimiseWindow(a)
     // Focusing b after c raises its zIndex above c's, so a sort-by-insertion

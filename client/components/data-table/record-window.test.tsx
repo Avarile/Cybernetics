@@ -130,3 +130,27 @@ describe("RecordWindow", () => {
     await waitFor(() => expect(screen.getByLabelText("Job title")).toHaveValue("Role v2"))
   })
 })
+
+describe("RecordWindow — seeded from a row in hand", () => {
+  it("renders the seed and issues no request", async () => {
+    // /notifications has a list endpoint and no item endpoint. A window that
+    // insisted on fetching would 404 on every row click.
+    const fetchImpl = makeFetchImpl()
+    render(
+      <SWRConfig value={{ provider: () => new Map() }}>
+        <StateProvider baseUrl="https://api.test" fetchImpl={fetchImpl as unknown as typeof fetch}>
+          <RecordWindow
+            domain="contacts"
+            endpoint="/contacts"
+            mode="detail"
+            id="1"
+            seed={{ ...RECORD, firstName: "Seeded" }}
+          />
+        </StateProvider>
+      </SWRConfig>,
+    )
+
+    await waitFor(() => expect(screen.getByLabelText("First name")).toHaveValue("Seeded"))
+    expect(getCalls(fetchImpl, "GET", "/contacts/1")).toHaveLength(0)
+  })
+})

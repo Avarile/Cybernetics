@@ -93,10 +93,11 @@ describe("WindowLayer", () => {
   })
 
   it("skips a kind that has no registry entry rather than crashing", () => {
-    // `tags` is a valid WindowKind but is not registered until Phase 4.
-    s().openWindow({ kind: "tags", title: "Tags" })
+    // `mailbox` is a declared WindowKind with no component behind it yet —
+    // declaring a kind ahead of its implementation has to stay safe.
+    s().openWindow({ kind: "mailbox", title: "Mailbox" })
     render(<WindowLayer />)
-    expect(screen.queryByRole("dialog", { name: "Tags" })).not.toBeInTheDocument()
+    expect(screen.queryByRole("dialog", { name: "Mailbox" })).not.toBeInTheDocument()
   })
 })
 

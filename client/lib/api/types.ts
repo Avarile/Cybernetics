@@ -20,28 +20,47 @@ export interface TokenPair {
 /**
  * The list envelope paginated endpoints return.
  *
- * The rows arrive under `data` from ten of the eleven paginated services
- * (contacts, knowledge, projects, notifications, tags, activity, comments,
- * schedules, system-settings, integration-credentials) — but under `items`
- * from `file-processor`, which declares its own local `Paginated<T>` with that
- * key. Verified against a live `/files` response: the table reported "49 rows"
- * from `total` while rendering the empty state, because `data` was undefined.
+ * There are THREE spellings of "the rows" across this API, and pretending
+ * otherwise has cost a bug per spelling:
  *
- * Both are accepted here rather than pretending the API is uniform. See
- * `rowsOf()`.
+ * - `data` — contacts, knowledge, projects, tasks, time, notifications,
+ *   invoices, transactions, users, tags, activity, comments, and the rest.
+ * - `items` — `/files` alone, which declares its own local `Paginated<T>`.
+ *   Verified against a live response: the table reported "49 rows" from
+ *   `total` while rendering the empty state, because `data` was undefined.
+ * - `rows` — `/finance/budgets`, which returns the repository's
+ *   `{ rows, total }` straight through `budget.service.list` with no
+ *   page/limit echoed at all.
+ *
+ * `page` and `limit` are optional for that third case. Safe because no
+ * consumer reads them back: `useDomainTable` holds the page it asked for and
+ * uses only `total` and `rowsOf()`.
+ *
+ * This papers over a backend inconsistency. Hoisting one shared `Paginated<T>`
+ * on the API side is the real fix, and is a change nobody has approved.
  */
 export interface Paginated<T> {
   data?: T[]
   /** file-processor's spelling of `data`. */
   items?: T[]
+  /** finance's listBudgets spelling. */
+  rows?: T[]
   total: number
-  page: number
-  limit: number
+  page?: number
+  limit?: number
+  /**
+   * Knowledge only: the count BEFORE per-row access filtering.
+   *
+   * `knowledge.service.list` pages in SQL, then drops rows the principal
+   * cannot see, so `total` is the visible count and a page can come back
+   * short. Surfaced rather than hidden — see the footnote the table renders.
+   */
+  totalBeforeAccess?: number
 }
 
 /** The rows from a list envelope, whichever key this endpoint used. */
 export function rowsOf<T>(page: Paginated<T> | null | undefined): T[] {
-  return page?.data ?? page?.items ?? []
+  return page?.data ?? page?.items ?? page?.rows ?? []
 }
 
 /**

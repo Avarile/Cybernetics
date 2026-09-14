@@ -1,6 +1,7 @@
 "use client"
 
 import {
+  DatabaseIcon,
   LogOutIcon,
   MicIcon,
   PanelRightIcon,
@@ -104,6 +105,15 @@ export function ShellChrome() {
                 <TooltipContent>Reset view</TooltipContent>
               </Tooltip>
             </div>
+
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1.5 text-xs text-white/70 hover:bg-white/10 hover:text-white"
+              onClick={() => openWindow({ kind: "data" })}
+            >
+              <DatabaseIcon className="size-3.5" /> Data
+            </Button>
 
             <Button
               variant="ghost"

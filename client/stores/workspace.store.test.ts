@@ -27,7 +27,7 @@ describe("workspace.store", () => {
 
   it("focuses an existing singleton instead of duplicating it", () => {
     const first = s().openWindow({ kind: "terminal" })
-    s().openWindow({ kind: "contacts" })
+    s().openWindow({ kind: "data" })
     const again = s().openWindow({ kind: "terminal" })
 
     expect(again).toBe(first)
@@ -63,7 +63,7 @@ describe("workspace.store", () => {
 
   it("assigns an increasing zIndex and focus raises to the top", () => {
     const a = s().openWindow({ kind: "terminal" })
-    const b = s().openWindow({ kind: "contacts" })
+    const b = s().openWindow({ kind: "data" })
     expect(s().windows.find((w) => w.id === b)!.zIndex).toBeGreaterThan(
       s().windows.find((w) => w.id === a)!.zIndex,
     )
@@ -77,7 +77,7 @@ describe("workspace.store", () => {
   it("keeps modal windows above every non-modal window", () => {
     s().openWindow({ kind: "terminal" })
     const auth = s().openWindow({ kind: "auth", modal: true })
-    const late = s().openWindow({ kind: "contacts" })
+    const late = s().openWindow({ kind: "data" })
 
     const modalZ = s().windows.find((w) => w.id === auth)!.zIndex
     const lateZ = s().windows.find((w) => w.id === late)!.zIndex
@@ -96,7 +96,7 @@ describe("workspace.store", () => {
 
   it("cascades so two windows do not sit exactly on top of each other", () => {
     s().openWindow({ kind: "terminal" })
-    s().openWindow({ kind: "contacts" })
+    s().openWindow({ kind: "data" })
     const [a, b] = s().windows
     expect({ x: b.rect.x, y: b.rect.y }).not.toEqual({ x: a.rect.x, y: a.rect.y })
   })
@@ -131,10 +131,10 @@ describe("workspace.store", () => {
 
   it("selectors split normal from minimised", () => {
     const a = s().openWindow({ kind: "terminal" })
-    s().openWindow({ kind: "contacts" })
+    s().openWindow({ kind: "data" })
     s().minimiseWindow(a)
 
-    expect(selectOpenWindows(s()).map((w) => w.kind)).toEqual(["contacts"])
+    expect(selectOpenWindows(s()).map((w) => w.kind)).toEqual(["data"])
     expect(selectMinimised(s()).map((w) => w.kind)).toEqual(["terminal"])
   })
 
@@ -156,12 +156,12 @@ describe("workspace.store persistence", () => {
   })
 
   it("persists non-modal windows under the new envelope", async () => {
-    useWorkspaceStore.getState().openWindow({ kind: "contacts" })
+    useWorkspaceStore.getState().openWindow({ kind: "data" })
     await Promise.resolve()
 
     const stored = JSON.parse(localStorage.getItem("cyb.windows")!)
     expect(stored.state.windows).toHaveLength(1)
-    expect(stored.state.windows[0].kind).toBe("contacts")
+    expect(stored.state.windows[0].kind).toBe("data")
   })
 
   it("never persists a modal window", async () => {
@@ -192,7 +192,7 @@ describe("workspace.store persistence", () => {
         windows: [
           {
             id: "w1",
-            kind: "contacts",
+            kind: "data",
             title: "Contacts",
             rect: { x: 10, y: 10, w: 400, h: 300 },
             zIndex: 4,
@@ -228,7 +228,7 @@ describe("workspace.store persistence", () => {
           windows: [
             {
               id: "good",
-              kind: "contacts",
+              kind: "data",
               title: "Contacts",
               rect: { x: 10, y: 10, w: 400, h: 300 },
               zIndex: 4,
@@ -265,7 +265,7 @@ describe("workspace.store persistence", () => {
     // `skipHydration` means windows can be opened before `rehydrate()` runs,
     // and zustand applies `merge`'s result with `set(state, true)` — a replace.
     // A merge that did not special-case empty storage would clear them.
-    const id = useWorkspaceStore.getState().openWindow({ kind: "contacts" })
+    const id = useWorkspaceStore.getState().openWindow({ kind: "data" })
     localStorage.clear()
 
     await useWorkspaceStore.persist.rehydrate()
@@ -275,7 +275,7 @@ describe("workspace.store persistence", () => {
 
   it("clamps against the viewport store rather than its own copy", () => {
     useViewportStore.getState().setViewport({ w: 500, h: 400 })
-    const id = useWorkspaceStore.getState().openWindow({ kind: "contacts" })
+    const id = useWorkspaceStore.getState().openWindow({ kind: "data" })
     const win = useWorkspaceStore.getState().windows.find((w) => w.id === id)!
     expect(win.rect.w).toBeLessThanOrEqual(500)
     expect(win.rect.h).toBeLessThanOrEqual(400)
@@ -340,5 +340,66 @@ describe("openWindow resolves the registry descriptor", () => {
     const b = useWorkspaceStore.getState().openWindow({ kind: "terminal" })
     expect(a).toBe(b)
     expect(useWorkspaceStore.getState().windows).toHaveLength(1)
+  })
+})
+
+describe("patchWindowProps", () => {
+  beforeEach(() => {
+    localStorage.clear()
+    useWorkspaceStore.getState().closeAll()
+    useViewportStore.getState().setViewport({ w: 1440, h: 900 })
+  })
+
+  const win = (id: string) => useWorkspaceStore.getState().windows.find((w) => w.id === id)!
+
+  it("merges into existing props and leaves untouched keys alone", () => {
+    const id = useWorkspaceStore.getState().openWindow({
+      kind: "data",
+      props: { domain: "contacts", section: "people" },
+    })
+
+    useWorkspaceStore.getState().patchWindowProps(id, { section: "companies" })
+
+    expect(win(id).props).toMatchObject({ domain: "contacts", section: "companies" })
+  })
+
+  it("preserves __key even when the patch tries to overwrite it", () => {
+    // __key is the de-duplication identity. Losing it would orphan the window
+    // from its own singleton slot and the next openWindow would spawn a second.
+    const id = useWorkspaceStore.getState().openWindow({ kind: "data" })
+    const key = win(id).props?.__key
+
+    useWorkspaceStore.getState().patchWindowProps(id, { __key: "hijacked", domain: "finance" })
+
+    expect(win(id).props?.__key).toBe(key)
+    expect(useWorkspaceStore.getState().openWindow({ kind: "data" })).toBe(id)
+  })
+
+  it("does not change zIndex or zSeq", () => {
+    // Navigation, not focus: a section tab must never raise the window.
+    const id = useWorkspaceStore.getState().openWindow({ kind: "data" })
+    const z = win(id).zIndex
+    const seq = useWorkspaceStore.getState().zSeq
+
+    useWorkspaceStore.getState().patchWindowProps(id, { section: "companies" })
+
+    expect(win(id).zIndex).toBe(z)
+    expect(useWorkspaceStore.getState().zSeq).toBe(seq)
+  })
+
+  it("is a no-op for an unknown id", () => {
+    useWorkspaceStore.getState().openWindow({ kind: "data" })
+    expect(() => useWorkspaceStore.getState().patchWindowProps("nope", { a: 1 })).not.toThrow()
+    expect(useWorkspaceStore.getState().windows).toHaveLength(1)
+  })
+
+  it("survives a persist round-trip", async () => {
+    const id = useWorkspaceStore.getState().openWindow({ kind: "data" })
+    useWorkspaceStore.getState().patchWindowProps(id, { domain: "finance", section: "invoices" })
+
+    await useWorkspaceStore.persist.rehydrate()
+
+    const restored = useWorkspaceStore.getState().windows[0]
+    expect(restored.props).toMatchObject({ domain: "finance", section: "invoices" })
   })
 })

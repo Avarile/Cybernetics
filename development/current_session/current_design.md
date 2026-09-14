@@ -1,946 +1,1116 @@
-# Cybernetics Client — Frontend Design
+# Phase 5 — The Data window
 
-> **Status:** design, pre-implementation.
-> **Scope:** the whole `client/` application — the 3D System Core shell, its window
-> system, the agent terminal, live voice, the feature-module tables, and the file
-> ingest pipeline.
-> **Backend:** `api/` as it exists today. Every endpoint named here was verified
-> against a controller in `api/src/features/**`. Where a capability does not exist,
-> it is called out in [§11 Open questions](#11-open-questions) rather than assumed.
+**One window, every domain.** A `settings-dialog`-shaped shell whose sideNav routes
+between the six data domains, whose pane header tabs between the schemas inside a
+domain, and whose body is the generic `DataTable` from Phase 4.
 
----
-
-## 1. Premise
-
-After login the user is not dropped into a dashboard. They are dropped into a
-**machine** — a dark, slowly turning 3D core that *is* the system. Each rotating
-band is one live feature domain; its colour and brightness are that domain's real
-state. Everything else — the agent terminal, a contacts table, settings, a voice
-call — arrives as a window floating over that core, and leaves again.
-
-The design goal is Claude's restraint applied to a machine-room aesthetic: quiet
-surfaces, one accent, generous space, no chrome that isn't doing work.
-
-### 1.1 What already exists
-
-| Layer | State |
-|---|---|
-| `client/` | Next 16 · React 19.2 · Tailwind v4 · shadcn (`radix-vega`, olive base). **49 ai-elements** and **60+ ui primitives** vendored. Only stock demo pages. No zustand, no `three`. |
-| `api/` | NestJS, **37 controllers / 16 domains**. Mastra agent with SSE streaming, approvals, schedules. Presigned upload → text extraction → search indexing, complete. |
-| Reference | `cybernetics-agentics/client/src/components/SystemCore` — the 3D core, **partially**. See §4.1. |
-
-### 1.2 Hard constraints discovered
-
-These shaped the design and are non-negotiable:
-
-1. **The API mounts at root.** No `setGlobalPrefix` anywhere in `api/src`. Base URL
-   is the origin, not `/api`.
-2. **Bearer only.** `main.ts` sets `credentials: false` — *"Bearer transport — no
-   cookies, no CSRF surface"*. No cookie session is possible.
-3. **The agent stream is SSE over `POST`.** `EventSource` only issues `GET`, so it
-   cannot be used. The transport must be `fetch` + `ReadableStream`.
-4. **The upload is a presigned multipart `POST` policy**, not a `PUT`, and it can
-   short-circuit on content-address dedup. See §9.
-5. **There is no public signup.** `users.controller.ts`: *"Admin-only user
-   provisioning (no public signup)."*
-6. **There is no realtime/voice backend.** No WebSocket gateway, no STT/TTS routes.
-7. **The 3D reference is incomplete.** Its entire `data/` directory is missing. §4.1.
+Date: 2026-09-13. Written against the live backend at `api/src/features/*` and the
+client as it stands at `7fe8944`.
 
 ---
 
-## 2. Application shell
+## 1. Why this window exists
 
-### 2.1 Routes
+`WINDOW_COMPONENTS` already registers `contacts` and `files`. **Nothing opens
+them.** The only `openWindow` call sites in the app are the auth gate, Terminal and
+Voice (`shell-chrome.tsx:112,141`, `use-auth-gate.ts:38`). Phase 4 built a generic
+table, two domain configs and three record windows, and then shipped without a
+door.
 
-The app is effectively single-route. Navigation is window state, not URL state.
+This phase is that door — and the shape of the door determines whether adding the
+seventh domain is a config object or another orphaned window kind. A per-domain
+window kind does not scale: six domains with ~28 distinct resources between them
+would mean 28 registry entries, 28 dock chips, and a user hunting for "where do I
+open Budgets".
 
-```
-app/
-  layout.tsx              # fonts, ThemeProvider, TooltipProvider, Toaster (sonner)
-  page.tsx                # redirect → /core
-  core/
-    page.tsx              # THE app: canvas + window layer + chrome
-  reset-password/
-    page.tsx              # standalone — reached from an email link, pre-auth
-```
-
-`core/page.tsx` renders three stacked layers:
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│  <SystemCoreCanvas />        z-0    full-viewport WebGL      │
-│  <WindowLayer />             z-10   portal, sorted by zIndex │
-│  <ShellChrome />             z-20   always-on controls       │
-└──────────────────────────────────────────────────────────────┘
-```
-
-When unauthenticated, the canvas renders in a dimmed, `pointer-events-none`,
-reduced-motion state behind the modal auth window. The machine is visibly *there*,
-just not yours yet.
-
-### 2.2 Persistent chrome
-
-```
-┌────────────────────────────────────────────────────────────────────┐
-│ ◆ CYBERNETICS                    [◎ scanner] [⟲ reset] [⌘K]  [◐] ▾ │  ← top bar
-│                                                                     │
-│                                                                     │
-│                          ( 3D core )                                │
-│                                                                     │
-│                                                                     │
-│                                                          ┌────────┐ │
-│                                                          │  🎙    │ │  ← voice FAB
-│                                                          └────────┘ │
-├────────────────────────────────────────────────────────────────────┤
-│ ▣ Terminal   ▣ Contacts   ▣ Files                          3 open  │  ← dock
-└────────────────────────────────────────────────────────────────────┘
-```
-
-| Element | Behaviour |
-|---|---|
-| Identity chip (top-left) | Wordmark; click opens the command palette. |
-| Scanner / reset view | Ported from the reference's `Dialog.tsx` toolbar. Scene-only controls. |
-| `⌘K` | `cmdk` palette: open any window, jump to a conversation, run a domain query. |
-| Avatar menu | Profile, Settings, Notifications (with unread dot), Theme, Sign out. |
-| Voice FAB (bottom-right) | Toggles the mic. **Does not own the voice window** — see §7.2. |
-| Dock (bottom) | Minimised windows. Hidden when empty. Becomes a tab bar under `md`. |
-
-All chrome uses semantic shadcn tokens. Only the canvas uses fixed colours (§4.3).
-
-### 2.3 Responsive strategy
-
-| Breakpoint | Shell |
-|---|---|
-| `< md` (mobile) | Canvas stays as backdrop but drops to `frameloop="demand"` and hides the scanner. **Every window becomes a full-screen `Sheet`.** Dock → bottom tab bar. Tables switch to a card list (`components/ui/item.tsx`). |
-| `md – lg` (tablet) | Floating windows, but they open maximised by default. Drag enabled, resize disabled. |
-| `≥ lg` (desktop) | Full window manager: free drag, resize, tile, multiple concurrent windows. |
-
-One rule keeps this honest: **no feature component knows its breakpoint.** They
-render content; `WindowFrame` decides whether that content lives in a floating
-frame or a sheet.
+So: **one window kind, `data`.** Three levels of navigation inside it.
 
 ---
 
-## 3. Window manager
+## 2. Anatomy
 
-The goal file requires the terminal and the live-conversation window to be open
-simultaneously, and requires the voice toggle to be independent of the voice
-window's lifecycle. That rules out a modal stack. It does *not* justify a full
-desktop metaphor — so this is deliberately the smallest thing that satisfies it.
+```
+┌─ WindowFrame (existing chrome: title bar, drag, resize, minimise) ───────────┐
+│ ┌──────────────┬────────────────────────────────────────────────────────────┐│
+│ │ SIDENAV      │ Data › Finance › Invoices            [scope picker]        ││  ← header
+│ │              ├────────────────────────────────────────────────────────────┤│
+│ │ ▸ Contacts   │ [Transactions][Invoices][Budgets][Accounts][Recurring][⋯]  ││  ← section tabs
+│ │ ▸ Finance ●  ├────────────────────────────────────────────────────────────┤│
+│ │ ▸ Knowledge  │ [All][Draft][Sent][Overdue]  [search] [status ▾]   ⟳ ▣ +New││  ← DataTable toolbar
+│ │ ▸ Notifics.  │ ┌────────────────────────────────────────────────────────┐ ││    (view tabs)
+│ │ ▸ Projects   │ │ ☐ │ Number │ Bill to │ Due │ Total │ Paid │ Status │ ⋮ │ ││
+│ │ ▸ Files      │ │ … rows …                                               │ ││
+│ │ ▸ You        │ └────────────────────────────────────────────────────────┘ ││
+│ │              │ 3 of 142 row(s) selected.   Rows per page 20   Page 1 of 8 ││
+│ └──────────────┴────────────────────────────────────────────────────────────┘│
+└──────────────────────────────────────────────────────────────────────────────┘
+```
 
-### 3.1 Model
+Three levels, and they mean three different things. Conflating any two of them is
+the main way this design goes wrong:
+
+| Level | Control | Means | Changes |
+|---|---|---|---|
+| **Domain** | sideNav item | A bounded context | Everything |
+| **Section** | tab in pane header | A *different schema / endpoint* | The table config |
+| **View** | tab in DataTable toolbar | A *saved filter over one endpoint* | One query param |
+
+`DomainTableConfig.tabs` already exists and already means **view**
+(`contacts.config.tsx:57-61` — All / Active / Archived over `/contacts`). The new
+thing is **section**, and it must not be built on the same field. Keeping them
+spatially apart — sections above the table, views inside its toolbar — is what
+makes two tab rows legible instead of confusing.
+
+### 2.1 Reuse of `settings-dialog.tsx`, and what is dropped
+
+`components/settings-dialog.tsx` is a vendored shadcn demo, exactly as
+`components/data-table.tsx` is. Phase 4's rule applies again: **generalise it into
+a new file; leave the vendored demo untouched as the reference.**
+
+What is taken: `SidebarProvider className="items-start"` + `Sidebar
+collapsible="none"` + `SidebarContent/Group/GroupContent/Menu/MenuItem/MenuButton`
+for the nav, and `Breadcrumb*` in a `<header className="flex h-16 shrink-0 …">`
+over a `<main className="flex flex-1 flex-col overflow-hidden">`.
+
+What is dropped, and why:
+
+- **The `Dialog` wrapper.** `WindowFrame` already renders `role="dialog"` with a
+  title bar, close button and Escape handling (`window-frame.tsx:83,59-66`).
+  Nesting a Radix `Dialog` inside it is a box in a box with two focus traps — the
+  same reasoning `window-layer.tsx:50-53` gives for the auth gate's `chrome:
+  "none"`.
+- **The fixed `h-[480px]` / `md:max-h-[500px]` sizing.** The window is resizable;
+  the shell must be `h-full min-h-0`.
+- **`useState(true)` open state and the `DialogTrigger`.** Open/close is the
+  workspace store's job.
+
+The `SidebarProvider` is kept (the `Sidebar` primitives require its context) but
+with `defaultOpen` irrelevant — `collapsible="none"` means the rail never
+collapses. On narrow windows the sideNav becomes a `Select` in the header instead
+(§10.2).
+
+---
+
+## 3. Files
+
+### New
+
+```
+components/data-window/
+  data-window.tsx        the shell: sidenav + header + section router
+  domain-nav.tsx         sideNav list, + the narrow-window Select fallback
+  section-tabs.tsx       tab row with overflow "⋯" menu for secondary sections
+  scope-picker.tsx       required-parent selector for scoped sections
+  section-host.tsx       renders a section: table | form | report | custom
+  types.ts               DomainSpec, SectionSpec
+  registry.ts            DOMAINS: DomainSpec[]  ← the one place a domain is added
+
+components/domains/
+  contacts.config.tsx    (exists — gains companies/types/categories configs)
+  finance.config.tsx
+  knowledge.config.tsx
+  notifications.config.tsx
+  projects.config.tsx
+  profile.config.tsx
+  files.config.tsx       (exists)
+  cells.tsx              shared cell renderers: Money, DateCell, StatusBadge,
+                         PriorityBadge, ProgressCell, Dash, RelativeTime
+  panes/
+    finance-reports.tsx  the one non-table section
+    profile-form.tsx     /me/profile
+    account-pane.tsx     principal card + password change
+
+features/records/
+  use-collection.ts      array endpoints → the DomainTable interface
+  use-lookup.ts          id → label maps for reference columns and async filters
+  use-singleton-record.ts  /me/profile: a resource of one
+  use-row-action.ts      POST-verb row actions with invalidation
+```
+
+### Changed
+
+| File | Change |
+|---|---|
+| `lib/windows/types.ts` | `WindowKind` gains `"data"`; retire `"contacts"`, `"files"` |
+| `lib/windows/meta.ts` | `data` meta: `DatabaseIcon`, singleton, 1140×720, min 640×420 |
+| `lib/windows/registry.tsx` | lazy `data` → `DataWindow`; drop `contacts`/`files` |
+| `stores/workspace.store.ts` | new `patchWindowProps(id, patch)` action (§5.2) |
+| `features/workspace/use-window-controls.ts` | expose `patchProps` |
+| `components/shell/shell-chrome.tsx` | a "Data" button beside Terminal |
+| `lib/api/types.ts` | `rowsOf()` gains the `rows` branch (§6.1) |
+| `lib/swr/keys.ts` | `keys.collection`, `keys.lookup`, `keys.report`, `scopes.allCollections` |
+| `lib/swr/fetcher.ts` | cases for the new key heads (the switch throws by design) |
+| `components/data-table/types.ts` | `source`, `deleteKey`, row-level `canEdit`/`canDelete`, async filters (§4.2) |
+| `components/data-table/data-table.tsx` | honour the above; nothing structural |
+| `components/data-table/record-window.tsx` | split out `RecordForm` so `/me/profile` can reuse it |
+| `components/data-table/record-forms.ts` | specs for every writable domain |
+
+### Deleted
+
+`components/domains/contacts-window.tsx`, `components/domains/files-window.tsx` —
+their `openWindow` wiring moves into one shared place (§8.1). The **configs** stay;
+they become sections.
+
+Retiring the two kinds is safe: `isRestorable` filters any persisted window whose
+kind is absent from `WINDOW_META` (`workspace.store.ts:114`), which is the
+documented behaviour for "a deploy that retires a WindowKind". Nobody has one
+persisted anyway — nothing could open them.
+
+---
+
+## 4. Type model
+
+### 4.1 Domains and sections
+
+```ts
+// components/data-window/types.ts
+import type { LucideIcon } from "lucide-react"
+import type { UserRole } from "@/lib/api/types"
+import type { DomainTableConfig, HasId } from "@/components/data-table/types"
+
+export type DomainKey =
+  | "contacts" | "finance" | "knowledge"
+  | "notifications" | "projects" | "files" | "profile"
+
+/** A section that needs a parent id before it can load anything. */
+export interface SectionScope {
+  /** Path segment the parent fills: `/projects/{id}/milestones`. */
+  param: "projectId"
+  /** Collection the picker reads its options from. */
+  from: string          // "/projects"
+  labelKey: string      // "name"
+  placeholder: string   // "Choose a project…"
+}
+
+export type SectionBody<T extends HasId = HasId> =
+  | { kind: "table"; config: DomainTableConfig<T> }
+  /** Scoped table: `config` is a factory, because the endpoint embeds the id. */
+  | { kind: "scoped-table"; scope: SectionScope; config: (parentId: string) => DomainTableConfig<T> }
+  | { kind: "form"; endpoint: string; spec: string }   // key into RECORD_FORMS
+  | { kind: "custom"; render: () => React.ReactNode }  // reports, account card
+
+export interface SectionSpec {
+  key: string            // stable; persisted in window props
+  label: string
+  body: SectionBody
+  /** Hidden entirely for principals outside this list. Omit ⇒ everyone. */
+  roles?: UserRole[]
+  /** Demoted into the tab row's "⋯" overflow. Reference/vocabulary data. */
+  secondary?: boolean
+  /** One line under the breadcrumb when the section needs explaining. */
+  hint?: string
+}
+
+export interface DomainSpec {
+  key: DomainKey
+  label: string
+  icon: LucideIcon
+  sections: SectionSpec[]
+  roles?: UserRole[]
+}
+```
+
+`registry.ts` exports `DOMAINS: DomainSpec[]` and two resolvers
+(`findDomain(key)`, `findSection(domain, key)`) that **fall back rather than
+throw** — window props come out of `localStorage` and a retired section key must
+degrade to "first visible section of the domain", not a blank pane.
+
+### 4.2 Extensions to `DomainTableConfig`
+
+Five additions. Each exists because a real endpoint in §7 cannot be expressed
+without it.
+
+```ts
+export interface DomainTableConfig<T extends HasId> {
+  // … existing fields unchanged …
+
+  /**
+   * "paged"      — `{ data|items|rows, total }`, server pages it.   (default)
+   * "collection" — a bare JSON array; page/search/filter client-side.
+   * Forced by the backend: /finance/accounts, /finance/recurring,
+   * /me/preferences, /notifications/preferences, /projects/:id/members and
+   * every vocabulary endpoint return arrays with no envelope. (§6.1)
+   */
+  source?: "paged" | "collection"
+
+  /**
+   * The path segment DELETE uses, when it is not the row id.
+   * `DELETE /system/notifications/suppressions/:email`
+   * `DELETE /projects/:id/members/:userId`
+   * `DELETE /me/preferences/:key`
+   */
+  deleteKey?: (row: T) => string
+
+  /** Per-row, not just per-domain: `PublicProject.access` says what this
+   *  principal may do to THIS row, and a viewer must not see Edit. */
+  canEdit?: boolean | ((row: T) => boolean)
+  canDelete?: boolean | ((row: T) => boolean)
+
+  /** Default sort, sent as `sort=&order=` on first load. */
+  defaultSort?: { key: string; dir: "asc" | "desc" }
+}
+
+export interface FilterSpec {
+  key: string
+  label: string
+  /** Static enum options … */
+  options?: { value: string; label: string }[]
+  /** … or options fetched from a collection endpoint. Exactly one of the two. */
+  source?: { endpoint: string; valueKey?: string; labelKey: string }
+  /** Above ~20 options a Select is unusable; switch to the Combobox. */
+  searchable?: boolean
+}
+
+export interface ColumnSpec<T> {
+  // … existing …
+  /** Renders right-aligned + `tabular-nums`. Money and counts. */
+  numeric?: boolean
+}
+```
+
+Widening `canEdit`/`canDelete` is source-compatible — every existing config passes
+a boolean. The toolbar's bulk-delete button gates on **every** selected row
+passing `canDelete`, and shows a count of the eligible subset when they differ.
+
+Deliberately **not** added: a `permissions` enforcement path. `permissions` is
+declared on `DomainTableConfig` (`types.ts:66`) and read by nothing. See §9.
+
+---
+
+## 5. State management
+
+Five layers, each owning exactly one kind of fact. The rule: **anything the server
+knows lives in SWR; anything the workspace remembers lives in zustand; anything
+only this table cares about lives in the table.**
+
+| Fact | Owner | Persisted | Scope |
+|---|---|---|---|
+| Which windows are open, where, z-order | `workspace.store` | ✅ localStorage | app |
+| Which domain + section the Data window shows | `workspace.store` → `props` | ✅ (same slice) | one window |
+| Scope selection (which project) | `workspace.store` → `props` | ✅ | one window |
+| Rows, totals, records, lookups | SWR cache | ❌ | app (shared by key) |
+| Page / limit / search / filters / view tab | `useDomainTable` local state | ❌ | one table mount |
+| Row selection, hidden columns | `DataTable` local state | ❌ | one table mount |
+| Tokens | `session.store` | refresh only | app |
+
+### 5.1 Why navigation goes in window props, not a new store
+
+A new `domains.store` would have to key everything by window id and clean up on
+close — a second lifecycle shadowing one that already exists and is already
+tested. Window `props` is a `JsonObject` that the persist slice already carries
+(`serialiseForPersist`), so putting `{ domain, section, scope }` there means
+reopening the app lands you back on Finance › Invoices for free, and
+`openWindow({ kind: "data", props: { domain: "finance", section: "invoices" } })`
+is a deep link with no extra machinery.
+
+The gap: `openWindow` writes props once and nothing can change them.
+
+### 5.2 `patchWindowProps`
+
+```ts
+// stores/workspace.store.ts
+patchWindowProps: (id: string, patch: JsonObject) =>
+  set((state) => {
+    const win = state.windows.find((w) => w.id === id)
+    if (!win) return
+    // `__key` is the de-duplication identity (keyOf) and must survive a patch —
+    // clobbering it would orphan the window from its own singleton slot.
+    win.props = { ...win.props, ...patch, __key: win.props?.__key }
+  }),
+```
+
+Two things this must not break:
+
+- **`isRestorable` does not validate props** (`workspace.store.ts:101-116`), by
+  design — props are an untyped bag. So `DataWindow` treats
+  `props.domain`/`props.section` as *hints*: unknown values fall back to the first
+  visible domain/section rather than rendering nothing. A hand-edited
+  `localStorage` must not produce a blank window.
+- **Patching props must not bump z-order.** It is not a focus event; a section
+  switch raising the window over a modal would be a bug.
+
+`useWindowControls(id)` gains `patchProps: (patch) => patchWindowProps(id, patch)`.
+
+### 5.3 Mount keying — what resets and what does not
+
+`section-host.tsx` renders **only the active section**, keyed:
+
+```tsx
+<SectionHost key={`${domain.key}:${section.key}:${scopeId ?? ""}`} … />
+```
+
+Consequences, all intended:
+
+- Switching section **unmounts** the previous table → its page, search, filters,
+  view tab, selection and hidden columns reset. A section is a different resource;
+  carrying page 7 of Transactions into Invoices is meaningless.
+- Switching **back** also resets. Accepted for v1. The escape hatch, if it ever
+  proves annoying: hoist `TableQuery` into `props` under
+  `queries[`${domain}:${section}`]`. Not now — it triples the persisted payload
+  to solve a problem nobody has reported.
+- Only one section fetches at a time. Rendering all sections and hiding the
+  inactive ones would fire ~28 requests to open one window.
+- Changing the scope (project) remounts too — a scoped table's endpoint changes,
+  so its cache key changes anyway.
+
+Switching sections does **not** evict the SWR cache. Coming back inside
+`dedupingInterval` (2s) paints from cache instantly; beyond it, SWR revalidates
+while showing the cached page. That is the right behaviour and comes for free.
+
+### 5.4 Cross-window coherence
+
+Unchanged from Phase 4 and worth restating, because the Data window makes it
+visible for the first time: mutations invalidate **by key prefix**
+(`scopes.allLists(endpoint)`), so two Data windows on the same domain, or a Data
+window and a `record-edit` window, converge without either knowing about the
+other (`use-record-mutations.ts:14-22`). New in this phase:
+
+```ts
+scopes.allCollections = (endpoint: string) => ["collection", endpoint] as const
+```
+
+and every write helper invalidates lists **and** collections for its endpoint,
+because a new account must appear both in `/finance/accounts` (the table) and in
+the Account filter's option list on the Transactions section.
+
+---
+
+## 6. Data access
+
+### 6.1 The envelope problem
+
+Phase 4 found `/files` returns `items` where everything else returns `data`, and
+`rowsOf()` was widened to read either. Auditing the six domains turns up a **third**
+shape and a large fourth class:
+
+| Shape | Endpoints |
+|---|---|
+| `{ data, total, page, limit }` | `/contacts`, `/companies`, `/knowledge`, `/projects`, `/tasks`, `/tasks/time`, `/notifications`, `/invoices`, `/finance/transactions`, `/users`, `/tags` |
+| `{ items, total, page, limit }` | `/files` |
+| **`{ rows, total }`** — no page/limit | **`/finance/budgets`** (`finance.repository.ts:182-202`, returned straight through `budget.service.ts:26`) |
+| **bare `T[]`** | `/finance/accounts`, `/finance/categories`, `/finance/currencies`, `/finance/fx-rates`, `/finance/recurring`, `/notifications/preferences`, `/system/notifications/templates`, `/system/notifications/event-types`, `/me/preferences`, `/projects/:id/members`, `/projects/:id/milestones`, `/projects/:id/goals`, `/contact-vocabulary/*`, `/knowledge-vocabulary/*` |
+| **bare `T[]`, server-sliced, no total** ⚠ | **`/system/notifications/suppressions`** — accepts `page`/`limit`, applies `.limit().offset()`, and returns the naked array (`notification.repository.ts:471-482`). The client cannot know whether there is a page 2. |
+
+That last row is the nastiest of the five, because it looks like a collection and
+behaves like a truncation. Handled in §7.4; logged in §14.
+
+**Budgets is a one-line fix.** `useDomainTable` reads only `rowsOf(data)` and
+`data.total`; it never reads `page`/`limit` back from the response
+(`use-domain-table.ts:51,76`). So adding a `rows` branch to `rowsOf()` makes
+Budgets work completely:
+
+```ts
+export interface Paginated<T> { data?: T[]; items?: T[]; rows?: T[]; total: number; page?: number; limit?: number }
+export function rowsOf<T>(p?: Paginated<T> | null): T[] { return p?.data ?? p?.items ?? p?.rows ?? [] }
+```
+
+with regression tests for all four cases, as `items` got.
+
+**This papers over a backend inconsistency, again.** Three spellings of "the rows"
+across one API is a defect; the real fix is hoisting one shared `Paginated<T>` and
+normalising `file.service.list` and `finance.repository.listBudgets` onto `data`.
+That is a backend change nobody has approved. Logged in §14.
+
+### 6.2 `useCollection` — array endpoints
+
+Bare arrays need paging, search and filtering *somewhere*. Doing it client-side is
+correct here and only here: these are bounded sets — accounts, categories,
+milestones, preference rows — tens of items, not the 282 contacts that forced
+server paging in the first place.
+
+```ts
+// features/records/use-collection.ts
+export function useCollection<T extends HasId>(config: DomainTableConfig<T>): DomainTable<T>
+```
+
+It returns **the same `DomainTable<T>` interface** as `useDomainTable`, so
+`DataTable` never learns which kind of endpoint it is rendering. Internally: one
+`useSWR(keys.collection(endpoint))`, then `useMemo` over the array applying tab
+query params → filters → search (substring over the columns' string cells) →
+sort → slice.
+
+`useDomainTable` becomes the dispatcher. Hooks cannot be called conditionally, so
+both run and one is keyed `null`:
+
+```ts
+export function useDomainTable<T extends HasId>(config: DomainTableConfig<T>): DomainTable<T> {
+  const paged = usePagedTable(config, config.source !== "collection")
+  const collection = useCollection(config, config.source === "collection")
+  return config.source === "collection" ? collection : paged
+}
+```
+
+Every existing call site keeps working — `source` defaults to `"paged"`.
+
+### 6.3 `useLookup` — ids to labels
+
+Half the columns in Finance and Projects hold foreign keys the API does not
+expand: `transactions.accountId`, `transactions.categoryId`, `tasks.projectId`,
+`invoices.contactId`, `budgets.projectId`. Rendering a raw UUID in a table cell is
+rendering nothing.
+
+```ts
+// features/records/use-lookup.ts
+export function useLookup(endpoint: string, labelKey = "name"): {
+  label: (id: string | null) => string      // falls back to "—", then to a short id
+  options: { value: string; label: string }[]
+  isLoading: boolean
+}
+```
+
+One SWR key per endpoint (`keys.lookup(endpoint)`), shared by every consumer — the
+Account column, the Account filter and the Account field in the transaction form
+all read the same cache entry, one request. Backed by `/finance/accounts`,
+`/finance/categories`, `/projects`, `/contacts`, `/users`.
+
+While loading, cells render a `Skeleton` sized to the column, not a flash of raw
+UUID.
+
+For endpoints that are paged rather than arrays (`/projects`, `/contacts`,
+`/users`) the lookup requests `?limit=100` and, if `total > 100`, falls back to
+rendering the id short-form with a tooltip. Honest degradation beats a silently
+wrong label. (A backend `?ids=` batch endpoint would fix it properly — §14.)
+
+### 6.4 Writes
+
+- **Standard CRUD** — `useRecordMutations(endpoint)`, unchanged.
+- **Singleton resources** — `useSingletonRecord("/me/profile")`: `GET` + `PATCH`
+  with no id segment. `useRecordMutations.update` builds `${endpoint}/${id}`,
+  which is wrong for a resource of one.
+- **Verb endpoints** — `useRowAction()`. Finance and Knowledge expose state
+  changes as POSTs, not as fields:
+
+  ```
+  POST /finance/transactions/:id/status/:status     draft→pending→cleared→reconciled→void
+  POST /finance/transactions/:id/reverse
+  POST /invoices/:id/issue | /void | /payments | /lines | /bill-time
+  POST /knowledge/:id/status                        { status, note }
+  POST /finance/recurring/materialize
+  ```
+
+  Each is a row action that POSTs, invalidates `allLists` + `allRecords` +
+  `allCollections`, and reports failure inline. Never an editable form field —
+  `knowledge.service.ts` enforces a transition table (`TRANSITIONS`, lines
+  59-66) and `ledger.service` guards status moves with `FOR UPDATE`; a form that
+  PATCHes `status` would be lying about what the server accepts.
+
+- **Interactive cells** — `useCellMutation(endpoint, method)`. Notification
+  preferences and user preferences are edited in place (a `Switch`, a `Select`)
+  rather than through a form window. Optimistic via SWR `mutate(key, updater,
+  { revalidate: false })`, rolled back and toasted on failure. `sonner` is
+  already a dependency and `components/ui/sonner.tsx` exists.
+
+---
+
+## 7. The domains
+
+Column lists below are the **default visible** set; everything except the first
+column is hideable through the existing Columns menu.
+
+### 7.1 Contacts — `UsersIcon`
+
+| Section | Endpoint | Source | Writes |
+|---|---|---|---|
+| People | `/contacts` | paged | C·U·D |
+| Companies | `/companies` | paged | C·U·D |
+| Types ˢ | `/contact-vocabulary/types` | collection | C·U·D (admin) |
+| Categories ˢ | `/contact-vocabulary/categories` | collection | C·U·D (admin) |
+
+ˢ = secondary (overflow menu)
+
+**People** — `contactsConfig` as it stands, extended.
+Columns: Name · Email · Title · Phone · Company · Status · Visibility · Last contacted.
+Views: All / Active / Archived. Filters: `status` (enum) + **new**: `companyId`
+(source `/companies`, searchable), `typeId`, `categoryId`, `tagId` (source
+`/tags`) — all four are accepted by `listContactsSchema` (`contact.dto.ts:105-114`)
+and none were reachable.
+Form (`RECORD_FORMS.contacts`) exists and already mirrors the DTO's
+`.refine()` ("Provide a name or an email address").
+
+**Companies** — `listCompaniesSchema`: search + status + page/limit.
+Columns: Name · Domain · Industry · Size · Country · Status.
+Views: All / Active / Archived. Form from `createCompanySchema`: name*, legalName,
+domain, industry, size (enum), website, phone, country (2 chars), status,
+taxNumber, description.
+
+**Types / Categories** — vocabulary. Columns Name · Key · Sort order (+ Colour swatch
+for types; Parent for categories). Categories are a materialised-path tree
+(`path`/`depth`): the Name cell indents by `depth` and the default sort is `path`,
+so the tree reads as a tree inside a flat table. `key` is **createOnly** — the DTO
+omits it from the update schema because it is immutable once set.
+
+**Contact detail** — v1 ships flat (`record-detail`). The three per-record
+collections (`/contacts/:id/channels`, `/relationships`, `/interactions`) land in
+increment 5c as record-window tabs (§8.5).
+
+### 7.2 Finance — `WalletIcon`
+
+Eight resources. Six primary, two secondary.
+
+| Section | Endpoint | Source | Writes |
+|---|---|---|---|
+| Transactions | `/finance/transactions` | paged | C only + verbs |
+| Invoices | `/invoices` | paged | C only + verbs |
+| Budgets | `/finance/budgets` | paged (`rows`!) | C only |
+| Accounts | `/finance/accounts` | collection | C only |
+| Recurring | `/finance/recurring` | collection | C·D + verb |
+| Reports | — | custom | read |
+| Categories ˢ | `/finance/categories` | collection | read |
+| FX rates ˢ | `/finance/fx-rates` | collection | C (upsert) |
+
+**Transactions.** Columns: Date (`occurredOn`) · Description · Kind (badge) ·
+Amount (numeric, `currency` + sign derived from `kind`) · Account (lookup) ·
+Category (lookup) · Status (badge) · Reference.
+Views: All / Income / Expense / Transfers (`kind=`). Filters: `status`,
+`accountId`ᴸ, `categoryId`ᴸ, `projectId`ᴸ, `contactId`ᴸ, and a `from`/`to` date
+range (both are `isoDate` in `listTransactionsSchema:110-111`).
+**`canEdit: false`, `canDelete: false`** — the API exposes neither PATCH nor
+DELETE on a transaction. Corrections are reversing entries, by design
+(`finance.schema.ts`: *"A correction is a reversing entry, never an edit of a
+settled row"*). Offering Edit would 404 and teach the user the wrong model.
+Row actions instead: **Mark pending / cleared / reconciled / void** (`POST
+…/status/:status`, each hidden when the transition is not legal from the row's
+current status) and **Reverse…** (destructive-styled confirm → `POST …/reverse`).
+
+The amount cell is the one place a rendering mistake is expensive: amounts are
+**decimal strings** (`numeric(20,4)`, never floats — `money.util.ts`). The `Money`
+cell in `cells.tsx` formats via `Intl.NumberFormat` from the string **without ever
+parsing to `Number`** for display, and colours by `kind` (income positive,
+expense negative, transfer neutral) rather than by a sign the column does not
+carry.
+
+**Invoices.** Columns: Number · Bill to (contact or company, lookup) · Issued ·
+Due · Total · Paid · Balance (derived: `total − amountPaid`) · Status (badge).
+Views: All / Draft / Sent / Partially paid / Overdue / Paid / Void — all six are
+values of `listInvoicesSchema.status`, so every view is one query param. (There is
+also a dedicated `GET /invoices/overdue`; the filter covers it and the extra
+endpoint stays unused.) Filters: `status`, `contactId`ᴸ, `companyId`ᴸ, `projectId`ᴸ.
+Create only. Row actions: **Add line…**, **Bill time…**, **Issue**, **Record
+payment…**, **Void** — each visible only where the status allows it (`Issue` on
+draft; `Record payment` on sent/partially_paid; `Void` on anything not already
+void or paid).
+Detail: `GET /invoices/:id` returns `{ …invoice, lineItems, payments }`
+(`invoice.service.ts:65`), so the detail window shows the header fields plus two
+small read-only tables. This is the first record window with a non-flat body and
+the pilot for §8.5.
+
+**Budgets.** Columns: Name · Period (`periodStart – periodEnd`) · Amount · Spent ·
+**Used** (a `Progress` bar + `%`, computed from `spentAmount/amount`, tinted amber
+at `alertThresholdPct` and red past 100) · Status · Project (lookup).
+Filter: `projectId`. Create only. A toolbar toggle **"At risk only"** swaps the
+endpoint to `/finance/budgets/at-risk` — implemented as a view tab whose
+`query` is empty but whose section swaps config, or more simply as a second
+(secondary) section. **Decision: a view tab is wrong here** (it changes the path,
+not a param); ship it as a toolbar `Button` that patches the section's endpoint —
+i.e. two configs, one toggle.
+
+**Accounts.** Columns: Name · Kind (badge) · Institution · Currency · Current
+balance (numeric) · Active. Create only; no PATCH/DELETE exist. Row action
+**Reconcile** → `GET /finance/accounts/:id/reconcile`, shown in a small
+`record-detail`-style window comparing stored vs. computed balance.
+
+**Recurring.** Columns: Name · Kind · Amount · Frequency · Next due · Auto-post
+(badge — `false` means *forecast only, nothing posts*) · Active.
+Create + Delete (`DELETE /finance/recurring/:id`, 204). Toolbar action
+**Materialize due** → `POST /finance/recurring/materialize`, with a confirm,
+because it writes ledger rows.
+Note `list(activeOnly = true)` — the endpoint takes no parameter, so **inactive
+schedules are invisible**. The empty state and the Active column both say so
+rather than implying the list is complete.
+
+**Reports** — the one section that is not a table, and the reason `SectionBody`
+has a `custom` variant. A report is an aggregate, not a row set; forcing it into
+`DataTable` would mean a table with no id column, no selection and no pagination.
+Layout: a date-range control (`from`/`to`, defaulting to the current quarter) +
+`projectId`ᴸ, over
+- `GET /finance/reports/summary` → four `SectionCards`-style figures,
+- `GET /finance/reports/income-by-category` and `…/spend-by-category` → two
+  breakdown tables with inline bars,
+- `GET /finance/reports/forecast` → an area chart (`components/ui/chart.tsx`,
+  recharts, already vendored as `chart-area-interactive.tsx`).
+
+**Categories** — read-only (a `createCategory` exists in the repository but no
+controller route reaches it). Tree-indented by `path`/`depth`, `kind` badge.
+**FX rates** — Pair (`BASE/QUOTE`) · Rate · As of · Source. Create is an **upsert**
+on `(base, quote, asOf)`; the form says so ("Re-recording a pair on the same date
+corrects that day's observation").
+
+ᴸ = filter options from `useLookup`
+
+### 7.3 Knowledge — `BookOpenIcon`
+
+| Section | Endpoint | Source | Writes |
+|---|---|---|---|
+| Articles | `/knowledge` | paged | C·U·D + verb |
+| Types ˢ | `/knowledge-vocabulary/types` | collection | C·U·D (admin) |
+| Categories ˢ | `/knowledge-vocabulary/categories` | collection | C·U·D (admin) |
+
+**Articles.** Columns: Title · Status (badge) · Type (lookup) · Visibility ·
+Version · Language · Review due · Updated.
+Views: All / Draft / In review / Published / Archived.
+Filters: `status`, `typeId`ᴸ, `categoryId`ᴸ, `tagId`ᴸ. Search.
+
+Three things make this domain different:
+
+1. **Status is not an editable field.** `POST /knowledge/:id/status` enforces a
+   transition table (`draft ← in_review|archived`, `published ← draft|in_review|
+   archived` needing `manage`, …). The form shows status **read-only**; the row
+   menu offers only the transitions legal from the row's current status, each
+   prompting for the optional `note`.
+2. **Optimistic concurrency.** `updateKnowledgeSchema.expectedVersion`. The edit
+   form captures `version` at load and sends it; a 409 renders *"This was changed
+   by someone else — reload to see the current version"* with a Reload button that
+   invalidates `allRecords` rather than silently overwriting. This is the only
+   domain with it, and dropping it would make concurrent edits lose data silently.
+3. **`total` is post-ACL.** `knowledge.service.ts:185-190` pages in SQL, then
+   filters by resolved access, then returns `total: visible.length` alongside
+   `totalBeforeAccess: total`. So a page can be short and the pager's page count
+   is computed from a filtered count. The table shows `total` and, when
+   `totalBeforeAccess > total`, a muted footnote: *"N records on this page are not
+   visible to you."* Pretending the numbers agree is how a user concludes the
+   search is broken.
+
+`access` (`'none'|'read'|'comment'|'write'|'manage'`) is returned per row and
+drives `canEdit: (r) => r.access === "write" || r.access === "manage"`,
+`canDelete: (r) => r.access === "manage"`.
+
+Grants (`/knowledge/:id/grants`) and linked contacts (`/knowledge/:id/contacts`)
+are record-level; increment 5c.
+
+### 7.4 Notifications — `BellIcon`
+
+| Section | Endpoint | Source | Writes | Roles |
+|---|---|---|---|---|
+| Inbox | `/notifications` | paged | none | user, admin |
+| Preferences | `/notifications/preferences` | collection | PUT | user, admin |
+| Templates ˢ | `/system/notifications/templates` | collection | PUT | **admin** |
+| Suppressions ˢ | `/system/notifications/suppressions` | collection ⚠ | C·D | **admin** |
+| Event types ˢ | `/system/notifications/event-types` | collection | none | **admin** |
+
+**Inbox.** Columns: Subject · Preview · Status (badge: pending/queued/sent/failed)
+· Entity (`entityType` + link affordance) · Sent · Created.
+**No search box, no filters, no view tabs** — `listNotificationsSchema` accepts
+`page` and `limit` and nothing else (`notification.dto.ts:4-7`). Offering controls
+the API silently ignores is worse than not having them; this is the same call
+`filesConfig` made about its missing `search` (`files.config.tsx:46-48`).
+`canCreate/canEdit/canDelete: false`.
+**There is no `GET /notifications/:id`.** Row click therefore opens a detail
+window rendered **from the row already in hand**, passed through props — not
+fetched. `RecordWindow` currently always calls `useRecord`; it gains an optional
+`seed?: JsonObject` prop that short-circuits the fetch when the domain has no item
+endpoint. Without this, clicking a row 404s.
+
+There is also **no read/unread** concept in the schema — `status` is a *delivery*
+state (`notification.schema.ts`), not a read receipt. The UI must not draw an
+unread badge it cannot compute. (§14.)
+
+**Preferences** — the clearest case of "a different domain needs a different
+table". Rows are events, not records; there is no create, no delete, and the two
+editable fields are edited **in the cell**:
+
+Columns: Event (`name`, with `eventKey` muted beneath) · Category ·
+**Enabled** (`Switch`) · **Frequency** (`Select`: immediate/hourly/daily/weekly/off)
+· **Quiet hours** (two hour `Select`s, 0–23, nullable).
+Every change PUTs the whole `{ eventKey, enabled, frequency, quietHoursStart,
+quietHoursEnd }` — the endpoint is an upsert keyed on `eventKey`, not a PATCH.
+`isMandatory` rows render the switch **checked and disabled** with a tooltip
+*"Required — security and transactional mail cannot be turned off"*, mirroring the
+403 the server would return (`notification-admin.service.ts:99-104`). Showing an
+enabled control that always fails is the thing `RowMenu` already refuses to do
+("a control that can never be enabled is noise").
+No selection checkboxes on this table — nothing bulk-acts on a preference. That
+needs one more config flag: `selectable?: boolean` (default true).
+
+**Suppressions** — Email · Reason (badge) · Event · Expires · Note · Created.
+Two traps, both in one small endpoint:
+
+- `DELETE /system/notifications/suppressions/:email`. The row's `id` is a UUID;
+  the path wants the email. This is exactly what `deleteKey` is for:
+  `deleteKey: (r) => r.email`, threaded through `ConfirmWindow`'s `ids` prop
+  (renamed in spirit to "path keys", not in name, to avoid churn).
+- The list **slices server-side and returns no total** (§6.1). Treated as a
+  `collection`, requesting `?limit=100` (the DTO's max) and paginating those
+  client-side. When exactly 100 rows come back, the footer reads *"Showing the
+  first 100 — there may be more"* instead of "100 rows". Reporting a total the
+  response does not contain is how Phase 4's `/files` bug looked from the
+  outside: a confident, wrong number.
+
+`POST /system/notifications/suppressions` returns 204 with no body, so the create
+form closes on success and relies on invalidation rather than an echoed row.
+
+### 7.5 Projects — `FolderKanbanIcon`
+
+| Section | Endpoint | Source | Writes |
+|---|---|---|---|
+| Projects | `/projects` | paged | C·U·D |
+| Tasks | `/tasks` | paged | C·U·D + verbs |
+| Time | `/tasks/time` | paged | U·D |
+| Milestones | `/projects/:id/milestones` | **scoped** collection | C·U·D |
+| Goals | `/projects/:id/goals` | **scoped** collection | C·U·D |
+| Members ˢ | `/projects/:id/members` | **scoped** collection | C·D |
+
+**Projects.** Columns: Key · Name · Status (badge) · Priority (badge) · Lead
+(lookup `/users`) · **Progress** (`Progress` + `progressPct`) · Due · Access.
+Views: All / Active / On hold / Completed / Archived. Filters: `status`,
+`ownerUserId`ᴸ. Search.
+`access` is `'none'|'viewer'|'contributor'|'manager'|'owner'` and gates per row:
+`canEdit: (r) => r.access === "manager" || r.access === "owner"`,
+`canDelete: (r) => r.access === "owner"`.
+Form: `key` is **createOnly** and validated `^[A-Z][A-Z0-9_]*$` client-side
+(`createProjectSchema` omits it from update). `ownerUserId` appears only on the
+update form — ownership moves through `PATCH /projects/:id` alone, deliberately
+(`project.dto.ts:22-31`), and must not be offered in the members UI.
+
+**Tasks.** Columns: Ref (`{projectKey}-{number}`, composed from the `/projects`
+lookup — the row carries only `projectId` and `number`) · Title · Status (badge) ·
+Priority · Assignee (lookup `/users`) · Due · Estimate/Spent (`estimateMinutes`
+vs `spentMinutes`, rendered `2h 30m`).
+Views: All / Todo / In progress / Blocked / In review / Done.
+Filters: `projectId`ᴸ, `status`, `assigneeUserId`ᴸ, `milestoneId`. Search.
+Row actions: **Move…** (`POST /tasks/:id/move` — status and/or `afterTaskId`),
+**Log time…** (`POST /tasks/:id/time`), **Watch / Unwatch**
+(`POST|DELETE /tasks/:id/watch`).
+`blockedReason` is required by the service when moving to `blocked`, so the Move
+dialog asks for it conditionally — the DTO alone does not say this
+(`task.dto.ts:57`), the service does.
+
+**Time.** Columns: Date (`workDate`) · Project (lookup) · Task (lookup) · Who
+(lookup) · Duration (`minutes` → `h:mm`) · Billable · Rate · **Invoiced** (a lock
+icon when `invoiceLineItemId` is set).
+Filters: `projectId`ᴸ, `taskId`, `userId`ᴸ, `from`/`to`.
+Edit via `PATCH /tasks/time/:entryId`, delete via `DELETE /tasks/time/:entryId` —
+note the endpoint for the item is **`/tasks/time`**, not `/tasks`, so this section
+sets `endpoint: "/tasks/time"` and the generic `${endpoint}/${id}` composition is
+correct. Rows with `invoiceLineItemId` set are not editable
+(`canEdit: (r) => !r.invoiceLineItemId`) — the FK is the "already billed" lock.
+`updateTimeSchema` deliberately excludes `taskId`/`projectId`; the form must not
+offer them.
+
+**Milestones / Goals / Members** — the scoped sections, and the reason
+`SectionScope` exists. `GET /projects/:id/milestones` has no unscoped form: without
+a project there is nothing to request. The section header renders a **project
+Combobox** (options from the `/projects` lookup); with nothing chosen the pane
+shows an `Empty` state — *"Choose a project to see its milestones"* — and **no
+table and no request**. An error would be wrong; a blank table would be a lie.
+The chosen project is stored in window props (`scope.projectId`) so it survives
+section switches and reloads, and is shown in the breadcrumb:
+`Data › Projects › Milestones › ACME`.
+
+- Milestones: Name · Status (badge) · Due · Owner (lookup) · Sort.
+  Note the write paths are **unscoped**: `PATCH|DELETE /projects/milestones/:id`.
+- Goals: Title (key results indented under their objective via `parentGoalId`) ·
+  Kind · Status · Metric · Current/Target + `direction` arrow · Due.
+  The create form enforces the DTO's `superRefine` client-side: a key result must
+  have a parent, an objective must not.
+- Members: User (lookup) · Role in project · Added.
+  `DELETE /projects/:id/members/:userId` → `deleteKey: (r) => r.userId`. The role
+  select offers `manager|contributor|viewer` only — `owner` is deliberately absent
+  from `ASSIGNABLE_MEMBER_ROLES`, and offering it would reproduce the privilege
+  escalation that comment documents.
+
+### 7.6 Files — `FileIcon`
+
+One section, unchanged from Phase 4: `filesConfig` + `<FileDropzone />` as
+`toolbarExtra` + the Download row action. It moves into this window and stops
+being unreachable.
+
+### 7.7 You — `UserIcon`
+
+Not a row set. Four sections, three of which are not tables.
+
+| Section | Endpoint | Body |
+|---|---|---|
+| Profile | `/me/profile` | **form** |
+| Preferences | `/me/preferences` | collection table, interactive cells |
+| Account | — | **custom** |
+| Users ˢ | `/users` | paged table, **admin** |
+
+**Profile** — `GET /me/profile` (always returns a shape, even when never written:
+`EMPTY_PROFILE`), `PATCH /me/profile`. Fields: first name, last name, job title,
+department, phone, timezone, locale, dateFormat, timeFormat, bio (textarea),
+avatarFileId. Rendered by `RecordForm` — extracted from `RecordWindow` so the same
+field specs, validation and save affordances serve both a window and a pane. There
+is no id in the path, hence `useSingletonRecord`.
+`timezone` is an IANA zone read by the notification scheduler for quiet hours, so
+it is a `Select` over `Intl.supportedValuesOf("timeZone")`, not a free-text field
+that can be typo'd into breaking delivery.
+
+**Preferences** — key/value with a declared type
+(`string|number|boolean|json`). Columns: Key · Type · **Value** (an input whose
+control follows `type`: `Input`, `Input type=number`, `Switch`, `Textarea` with
+JSON validation) · Clear. `PUT /me/preferences/:key`, `DELETE /me/preferences/:key`
+→ `deleteKey: (r) => r.key`. The `superRefine` on `setPreferenceSchema` (value must
+match declared type) is mirrored client-side so a mistyped JSON blob fails before
+the request.
+
+**Account** — a read-only card from `useSession().principal`: email, role, id,
+principal kind. Plus **Change password** (`PATCH /auth/password`, the
+`change-password.dto` rules already mirrored in `lib/api/types.ts`:
+`PASSWORD_MIN_LENGTH` 12 / max 200) and **Sign out** (`useSignOut`, already built).
+
+**Users** (admin) — `GET /users`. Columns: Email · Role · Display name · Created ·
+Last login. C·U·D. `updateUserSchema` allows `role`, `password`, `displayName`;
+the form warns that changing a role revokes that user's cached permissions and
+sessions (`users.service` calls `SessionRevocationService`).
+
+---
+
+## 8. Interaction
+
+### 8.1 One place that opens record windows
+
+`contacts-window.tsx` hand-wrote four `openWindow` calls. Multiplying that by ~28
+sections is the failure mode this phase exists to avoid. Instead, `section-host.tsx`
+derives all four handlers from the section spec:
+
+```tsx
+const nav = useRecordWindows(section)   // features/records/use-record-windows.ts
+<DataTable config={config} {...nav} />
+```
+
+with `singletonKey` composed as `` `${config.key}:${mode}:${row.id}` `` — the same
+convention Phase 4 used, now generated rather than typed. One window per record
+per mode; a second click focuses rather than duplicates.
+
+Record windows stay **separate top-level windows**, not panes inside the Data
+window. Reasons: `record-*` kinds are already registered, already excluded from
+persistence (`NEVER_PERSIST`), and already self-close via `__windowId`; and
+comparing two records side by side is a thing people do and a pane cannot.
+
+### 8.2 Row click
+
+`onOpen` → `record-detail`. Selection checkboxes and the row menu stop propagation
+(already handled, `data-table.tsx:264,277`).
+
+### 8.3 Destructive actions
+
+Unchanged: `ConfirmWindow`, modal, one dialog per selection (`singletonKey`
+embeds the ids), partial failure reported honestly ("3 of 5 deleted"). Extended
+only by `deleteKey` for the three delete-by-non-id endpoints.
+
+### 8.4 Verb actions
+
+A row action that POSTs shows its result inline: a spinner on the menu item while
+in flight, a `sonner` toast on success naming what changed, and an inline error
+row on failure. Destructive verbs (Void, Reverse, Materialize) route through
+`ConfirmWindow` with `destructive: true`.
+
+### 8.5 Record windows with relations — increment 5c
+
+Deferred, with the seam defined now so nothing has to be rewritten:
+`RecordFormSpec` gains `relations?: { key, label, endpoint: (id) => string,
+config: DomainTableConfig }[]`. When present, `RecordWindow` renders
+`Tabs`: *Details* + one tab per relation, each a small `DataTable`. This is the
+"multiple schemas → tabs" rule applied one level down, and it covers contact
+channels/relationships/interactions, knowledge grants/contacts, invoice
+lines/payments, task dependencies/watchers, project knowledge/contact links.
+
+---
+
+## 9. Access control
+
+There is **no endpoint that tells a client its own permissions.**
+`GET /authorization/users/:userId/effective` is itself `@RequirePermission
+('rbac.manage')` and `@Roles('admin')` — a normal user cannot read their own
+effective permissions. So client-side gating has exactly two honest inputs:
+
+1. **`principal.role`** (`user | admin | agent`) from `/auth/me` — used for
+   `SectionSpec.roles`, which hides the five admin-only sections. A hidden section
+   is not a security control; the server still enforces. It is there so a normal
+   user is not shown five tabs that all render 403.
+2. **Per-row `access`** on `PublicProject` and `PublicKnowledge` — the server
+   telling the client what this principal may do to this row, explicitly *"so a
+   client need not guess"*. This is the one trustworthy signal and it drives
+   `canEdit`/`canDelete` as functions.
+
+`DomainTableConfig.permissions` stays declared and unenforced. It documents the
+backend key each action needs and is the hook for a future
+`GET /me/permissions`. Wiring it to `role` would be wrong — permissions are
+grantable independently of role.
+
+**Everything else is optimistic**: the action is offered, and a 403 renders the
+server's message. That is honest. Guessing a permission set client-side and
+hiding a button the user actually has is worse than a clear refusal.
+
+---
+
+## 10. States, responsiveness, accessibility
+
+### 10.1 The four states, per section
+
+`TableState` already distinguishes loading / empty / error, because *"'no rows' and
+'the request failed' look identical if both render as an empty table, and that is
+how a broken filter gets mistaken for an empty domain."* Sections add a fourth:
+
+- **Unscoped** — a scoped section with no parent chosen. `Empty` component with
+  the picker repeated in the body. No request is made.
+- **Forbidden** — a 403 from a section the role check let through (a permission,
+  not a role, was missing). Renders the server's message and a "Back to {first
+  section}" link, not a retry loop.
+
+The window itself has no loading state: the shell renders immediately, the section
+lazily. `WindowLayer` already wraps bodies in `Suspense` with a `Spinner`.
+
+### 10.2 Responsive
+
+`WindowFrame` already swaps to a full-height `Sheet` below `md`
+(`window-frame.tsx:68-79`), so the Data window inherits mobile behaviour. Inside:
+
+- **< `md`**: the sideNav is replaced by a `Select` in the header (`Domain ▾`);
+  section tabs become a second `Select` when more than three are visible.
+  Same state, different control — the `settings-dialog` demo already hides its
+  sidebar at this breakpoint (`hidden md:flex`).
+- **Narrow but ≥ `md`** (a 640px-wide floating window): sideNav collapses to icons
+  with tooltips; section tabs overflow into the "⋯" menu earlier.
+- The table scrolls in its own `overflow-auto` container with a sticky header
+  (already the case, `data-table.tsx:225-227`); the window never scrolls as a whole.
+
+### 10.3 Keyboard and ARIA
+
+- sideNav is a `SidebarMenu` (`ul`/`li`/`button`) with `isActive` on the current
+  domain → `aria-current="page"`. Arrow keys move between items.
+- Section tabs are Radix `Tabs`, so roving tabindex and `aria-selected` come free.
+  The overflow menu is a `DropdownMenu`, reachable in the same tab stop.
+- Breadcrumb mirrors the state for screen readers: `Data › Finance › Invoices`,
+  last crumb `BreadcrumbPage`.
+- `Escape` closes the window (`window-frame.tsx:59-66`) — **not** the section.
+  Section navigation has no dismiss gesture, which is correct; it is navigation,
+  not a dialog.
+- Every icon-only control already carries `aria-label` (Refresh, Row actions,
+  window controls). New ones follow.
+- Focus on section change moves to the pane's `<main>` (`tabIndex={-1}`), so a
+  screen-reader user is not left in the tab row while the content changes.
+
+---
+
+## 11. Wiring
 
 ```ts
 // lib/windows/types.ts
 export type WindowKind =
-  | 'auth' | 'terminal' | 'voice' | 'settings' | 'notifications' | 'profile'
-  | 'files' | 'contacts' | 'knowledge' | 'projects' | 'tasks' | 'mailbox'
-  | 'finance' | 'invoices' | 'tags' | 'activity' | 'search'
-  | 'record-create' | 'record-edit' | 'record-detail' | 'confirm'
+  | "auth" | "terminal" | "voice" | "data"
+  | "record-create" | "record-edit" | "record-detail" | "confirm"
+  // retired: "contacts", "files"  (folded into "data")
+  // still declared, still unimplemented: "settings", "search", …
 
-export interface WindowInstance {
-  id: string                  // nanoid; stable across re-render
-  kind: WindowKind
-  title: string
-  props?: Record<string, unknown>
-  rect: { x: number; y: number; w: number; h: number }
-  zIndex: number
-  state: 'normal' | 'minimised' | 'maximised'
-  modal: boolean              // true ⇒ focus trap + scrim, blocks the layer below
-}
+// lib/windows/meta.ts
+data: {
+  kind: "data", title: "Data", icon: DatabaseIcon,
+  singleton: true, modal: false,
+  defaultRect: { w: 1140, h: 720 }, minSize: { w: 640, h: 420 },
+},
 
-export interface WindowDescriptor {
-  kind: WindowKind
-  title: string | ((props: never) => string)
-  icon: LucideIcon
-  singleton: boolean          // focus-if-open instead of duplicating
-  modal?: boolean
-  defaultRect: Partial<WindowInstance['rect']>
-  minSize?: { w: number; h: number }
-  component: React.LazyExoticComponent<React.ComponentType<never>>
-}
+// lib/windows/registry.tsx
+data: lazy(() => import("@/components/data-window/data-window")
+  .then((m) => ({ default: m.DataWindow }))),
 ```
 
-`lib/windows/registry.ts` maps every `WindowKind` to a `WindowDescriptor`, with
-`component` behind `React.lazy` so a window's code is fetched the first time it
-opens. The registry is the single place a new feature is registered.
+`shell-chrome.tsx` gains one button beside Terminal:
 
-### 3.2 Behaviour
-
-- **Singletons.** `terminal`, `voice`, `settings`, `notifications`, `profile` and
-  each domain table are singleton. Re-opening focuses and un-minimises rather than
-  spawning a duplicate.
-- **Non-singletons.** `record-create` / `record-edit` / `record-detail` are keyed by
-  `${kind}:${domain}:${recordId}`, so two different contacts can be open side by
-  side but the same contact never opens twice.
-- **Modality.** Only `auth` and `confirm` set `modal: true`. They render a scrim,
-  trap focus (Radix `Dialog`), and are pinned to the top of the z-order.
-  Everything else is non-modal and freely interleaved.
-- **Z-order.** A counter in the store. `focusWindow(id)` assigns `++zSeq`. Modal
-  windows are drawn from a separate, always-higher band so a non-modal window can
-  never occlude the auth dialog.
-- **Cascade.** New windows offset `+24px` from the last-opened one, clamped to the
-  viewport so nothing opens off-screen.
-- **Persistence.** Open windows and their rects persist to `localStorage`, so a
-  reload restores the workspace. Modal windows and `record-*` windows are excluded
-  from persistence — restoring a half-filled create form would be worse than not.
-
-### 3.3 `WindowFrame`
-
-One component owns all window chrome, so no feature ever draws a title bar:
-
-```
-┌─ ▣ Terminal ─────────────────────────── ─  ▢  ✕ ─┐   ← drag handle / controls
-│                                                   │
-│   {children}                                      │
-│                                                   │
-└───────────────────────────────────────────────◢──┘   ← resize grip
+```tsx
+<Button … onClick={() => openWindow({ kind: "data" })}>
+  <DatabaseIcon className="size-3.5" /> Data
+</Button>
 ```
 
-- Drag via pointer events on the title bar; resize via edge/corner grips.
-  `react-resizable-panels` is already a dependency but is panel-oriented — window
-  drag/resize is ~80 lines of pointer maths and is written directly.
-- Keyboard: `Esc` closes the focused non-modal window; `⌘W` closes; `⌘M` minimises.
-- Under `md`, `WindowFrame` renders `components/ui/sheet.tsx` full-screen instead,
-  with the title bar collapsing to the sheet header. Children are untouched.
-- Surface: `bg-popover/95 backdrop-blur-xl border border-border rounded-xl
-  shadow-2xl`. The blur is what keeps the machine visible behind the work.
+Deep links are `openWindow({ kind: "data", props: { domain, section } })`. Because
+`data` is a singleton, a second call focuses the existing window — and should also
+**patch it to the requested domain/section**. `openWindow`'s existing behaviour is
+focus-and-return; `useOpenData(domain, section)` wraps it to `openWindow` then
+`patchWindowProps` on the returned id. That is how the agent, a notification, or a
+future search result navigates someone to a record's domain.
 
 ---
 
-## 4. The 3D System Core
+## 12. Testing
 
-### 4.1 What can and cannot be ported
+Following Phase 4's split: pure logic gets unit tests, components get behaviour
+tests, and the bugs that only live data surfaces get named as such.
 
-The reference at
-`cybernetics-agentics/client/src/components/SystemCore` is **incomplete**. Every
-one of `Scene.tsx`, `Panel.tsx`, `List.tsx`, `Form.tsx`, `Fields.tsx` and
-`scene/resolve.ts` imports from `./data/…` — and that directory does not exist:
+**Pure**
+- `registry` resolvers: unknown domain → first domain; unknown section → first
+  *visible* section; a section whose `roles` exclude the principal is skipped.
+- `rowsOf`: `data` / `items` / `rows` / none — the fourth branch is new and is the
+  entire Budgets fix.
+- `useCollection`'s filter/search/sort/slice pipeline, extracted as a pure
+  function so it can be tested without a hook harness.
+- Money and duration formatting from decimal **strings** (no float round-trip);
+  `2h 30m` from 150.
 
-```
-./data/schema     → Module, FieldSpec, SPEC, GROUPS, normalize, blankModule, bandText, displayName
-./data/status     → STATUS, STATUS_KEYS
-./data/fixture    → loadFixture
-./data/serialize  → serialize
-```
+**Behaviour**
+- `DataWindow`: clicking a sideNav item patches props and swaps the pane;
+  breadcrumb follows; unknown persisted domain falls back without a blank render.
+- Section switch unmounts the previous table (assert the previous fetch is not
+  re-issued and selection is cleared).
+- Admin-only sections absent for `role: "user"`, present for `role: "admin"`.
+- Scoped section: renders the picker and issues **no request** until a project is
+  chosen.
+- Preferences: toggling a `Switch` PUTs once and rolls back on failure; a
+  mandatory row's switch is disabled.
+- Transactions: no Edit item in the row menu; the status actions offered match the
+  row's current status.
+- Knowledge: a 409 on save renders the conflict message, not a generic error.
+- `deleteKey`: the confirm dialog deletes by email / userId / preference key.
 
-It also targets a different stack: **R3F v8 / React 18 / Recoil /
-`@librechat/client` / `useLocalize`**.
-
-| Reference file | Action |
-|---|---|
-| `objects/*` (`Strip`, `Orbit`, `Scanner`, `Mainframe`, `Hum`, `Tone`, `Contact`) | **Port as-is.** Pure R3F meshes, no app coupling. |
-| `scene/*` (`audio`, `config`, `labels`, `materials`, `palette`, `tone`) | **Port as-is.** Framework-free. |
-| `scene/resolve.ts` | Port, but re-point at our new `data/`. |
-| `Scene.tsx` | Port; swap `useMediaQuery` from `@librechat/client` for a local hook. |
-| `Dialog.tsx` | **Do not port.** Its job (full-screen modal shell + toolbar) is now `core/page.tsx` + `ShellChrome`. Lift its toolbar and its lazy-boundary discipline. |
-| `Panel.tsx` / `List.tsx` / `Form.tsx` / `Fields.tsx` | **Do not port.** These are a module *editor*; our strips are live domains, not user-authored records. |
-| `data/*` | **Author from scratch** — §4.2. |
-| `hooks/SystemCore/useModules.ts` | Rewrite as `useDomainModules()` — fixture editing replaced by live domain data. |
-
-Dependencies to add: `three`, `@react-three/fiber@^9` (v8 is React 18-only; we are
-on React 19.2), `@types/three`.
-
-### 4.2 The data layer (new)
-
-```
-components/system-core/data/
-  domains.ts     # the DOMAINS constant — one entry per feature domain
-  schema.ts      # zod Module schema + normalize/blankModule/bandText/displayName
-  status.ts      # STATUS table: health → { color, gain }
-  resolve.ts     # (ported) Module → StripSpec
-```
-
-`domains.ts` is the keystone — it is the single place the 3D core, the command
-palette, the dock and the table registry all read from:
-
-```ts
-export const DOMAINS = [
-  { key: 'agent',         label: 'Agent',         window: 'terminal', endpoint: '/agent/conversations', icon: TerminalIcon, band: 0 },
-  { key: 'contacts',      label: 'Contacts',      window: 'contacts', endpoint: '/contacts',            icon: UsersIcon,    band: 1 },
-  { key: 'knowledge',     label: 'Knowledge',     window: 'knowledge',endpoint: '/knowledge',           icon: BookIcon,     band: 2 },
-  { key: 'projects',      label: 'Projects',      window: 'projects', endpoint: '/projects',            icon: KanbanIcon,   band: 3 },
-  { key: 'files',         label: 'Files',         window: 'files',    endpoint: '/files',               icon: FileIcon,     band: 4 },
-  { key: 'mailbox',       label: 'Mailbox',       window: 'mailbox',  endpoint: '/mailbox/messages',    icon: InboxIcon,    band: 5 },
-  { key: 'finance',       label: 'Finance',       window: 'finance',  endpoint: '/invoices',            icon: CoinsIcon,    band: 6 },
-  { key: 'notifications', label: 'Notifications', window: 'notifications', endpoint: '/notifications',  icon: BellIcon,     band: 7 },
-] as const
-```
-
-Two `endpoint` values are deliberately not the obvious ones, because the obvious
-ones do not exist: **`/mailbox` has no root list** (only `/mailbox/messages`), and
-**`/finance` has no root list at all** (§8.3). The finance strip therefore counts
-`/invoices` and escalates to `attention` from `/finance/budgets/at-risk`.
-
-`status.ts` maps a resolved health to emissive colour and gain, mirroring the
-reference's `STATUS` contract (`{ color: number; gain: number }`):
-
-| Health | Meaning | Reads as |
-|---|---|---|
-| `nominal` | Reachable, nothing pending | Cool, dim — the resting state |
-| `active` | Work in flight (running agent, uploading file, unread mail) | Bright, faster spin |
-| `attention` | Pending approvals, failed ingests, overdue tasks | Warm/amber, pulsing |
-| `error` | Endpoint returned non-2xx | Red, slow |
-| `unknown` | Not yet loaded | Near-black, static |
-
-### 4.3 Colour: the canvas is exempt from theme tokens
-
-The reference's `scene/palette.ts` carries a long, correct justification for *not*
-using semantic tokens inside the canvas: the scene is lit by emissive and
-additively-blended materials, which only read as light against a near-black
-ground, so the viewport is a **fixed dark stage in both light and dark mode** —
-the convention every 3D editor follows. Semantic roles fight it (`--surface-primary`
-is white in light mode; the `--status-*` roles are *text* colours that go pastel in
-dark mode and read dusty as emissives).
-
-**We keep that decision and its reasoning.** So:
-
-- Inside the canvas: fixed constants in `scene/palette.ts` (`STAGE_BACKGROUND
-  0x00001c`, `LIGHTS`, `MAINFRAME`, `SCANNER_COLORS`, `LABEL_INK`). Untouched.
-- Outside the canvas: **semantic shadcn tokens only** — every window, the dock,
-  the chrome, the tables.
-- The one bridge: a domain-status legend in the command palette reads its swatches
-  from `STATUS.hex`, so the legend matches what is actually on screen.
-
-This does mean the olive/oklch palette in `app/globals.css` stops at the canvas
-edge. That is intentional and is the same boundary the reference drew.
-
-### 4.4 Rendering discipline
-
-Ported verbatim from the reference, because each line of it prevents a real bug:
-
-- **Lazy boundary.** `three` is reachable only from `Scene.tsx` down, loaded via
-  `next/dynamic(() => import('./Scene'), { ssr: false })`. `ssr: false` is
-  mandatory — there is no WebGL context on the server.
-- **Reduced motion.** `prefers-reduced-motion` ⇒ `frameloop="demand"` and no audio
-  bus. A static frame, not a paused animation.
-- **Disposal.** `MaterialRegistry` and `LabelFactory` disposed on unmount; the tone
-  bus disposed in its own effect so rebuilding it doesn't dispose live materials.
-- **Per-frame state stays in refs.** Strip phase and lane live in a `Map` in a ref,
-  keyed by domain key — never in React state, never in zustand. A `setState` at
-  60 fps would re-render the whole stack every frame.
-- **Font gating.** Labels render only once the UI face resolves, or the rasteriser
-  permanently caches the fallback.
-
-### 4.5 Live data feeding the strips
-
-One hook, `useDomainHealth()`, owns all of it:
-
-- A single polled pass (default 30 s, paused when `document.hidden`) issuing
-  `GET <endpoint>?page=1&limit=1` per domain and reading `{ total }` off the
-  standard envelope. One cheap request per domain, no bespoke stats endpoint.
-- Overlaid with event-driven bumps: an in-flight agent run, a pending approval from
-  `GET /agent/approvals`, an active upload from the upload store.
-- Writes to `stores/domain.store.ts`. `<DomainStrips>` subscribes there and hands
-  plain `StripSpec`s down. The scene never fetches anything.
-
-Clicking a strip calls `openWindow({ kind: domain.window })`. Hovering shows a
-`TooltipAnchor` with the domain's label, count and health.
+**Cannot be unit-tested; verify signed in** (Phase 4's `items` bug is the
+precedent — every fixture used the shape the code expected):
+- Every list endpoint's actual envelope, per §6.1's table.
+- That `/finance/budgets` really returns `rows` and the pager agrees with it.
+- Knowledge's `total` vs `totalBeforeAccess` on a non-admin account.
+- A scoped section against a project the principal is only a `viewer` on.
 
 ---
 
-## 5. Authentication
+## 13. Build order
 
-### 5.1 Endpoints (all verified in `auth.controller.ts`)
+Each increment ends with the app working.
 
-| Route | Notes |
-|---|---|
-| `POST /auth/login` | `@Public`, throttled 5/min. Returns a `TokenPair`. |
-| `POST /auth/refresh` | `@Public`, throttled 10/min. **Rotates** — reuse of an old token revokes the whole family. |
-| `POST /auth/logout` | `@Public`. Body carries the refresh token. |
-| `POST /auth/logout-all` | Revokes every session. |
-| `GET /auth/me` | Current principal. |
-| `GET /auth/sessions` | Active sessions — surfaced in Settings → Security. |
-| `PATCH /auth/password` | Change password. |
-| `POST /auth/forgot-password` | `@Public`. |
-| `POST /auth/reset-password` | `@Public`. |
+**5a — the shell.** `data-window.tsx`, `domain-nav.tsx`, `section-tabs.tsx`,
+`registry.ts` with two domains (Contacts, Files) wired to the configs that already
+exist. `patchWindowProps`. Retire the two window kinds, add `data`, add the
+ShellChrome button. Result: the Phase-4 tables are reachable for the first time.
 
-### 5.2 The auth window
+**5b — the data layer.** `rowsOf` gains `rows`; `useCollection`; `useLookup`;
+`keys`/`fetcher` cases; `source`, `deleteKey`, row-level `canEdit`/`canDelete`,
+async filters. No new domains yet — this is the plumbing 5c depends on, and it is
+independently testable.
 
-The single `modal: true` window. Tabs inside one frame, built from
-`components/ui/field.tsx` (the existing `login-form.tsx` is a useful visual
-starting point but is unwired Acme boilerplate — its markup is reused, its content
-is replaced):
+**5c — the domains.** Knowledge, Projects, Notifications, Finance, You, in that
+order: increasing order of how much new interaction each needs. Finance last
+because Reports is the only non-table section and the verb actions are densest.
+Each domain is one config file plus a registry entry.
 
-```
-┌─ Access ───────────────────────────────────────┐
-│                    ◆                            │
-│              CYBERNETICS                        │
-│                                                 │
-│   [ Sign in ]  [ Register ]                     │
-│                                                 │
-│   Email      ┌──────────────────────────────┐   │
-│   Password   ┌──────────────────────────────┐   │
-│                                                 │
-│   ┌───────────────── Sign in ──────────────┐    │
-│                                                 │
-│   Forgot your password?                         │
-└─────────────────────────────────────────────────┘
-```
-
-Panes: `sign-in` · `register` · `forgot` · `reset-sent`. The `reset-password` page
-is a standalone route because it is reached from an email link before any session
-exists.
-
-**Register is designed but disabled.** No backend route exists. The pane renders
-only when `NEXT_PUBLIC_ENABLE_REGISTER === 'true'` and posts to this contract,
-recorded here so the backend task has a spec:
-
-```
-POST /auth/register            @Public, throttled
-  { email: string, password: string, displayName?: string }
-  → 201 TokenPair | 409 EMAIL_TAKEN | 422 WEAK_PASSWORD
-```
-
-With the flag off, the Register tab is replaced by a line reading *"Accounts are
-provisioned by an administrator"* — an honest dead end rather than a button that
-500s.
-
-### 5.3 Token handling
-
-Bearer-only, so:
-
-- **Access token in memory only** (zustand, not persisted). Never in
-  `localStorage` — it is the credential an XSS would want.
-- **Refresh token in `localStorage`.** With no cookie transport available this is
-  the only way to survive a reload. Noted as a known trade-off in §11.
-- **Single-flight refresh.** `lib/api/client.ts` holds one in-flight refresh
-  promise. Concurrent 401s all await it, then retry once. This is load-bearing:
-  `auth.service.ts` uses compare-and-set rotation (`claimForRotation`), so two
-  parallel refreshes with the same token means one of them is treated as **token
-  theft and revokes the entire family**. Serialising refresh is a correctness
-  requirement, not an optimisation.
-- On refresh failure: clear both tokens, close every window, open `auth`.
+**5d — record relations.** `RecordFormSpec.relations` and tabbed record windows
+(§8.5). Invoice detail (lines + payments) is the pilot.
 
 ---
 
-## 6. The terminal — primary agent interface
-
-### 6.1 Layout
-
-```
-┌─ ▣ Terminal ──────────────────────────────────── ─ ▢ ✕ ─┐
-│ ┌──────────────┬────────────────────────────────────────┐│
-│ │ + New        │  ┌──────────────────────────────────┐  ││
-│ │              │  │ ▸ Reasoning            2.4s      │  ││
-│ │ ● Q3 report  │  └──────────────────────────────────┘  ││
-│ │   Contacts…  │                                        ││
-│ │   Invoice 42 │  Here's what I found across the        ││
-│ │              │  knowledge base…                       ││
-│ │              │                                        ││
-│ │              │  ┌─ 🔧 search-documents ────── ✓ ──┐   ││
-│ │              │  │ { "query": "Q3 revenue" }       │   ││
-│ │              │  └─────────────────────────────────┘   ││
-│ │              │                                        ││
-│ │              │  ┌─ ⚠ Approval required ───────────┐   ││
-│ │              │  │ send-email → 3 recipients       │   ││
-│ │              │  │        [ Reject ]  [ Approve ]  │   ││
-│ │              │  └─────────────────────────────────┘   ││
-│ ├──────────────┼────────────────────────────────────────┤│
-│ │              │ ┌────────────────────────────────────┐ ││
-│ │              │ │ Ask the system…                    │ ││
-│ │              │ │ [📎] [🎙]                    [ ↑ ] │ ││
-│ │              │ └────────────────────────────────────┘ ││
-│ └──────────────┴────────────────────────────────────────┘│
-└──────────────────────────────────────────────────────────┘
-```
-
-Left rail collapses below `lg` into a conversation dropdown in the header.
-
-### 6.2 ai-elements composition
-
-Every one of these is already vendored in `client/components/ai-elements/`:
-
-| Concern | Component(s) |
-|---|---|
-| Scroll container, auto-stick | `conversation.tsx` (`use-stick-to-bottom`) |
-| Message bubbles | `message.tsx` |
-| Markdown / code | `streamdown` via `code-block.tsx` |
-| Chain of thought | `reasoning.tsx`, `chain-of-thought.tsx` |
-| Tool calls | `tool.tsx`, `task.tsx` |
-| Approvals | `confirmation.tsx` |
-| Citations | `sources.tsx`, `inline-citation.tsx` |
-| Composer | `prompt-input.tsx` (the whole `PromptInput*` family, incl. attachments + action menu) |
-| Attachments | `attachments.tsx` |
-| Token budget | `context.tsx` + `tokenlens` |
-| Empty state | `suggestion.tsx` |
-| Loading | `shimmer.tsx` + `ui/spinner.tsx` |
-
-`terminal.tsx` (the ANSI console element) is **not** the right primitive for the
-main interface — it renders a raw ANSI byte stream, not structured agent turns. It
-is reserved for a future tool-output-as-console view. The window is called a
-terminal; its content is a conversation.
-
-### 6.3 The stream transport
-
-`lib/agent/stream.ts` — the most delicate module in the client.
-
-**Event contract, mirrored verbatim from `api/src/features/mastra/services/chunk-to-sse.ts`:**
-
-```ts
-export type SseEvent =
-  | { type: 'start'; conversationId: string; runId: string }
-  | { type: 'text-delta'; delta: string }
-  | { type: 'reasoning-delta'; delta: string }
-  | { type: 'tool-input'; toolCallId: string; toolName: string; args: unknown }
-  | { type: 'tool-output'; toolCallId: string; toolName: string; result: unknown; isError: boolean }
-  | { type: 'approval-required'; approvalId: string; toolCallId: string; toolName: string;
-      actionType: ActionType; title: string; payload: Record<string, unknown> }
-  | { type: 'error'; message: string }
-  | { type: 'done'; status: 'succeeded' | 'awaiting_approval' | 'cancelled' | 'failed' }
-```
-
-This type is **copied, not derived** — the client does not import from `api/`. A
-comment points at the source file, and a contract test (§12) fails if they drift.
-
-**Request.** `POST /agent/chat/stream`, body per `chatStreamSchema`:
-
-```ts
-{ conversationId?: uuid, message: string }        // a new turn
-{ conversationId?: uuid, resume: { approvalId, approved } }   // resuming
-```
-
-The DTO's `.refine` enforces **exactly one** of `message` / `resume`. The client
-mirrors that as a discriminated union so the wrong shape cannot be constructed.
-
-**Reading.** `fetch` with `signal` from an `AbortController`, then:
-
-```
-reader → TextDecoder({stream:true}) → append to buffer
-       → while buffer contains '\n\n':
-             take frame, strip leading 'data: ', JSON.parse → dispatch
-       → keep the remainder in the buffer
-```
-
-The buffer is the point. A `text-delta` frame is routinely split across two network
-chunks; parsing per-chunk instead of per-`\n\n` corrupts the stream.
-
-**Reducer.** A pure `(state, event) => state` function, unit-testable without a
-network:
-
-| Event | Effect |
-|---|---|
-| `start` | Bind `conversationId` (a first turn has none until now) and `runId`; set `status: 'streaming'`. |
-| `text-delta` | Append to the open `text` part, creating it if absent. |
-| `reasoning-delta` | Append to the open `reasoning` part. Collapsed by default; auto-expands while it is the only thing streaming. |
-| `tool-input` | Push a `tool` part keyed by `toolCallId`, `state: 'running'`. |
-| `tool-output` | Resolve that part by `toolCallId` → `'complete'` or `'error'`. |
-| `approval-required` | Push a `confirmation` part; also add to `pendingApprovals`. Stream ends after this. |
-| `error` | Attach the message to the turn; `status: 'error'`. |
-| `done` | `status` from the payload. `awaiting_approval` keeps the turn visually open. |
-
-**Failure handling.**
-- *Abort* — user pressed stop. Mark the turn `cancelled`, keep partial text, no toast.
-- *Network drop mid-stream* — mark `interrupted`, keep partial text, offer Retry.
-  History is server-side, so a reload recovers the true state.
-- *Non-2xx before the stream opens* — parse the `ErrorEnvelope` and surface it in
-  the composer, not as a message bubble.
-- Cleanup (`reader.cancel()`, abort listeners) runs in a `finally`.
-
-### 6.4 Approvals
-
-`approval-required` renders inline via `confirmation.tsx`. The decision has two
-paths and they are **not** interchangeable:
-
-- **Inline, mid-stream** → `POST /agent/chat/stream` with
-  `{ resume: { approvalId, approved } }`. This continues the run and streams the
-  rest of the turn.
-- **Out-of-band** (from the notifications window, or a run started elsewhere) →
-  `POST /agent/approvals/:id` with `{ approved, note? }`, per `decisionSchema`.
-  `GET /agent/approvals` backs a pending-approvals list.
-
-Pending approvals also drive the `agent` strip to `attention` in the 3D core.
-
-### 6.5 History
-
-`GET /agent/conversations?page&limit` → `{ data: PublicConversation[], total, page, limit }`
-for the rail. `GET /agent/conversations/:id/messages` → `ChatMessageDto[]`, whose
-`parts` union (`text` · `reasoning` · `tool` · `source`) maps onto **the same
-renderers** as live stream parts. One renderer, two sources — a replayed
-conversation and a live one are indistinguishable, which is the whole point.
-
----
-
-## 7. Live conversation
-
-### 7.1 The transport seam
-
-There is no voice backend. Rather than block the feature or hard-wire a browser
-API, voice goes behind an interface:
-
-```ts
-// lib/voice/transport.ts
-export interface VoiceTransport {
-  readonly id: string
-  isSupported(): boolean
-  start(opts: { deviceId?: string; lang?: string }): Promise<void>
-  stop(): Promise<void>
-  speak(text: string, opts?: { voice?: string; rate?: number }): Promise<void>
-  interrupt(): void
-  on(ev: 'partial',    cb: (text: string) => void): Unsubscribe
-  on(ev: 'final',      cb: (text: string) => void): Unsubscribe
-  on(ev: 'level',      cb: (rms: number) => void): Unsubscribe
-  on(ev: 'state',      cb: (s: VoiceState) => void): Unsubscribe
-  on(ev: 'error',      cb: (e: VoiceError) => void): Unsubscribe
-}
-```
-
-**v1 adapter: `web-speech.adapter.ts`** — `SpeechRecognition` (continuous, interim
-results) for input, `SpeechSynthesis` for output, and a `WebAudio`
-`AnalyserNode` for the level meter that drives the waveform. Zero backend work,
-real conversation today.
-
-A future `realtime-ws.adapter.ts` implements the same interface against a server
-gateway. Nothing above the interface changes.
-
-`isSupported()` is checked at render. Unsupported browsers get an explicit
-*"Live conversation needs a browser with speech recognition (Chrome, Edge, or
-Safari 16+)"* panel — not a button that silently does nothing.
-
-### 7.2 FAB and window independence
-
-The goal file is explicit here, and it is easy to get wrong. Two **separate** pieces
-of state:
-
-```ts
-voiceEnabled: boolean          // is the mic hot?          ← the FAB toggles this
-windowOpen('voice'): boolean   // is the window on screen? ← the ✕ toggles this
-```
-
-| Action | `voiceEnabled` | voice window |
-|---|---|---|
-| Click FAB (off → on) | `true` | **opens** if closed |
-| Click FAB (on → off) | `false` | **stays open** ← the requirement |
-| Click window `✕` | `false` | closes |
-| Reopen from dock | unchanged | restores |
-
-So the FAB is a mic switch that happens to summon the window; the window's close
-button is the only thing that dismisses it, and doing so also stops the mic
-(leaving a hot mic behind an invisible window would be indefensible).
-
-### 7.3 The window
-
-```
-┌─ ▣ Live ──────────────────────────────── ─ ▢ ✕ ─┐
-│                                                  │
-│              ╭─────────────╮                     │
-│              │    ◉        │   ← level ring      │
-│              ╰─────────────╯                     │
-│                 Listening…                       │
-│                                                  │
-│   "what's the status of the Q3 report"           │  ← Transcription (interim)
-│                                                  │
-│   ─────────────────────────────────────────      │
-│   ▸ Three tasks remain open…                     │  ← assistant, spoken + shown
-│                                                  │
-│   [🎙 Mute]  [⏹ Stop]  [⚙ Mic ▾] [🔊 Voice ▾]    │
-└──────────────────────────────────────────────────┘
-```
-
-Built from `speech-input.tsx` (waveform), `transcription.tsx` (interim text),
-`audio-player.tsx`, `mic-selector.tsx`, `voice-selector.tsx`.
-
-**Shared conversation.** A voice `final` calls the *same* `sendMessage()` the
-terminal uses, against the same `conversationId`. Open both windows and you see one
-conversation in two views. Assistant `text-delta`s are buffered to sentence
-boundaries before being handed to `speak()` — speaking every token produces
-stuttering garbage.
-
-**Barge-in.** A `partial` while TTS is playing calls `interrupt()`. Natural
-interruption is the difference between a conversation and a walkie-talkie.
-
-State machine: `idle → requesting-permission → listening → thinking → speaking →
-listening`, with `error` and `unsupported` as terminal branches.
-
----
-
-## 8. Feature modules
-
-### 8.1 Generalising the existing table
-
-`client/components/data-table.tsx` (822 lines) is the reference the goal file names.
-It is a **TanStack Table v9** implementation — the new `tableFeatures()` /
-`createColumnHelper<typeof features, T>()` / `useTable` API, not v8 — and it already
-demonstrates every required affordance: tabs, drag-reorder, row selection with a
-selected-count line, column-visibility menu, rows-per-page select, full pager, a
-row-action dropdown, and a `Drawer` detail view.
-
-It is refactored into `components/data-table/` with **one substantive change**: the
-demo paginates client-side (`createPaginatedRowModel`), but every API list endpoint
-is server-paginated and returns `{ data, total, page, limit }`. The generic table
-therefore runs in **manual pagination** mode, with sorting and filtering also lifted
-to query params. Keeping client-side paging would silently page only the current 20
-rows and misreport totals.
-
-```
-components/data-table/
-  data-table.tsx          # generic shell — tabs, toolbar, table, pager
-  table-toolbar.tsx       # search, filters, column visibility, Create
-  table-pagination.tsx    # count, rows-per-page, pager  (verbatim from the demo)
-  row-actions.tsx         # ⋮ → Edit / Duplicate / Delete
-  table-state.tsx         # loading skeleton / empty / error triad
-  use-domain-table.ts     # query params ⇄ server fetch ⇄ table state
-  types.ts                # DomainTableConfig<T>
-```
-
-### 8.2 Per-domain configuration
-
-A domain is declared, not implemented:
-
-```ts
-export interface DomainTableConfig<T> {
-  key: string
-  endpoint: string
-  columns: ColumnDef<T>[]
-  tabs?: { value: string; label: string; query: Record<string, unknown> }[]
-  filters?: FilterSpec[]
-  searchable?: boolean
-  createSchema?: z.ZodType          // omit ⇒ no Create button
-  editSchema?: z.ZodType            // omit ⇒ read-only
-  detail?: React.ComponentType<{ id: string }>
-  permissions?: { create?: string; update?: string; delete?: string }
-  rowActions?: RowAction<T>[]
-}
-```
-
-`permissions` keys mirror the backend's `@RequirePermission` values (`contact.create`,
-`knowledge.publish`, …), read off the principal from `GET /auth/me`. Actions the
-user cannot perform are **hidden, not disabled** — a disabled button the user can
-never enable is noise.
-
-### 8.3 Domains and verified endpoints
-
-| Domain | List | CRUD | Notes |
-|---|---|---|---|
-| Contacts | `GET /contacts` | `POST` · `PATCH /:id` · `DELETE /:id` | Sub-tabs: channels, relationships, interactions |
-| Knowledge | `GET /knowledge` | `POST` · `PATCH /:id` · `DELETE /:id` | `POST /:id/status` publish; grants; contact links |
-| Projects | `GET /projects` | `POST` · `PATCH /:id` · `DELETE /:id` | Members, milestones, goals |
-| Tasks | `GET /tasks` | full | Standalone resource. Also dependencies, watchers, time entries (`/tasks/time`) |
-| Files | `GET /files` | `POST` (initiate) · `DELETE /:id` | §9 |
-| Mailbox | `GET /mailbox/messages` | `PATCH /messages/:id/seen` · `POST /sync` | **No root list** — messages only. Read-mostly |
-| Invoices | `GET /invoices` | `POST` · `POST /:id/issue` · `/void` · `/payments` | **Top-level `/invoices`, not under `/finance`** |
-| Notifications | `GET /notifications` | prefs via `GET`/`PUT /notifications/preferences` | |
-| Tags | `GET /tags` | full | |
-| Activity | `GET /activity`, `GET /activity/me` | read-only | Audit feed; `/me` is the user's own |
-| Comments | `GET /comments` | `POST` · `PATCH /:id` · `DELETE /:id` | Embedded in detail views |
-| Search | `POST /search/collections/:name/query` | — | Cross-domain |
-
-**Finance is not a table domain.** `finance.controller.ts` exposes **no root list** —
-it is a cluster of sub-resources (`/finance/transactions`, `/finance/accounts`,
-`/finance/budgets`, `/finance/recurring`, `/finance/categories`, `/finance/fx-rates`)
-plus four report endpoints (`/finance/reports/{summary,income-by-category,
-spend-by-category,forecast}`). So the Finance window is a **tabbed multi-table
-window**: one `DomainTableConfig` per sub-resource, plus a reports tab built from
-`components/ui/chart.tsx` and `section-cards.tsx`. Its 3D strip resolves health from
-`/finance/reports/summary` and `/finance/budgets/at-risk`, not from a row count.
-
-Admin-only surfaces (`/system/**`, `/users`, `/search/collections` management,
-`/agent/schedules` — which is `@Roles('admin')`) live in a **System** window shown
-only to admins.
-
-### 8.4 Create / Edit / Detail as windows
-
-Per the goal file, these are never inline:
-
-```
-openWindow({ kind: 'record-create', props: { domain: 'contacts' } })
-openWindow({ kind: 'record-edit',   props: { domain: 'contacts', id } })
-openWindow({ kind: 'record-detail', props: { domain: 'contacts', id } })
-```
-
-Forms are generated from the domain's zod schema through
-`components/ui/field.tsx` + `components/ui/questionnaire.tsx`, with per-domain
-overrides for anything a schema can't express. Deletes route through the modal
-`confirm` window. Optimistic updates on the table, rolled back with a `sonner`
-toast on failure.
-
----
-
-## 9. File upload and ingest
-
-### 9.1 The real pipeline
-
-Verified end to end. **No backend work is required** — the client only drives it:
-
-```
-POST /files                       initiate: metadata in, presigned target out
-   ↓  (may short-circuit — see dedup)
-POST <target.url>                 multipart form: target.fields + the file
-   ↓                              ← direct to MinIO, never through the API
-POST /files/:id/complete          verifies the object, PENDING → AVAILABLE,
-   ↓                              enqueues processing
-[ BullMQ ]                        checksum + magic-byte check
-   ↓
-[ document-ingest ]               DocumentExtractionService:
-                                    pdf   → pdf-parse
-                                    docx  → mammoth
-                                    md/txt→ utf8
-   ↓                              chunked 2000 chars / 200 overlap
-[ search-service ]                → `documents` collection, one record per chunk
-```
-
-### 9.2 Two details that will bite an implementer
-
-**It is a POST policy, not a PUT.** `initiateUpload` returns
-`PresignedTarget { url, fields?, expiresIn }` from `presignedPostPolicy`. The client
-must build a `FormData`, append **every** entry of `fields` **first**, then the file
-last, and POST it. Sending a bare `PUT` body will fail the policy.
-
-**Initiate can short-circuit.** If the client supplies `sha256` and the content is
-already stored, the response is `{ fileId, deduplicated: true }` with **no `upload`
-key**. The client must detect this and skip *both* the upload and the complete call
-— the file is already available. Treating a missing `upload` as an error would break
-every re-upload.
-
-Computing `sha256` client-side (via `crypto.subtle.digest`) is therefore worth it:
-it enables dedup, and `completeUpload` verifies it. Files above ~50 MB are hashed in
-a worker to avoid blocking the main thread.
-
-### 9.3 MIME gate
-
-The ingestable set is fixed in `document-ingest.constants.ts`:
-
-```
-application/pdf
-application/vnd.openxmlformats-officedocument.wordprocessingml.document
-text/markdown
-text/plain
-```
-
-Other types can still be *stored* (the file API accepts them subject to its own
-policy) but will not produce text records. The dropzone states this plainly per
-file rather than silently accepting something that never gets indexed.
-
-### 9.4 Client state machine
-
-```
-queued → hashing → uploading(%) → completing → processing → indexed
-                            ↓           ↓            ↓
-                          failed      failed       failed
-```
-
-`processing → indexed` is resolved by polling `GET /files/:id` until `AVAILABLE`,
-then confirming chunks exist via
-`POST /search/collections/documents/query` filtered on `fileId`. Backoff: 1 s → 2 s
-→ 4 s, capped at 10 s, given up after 2 minutes with a Retry affordance.
-
-Progress comes from `XMLHttpRequest.upload.onprogress` — `fetch` still has no upload
-progress event.
-
-### 9.5 Surfaces
-
-- **Files window** — a dropzone above the standard domain table. Row detail shows
-  extracted text with chunk boundaries and a link to search within the document.
-- **Terminal attachments** — `PromptInputActionAddAttachments` runs the identical
-  `lib/files/upload.ts` flow, then passes `fileId`s with the message so the agent's
-  `search-documents` tool can reach them.
-- Both read one `stores/upload.store.ts`, so a file attached in the terminal shows
-  its progress in the Files window too.
-
----
-
-## 10. State management
-
-### 10.1 Slices
-
-Zustand, one store per concern, all under `client/stores/`. Cross-slice reads go
-through selectors, never by importing another store's setter.
-
-| Store | Holds | Persisted |
-|---|---|---|
-| `auth.store.ts` | principal, access token (memory), refresh token, `status` | refresh token only |
-| `window.store.ts` | instances, z-order, focus, dock | yes (minus modal + `record-*`) |
-| `conversation.store.ts` | conversations, messages, stream status, pending approvals | no |
-| `voice.store.ts` | `voiceEnabled`, transport state, transcript, device prefs | device prefs only |
-| `domain.store.ts` | per-domain count + health for the strips | no |
-| `upload.store.ts` | per-file state machine + progress | no |
-| `ui.store.ts` | theme, reduced motion, palette open, table prefs | yes |
-
-### 10.2 Rules
-
-1. **Explicit status, never boolean pairs.** Every async slice carries
-   `status: 'idle' | 'loading' | 'ready' | 'error'` plus `error?: ApiError`.
-   `isLoading` + `isError` booleans permit `loading && error` — a state that has no
-   meaning and that components then render incoherently.
-2. **The 3D scene never touches a store per frame.** Phase and lane stay in refs
-   inside `useDomainModules()`. Stores are read once per data change, not per frame.
-3. **Server data is not duplicated.** Slices cache what a window is displaying, keyed
-   by query. A window closing drops its cache.
-4. **Actions are async thunks inside the store**, so components never assemble
-   multi-step flows. `sendMessage()` owns optimistic append → stream → reconcile.
-5. **`persist` only where a reload would otherwise lose the user's place**: session,
-   workspace layout, preferences. Never in-flight work.
-
-### 10.3 API layer
-
-```
-lib/api/
-  client.ts       # fetch wrapper: base URL, bearer, single-flight refresh, ErrorEnvelope
-  errors.ts       # ApiError; maps the backend ErrorCode enum to display copy
-  types.ts        # hand-mirrored DTOs, each citing its source file
-  endpoints/      # one thin module per domain
-```
-
-`client.ts` is the only place that knows about tokens, refresh, or the base URL.
-The backend's `ErrorEnvelope` (registered in `openapi.setup.ts`) is parsed into a
-typed `ApiError` so `AUTH_TOKEN_EXPIRED` can trigger a refresh while
-`FILE_MIME_NOT_ALLOWED` shows inline on the dropzone.
-
-`NEXT_PUBLIC_API_URL` points at the origin with **no `/api` suffix** — the API has
-no global prefix.
-
----
-
-## 11. Open questions
-
-Carried forward deliberately; none blocks the frontend build.
-
-1. **`POST /auth/register`** — contract drafted in §5.2, endpoint not built.
-   Needs a decision on self-service signup at all, default role, and email
-   verification.
-2. **Server-side voice** — the Web Speech adapter is browser-dependent and sends
-   audio to the browser vendor's service. A `realtime-ws.adapter.ts` against an
-   owned gateway is the eventual answer; the interface is ready for it.
-3. **Refresh token in `localStorage`** — forced by `credentials: false`. If a
-   same-site deployment ever becomes possible, an `httpOnly` cookie for the refresh
-   token is strictly better. Worth revisiting.
-4. **Domain health polling** — one `limit=1` request per domain per 30 s is eight
-   requests. Acceptable now; a single `GET /system/summary` aggregate would be better
-   if the strip data grows richer.
-5. **Agent schedules** are `@Roles('admin')` only. If ordinary users should schedule
-   their own agent runs, that is a backend authorisation change.
-6. **`three` bundle weight** — ~600 KB gzipped. Mitigated by the lazy boundary, but
-   it is the first thing an authenticated user waits for. Measure before optimising.
-
----
-
-## 12. Build order
-
-Each step is independently verifiable; nothing later is needed to prove something
-earlier works.
-
-| # | Step | Done when |
-|---|---|---|
-| 1 | Deps + scaffold: `zustand`, `three`, `@react-three/fiber@9`, `@types/three`. Remove demo pages. | `pnpm build` clean |
-| 2 | `lib/api/` — client, errors, refresh interceptor | Contract test: a 401 triggers exactly one refresh under 5 concurrent requests |
-| 3 | Auth store + auth window | Real login against a running API; reload restores the session |
-| 4 | Window manager + `WindowFrame` + dock | Three windows open, drag, resize, minimise, restore; layout survives reload |
-| 5 | 3D core: port `objects/` + `scene/`, author `data/` | Canvas renders, strips turn, reduced motion yields a static frame, no WebGL context leak on unmount |
-| 6 | `useDomainHealth` → strips | Strip colour changes when a domain's count changes |
-| 7 | Terminal + `lib/agent/stream.ts` | A full turn streams: reasoning, text, tool call, approval, done |
-| 8 | Generic data table + two domains (Contacts, Files) | Server pagination correct; create/edit/detail open as windows |
-| 9 | Upload pipeline | A PDF reaches `indexed` and its chunks are searchable |
-| 10 | Voice window + Web Speech adapter | Spoken question produces a spoken answer in the shared conversation |
-| 11 | Remaining domains from config | Each is a config object, not new components |
-| 12 | Responsive pass + a11y pass | Windows become sheets under `md`; keyboard-only operation of every window |
-
-### Verification specific to this design
-
-- **Contract test** asserting the client's `SseEvent` union matches
-  `api/src/features/mastra/services/chunk-to-sse.ts`. These two files must not drift.
-- **Reducer unit tests** over recorded event sequences — including a `text-delta`
-  split across chunk boundaries, and an `approval-required` mid-turn.
-- **Upload test** covering the dedup short-circuit (`deduplicated: true`, no
-  `upload` key) as well as the normal path.
-- **Refresh concurrency test** — five parallel 401s must produce one refresh call,
-  because two would revoke the token family.
+## 14. Backend asks
+
+Not blocking — each has a client-side workaround above — but each costs the client
+code it should not need.
+
+1. **Four spellings of "the rows."** `data` (11 endpoints), `items` (`/files`),
+   `rows` (`/finance/budgets`), and a naked server-sliced array with no total
+   (`/system/notifications/suppressions`). Hoist one shared `Paginated<T>` and
+   normalise. Phase 4 raised this for `items`; these are instances two and three,
+   and the suppressions one is a correctness bug on the backend's own terms — it
+   takes a `page` parameter it gives the caller no way to use.
+2. **`GET /me/permissions`** — effective permission keys for the caller.
+   Today `/authorization/users/:userId/effective` requires `rbac.manage`, so no
+   ordinary user can read their own. Until it exists, `DomainTableConfig.permissions`
+   cannot be enforced and every action is optimistic (§9).
+3. **Batch label resolution** — `GET /contacts?ids=a,b,c` (and the same for
+   `/projects`, `/users`). Reference columns currently pull the first 100 rows of
+   the parent collection and degrade past that (§6.3).
+4. **`GET /notifications/:id`** — the list has no item endpoint, so the detail
+   window must be seeded from the row (§7.4).
+5. **Read state on notifications** — `status` is delivery state, not a read
+   receipt. There is nothing to build an unread badge from.
+6. **`GET /finance/recurring?activeOnly=false`** — the service takes the parameter
+   (`recurring.service.ts:65`), the controller does not pass it, so inactive
+   schedules are unreachable.
+7. **Unscoped milestones/goals** — `GET /milestones?projectId=` would let those
+   sections behave like every other list instead of needing a scope picker.
+   (Goals already accept a null project internally: `listGoals(projectId: string |
+   null)`.)

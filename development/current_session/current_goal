@@ -1,25 +1,10 @@
-# Goal of the frontend design
+ Design the client side window display of domain related data,in core page:
+  1. add a window for all of the data domains(contacts, finance, knowledge, notifications, projects, user's profile).
+  2. use the client/components/settings-dialog.tsx in this window, so all of the domains can be routed through sideNav.
+  3. use the client/components/data-table.tsx for data interactive and data presentation(different domain, may need different design)
+  4. the table design should follow the client/components/data-table.tsx use all of those existing components.
+  5. if multiple schemas in one domain(which is very common, most domains has multiple domains), use the tab to separate if needed.
 
-- Design a comprehensive AI UI based on the existing UIs in `/Users/avarilewang/Documents/codeRepo/cybernetics/cybernetics-agentics/client/src/components/SystemCore`
-  1. UI layer requirements:
-     1. - The 3D System Core UI should be the main interface after user login, all other features will be presented in Pop-up windows on top of the 3D System Core UI.
-     2. - There will be a Pop-up window for users to login and register.
-     3. - There will be a general Pop-up window as a base framework for other features like settings, notifications, user profile management and other features[including contacts, files, ].
-     4. - There will be a general terminal window(use all of the existing ai-elements components) for users to input commands and receive outputs from the AI system, this terminal window will be in a dedicated Pop-up window, this is the main interface for users to interact with the AI system.
-     5. - There will be a live conversation feature, that allows users to have a real-time conversation with the AI system, this feature should be able to be toggled on and off, there should be a voice icon on the bottom right corner of the 3D System Core UI, when clicked, it will open a Pop-up window for live conversation. close the voice icon wont close the live conversation window, the user can close the live conversation window by clicking the close button on the top right corner of the Pop-up window.
-     6. - The UI should have a responsive design to accommodate different screen sizes and devices.
-     7. state management should be designed to handle the different states of the UI, such as loading, error, success states, auth, conversation, and other states that may arise during user interaction with the AI system.
-- Design the state managements accordingly based on the requirements.
-- Connect to the backend module `api/src/features/mastra`.
-- Including the file upload and data processing pipeline(for docx, pdf, markdown, when those file is uploaded, they will be transformed into texts and save to a record). This feature will be add to 
-- Basically, should follow the design of the Claude.
-- Discuss with me if you have any other suggestions.
-- Design the UI in a fashion and neat way
-
-## Output the design to development/current_session/current_design.md
-
-## Template reference
-
-1. Most of the Feature module's UI will be tables, use client/components/data-table.tsx (including the tabs(if required in that feature domain), pagingation, count of rows, selection of rows and actions) as the design reference closely. Within each table components of each feature module, Create, Delete, Update/Edit and Query functions needs to be implements. Create, Edit and Detail view Component will be displayed in another popup
-2. In terms of the ui, try to use the exising components from Shadcn and AI-Element.
-3. Use zustand as state management.
+  Do a comprehensive design according to the backend schema, and follow the best practice of the frontend interaction.
+  Take state management into consideration.
+  Output the design to development/current_session/current_design.md

@@ -22,13 +22,6 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
-import {
   Table,
   TableBody,
   TableCell,
@@ -38,6 +31,7 @@ import {
 } from "@/components/ui/table"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
+import { TableFilter } from "./table-filter"
 import { TablePagination } from "./table-pagination"
 import { TableState } from "./table-state"
 import { useDomainTable } from "@/features/records/use-domain-table"
@@ -45,6 +39,8 @@ import type { DomainTableConfig, HasId } from "./types"
 
 export interface DataTableProps<T extends HasId> {
   config: DomainTableConfig<T>
+  /** Rows already in hand, for a `source: "inline"` config. */
+  rows?: T[]
   onCreate?: () => void
   onEdit?: (row: T) => void
   onDelete?: (rows: T[]) => void
@@ -67,12 +63,13 @@ export interface DataTableProps<T extends HasId> {
  */
 export function DataTable<T extends HasId>({
   config,
+  rows: inlineRows,
   onCreate,
   onEdit,
   onDelete,
   onOpen,
 }: DataTableProps<T>) {
-  const table = useDomainTable(config)
+  const table = useDomainTable(config, inlineRows)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [hidden, setHidden] = useState<Set<string>>(new Set())
 
@@ -81,16 +78,24 @@ export function DataTable<T extends HasId>({
     [config.columns, hidden],
   )
 
-  const selectedRows = table.rows.filter((r) => selected.has(r.id))
+  // Row identity. `id` for every domain but the composed ones — notification
+  // preferences have an eventKey and no row to have an id.
+  const idOf = (row: T) => config.rowId?.(row) ?? row.id
+
+  const selectable = config.selectable !== false
+  const selectedRows = selectable ? table.rows.filter((r) => selected.has(idOf(r))) : []
+  // Only the rows this principal may actually delete. `canDelete` can be a
+  // predicate now: a project viewer, a knowledge reader, a billed time entry.
+  const deletableSelected = selectedRows.filter((r) => can(config.canDelete, r))
   const allOnPageSelected =
-    table.rows.length > 0 && table.rows.every((r) => selected.has(r.id))
+    table.rows.length > 0 && table.rows.every((r) => selected.has(idOf(r)))
 
   function toggleAll(checked: boolean) {
     setSelected((prev) => {
       const next = new Set(prev)
       for (const r of table.rows) {
-        if (checked) next.add(r.id)
-        else next.delete(r.id)
+        if (checked) next.add(idOf(r))
+        else next.delete(idOf(r))
       }
       return next
     })
@@ -108,6 +113,9 @@ export function DataTable<T extends HasId>({
   const showActions = Boolean(
     config.canEdit || config.canDelete || config.rowActions?.length,
   )
+  // Header checkbox + actions column, for the empty/error row's colSpan. Get
+  // this wrong and the empty state renders at half width.
+  const extraCols = (selectable ? 1 : 0) + (showActions ? 1 : 0)
 
   return (
     <div className="flex h-full min-h-0 flex-col p-3">
@@ -138,35 +146,28 @@ export function DataTable<T extends HasId>({
         )}
 
         {config.filters?.map((f) => (
-          <Select
+          <TableFilter
             key={f.key}
-            value={table.query.filters[f.key] ?? "__all"}
-            onValueChange={(v) => table.setFilter(f.key, v === "__all" ? "" : v)}
-          >
-            <SelectTrigger size="sm" className="h-8 w-auto min-w-28 text-xs">
-              <SelectValue placeholder={f.label} />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="__all">{f.label}: any</SelectItem>
-              {f.options.map((o) => (
-                <SelectItem key={o.value} value={o.value}>
-                  {o.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            spec={f}
+            value={table.query.filters[f.key] ?? ""}
+            onChange={(v) => table.setFilter(f.key, v)}
+          />
         ))}
 
         <div className="ml-auto flex items-center gap-2">
-          {selectedRows.length > 0 && config.canDelete && onDelete && (
+          {deletableSelected.length > 0 && onDelete && (
             <Button
               variant="outline"
               size="sm"
               className="h-8 gap-1.5 text-xs text-destructive"
-              onClick={() => onDelete(selectedRows)}
+              onClick={() => onDelete(deletableSelected)}
             >
               <Trash2Icon className="size-3.5" />
-              Delete {selectedRows.length}
+              {/* When the selection is mixed, say so on the button. Deleting
+                  fewer rows than the count promised is the failure to avoid. */}
+              {deletableSelected.length === selectedRows.length
+                ? `Delete ${selectedRows.length}`
+                : `Delete ${deletableSelected.length} of ${selectedRows.length}`}
             </Button>
           )}
 
@@ -226,15 +227,17 @@ export function DataTable<T extends HasId>({
         <Table>
           <TableHeader className="sticky top-0 z-10 bg-muted">
             <TableRow>
-              <TableHead className="w-8">
-                <Checkbox
-                  aria-label="Select all"
-                  checked={allOnPageSelected}
-                  onCheckedChange={(v) => toggleAll(Boolean(v))}
-                />
-              </TableHead>
+              {selectable && (
+                <TableHead className="w-8">
+                  <Checkbox
+                    aria-label="Select all"
+                    checked={allOnPageSelected}
+                    onCheckedChange={(v) => toggleAll(Boolean(v))}
+                  />
+                </TableHead>
+              )}
               {columns.map((c) => (
-                <TableHead key={c.key} className={c.className}>
+                <TableHead key={c.key} className={cn(c.numeric && "text-right", c.className)}>
                   {c.header}
                 </TableHead>
               ))}
@@ -244,7 +247,7 @@ export function DataTable<T extends HasId>({
           <TableBody>
             {table.status !== "ready" || table.rows.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={columns.length + (showActions ? 2 : 1)}>
+                <TableCell colSpan={columns.length + extraCols}>
                   <TableState
                     status={table.status}
                     error={table.error}
@@ -256,20 +259,25 @@ export function DataTable<T extends HasId>({
             ) : (
               table.rows.map((row) => (
                 <TableRow
-                  key={row.id}
-                  data-state={selected.has(row.id) ? "selected" : undefined}
+                  key={idOf(row)}
+                  data-state={selected.has(idOf(row)) ? "selected" : undefined}
                   className={cn(onOpen && "cursor-pointer")}
                   onClick={() => onOpen?.(row)}
                 >
-                  <TableCell onClick={(e) => e.stopPropagation()}>
-                    <Checkbox
-                      aria-label={`Select row ${row.id}`}
-                      checked={selected.has(row.id)}
-                      onCheckedChange={(v) => toggleRow(row.id, Boolean(v))}
-                    />
-                  </TableCell>
+                  {selectable && (
+                    <TableCell onClick={(e) => e.stopPropagation()}>
+                      <Checkbox
+                        aria-label={`Select row ${idOf(row)}`}
+                        checked={selected.has(idOf(row))}
+                        onCheckedChange={(v) => toggleRow(idOf(row), Boolean(v))}
+                      />
+                    </TableCell>
+                  )}
                   {columns.map((c) => (
-                    <TableCell key={c.key} className={c.className}>
+                    <TableCell
+                      key={c.key}
+                      className={cn(c.numeric && "text-right tabular-nums", c.className)}
+                    >
                       {c.cell(row)}
                     </TableCell>
                   ))}
@@ -290,6 +298,8 @@ export function DataTable<T extends HasId>({
         </Table>
       </div>
 
+      {config.footnote?.({ total: table.total, hiddenOnPage: table.hiddenOnPage })}
+
       <TablePagination
         page={table.query.page}
         limit={table.query.limit}
@@ -300,6 +310,11 @@ export function DataTable<T extends HasId>({
       />
     </div>
   )
+}
+
+/** Resolve a guard that may be a flag or a per-row predicate. */
+function can<T>(guard: boolean | ((row: T) => boolean) | undefined, row: T): boolean {
+  return typeof guard === "function" ? guard(row) : Boolean(guard)
 }
 
 function RowMenu<T extends HasId>({
@@ -314,8 +329,16 @@ function RowMenu<T extends HasId>({
   onDelete?: (rows: T[]) => void
 }) {
   // Actions the user cannot perform are hidden, not disabled: a control that
-  // can never be enabled is noise.
+  // can never be enabled is noise. `canEdit`/`canDelete` are resolved per row
+  // for the same reason — the server already told us what this principal may
+  // do to THIS row (PublicProject.access), so offering Edit on a row that
+  // will 403 is a promise we know we cannot keep.
   const custom = (config.rowActions ?? []).filter((a) => a.visible?.(row) !== false)
+  const editable = can(config.canEdit, row)
+  const deletable = can(config.canDelete, row)
+
+  // Every item resolved away — render nothing rather than an empty menu.
+  if (!custom.length && !(editable && onEdit) && !(deletable && onDelete)) return null
 
   return (
     <DropdownMenu>
@@ -329,8 +352,8 @@ function RowMenu<T extends HasId>({
           <EllipsisVerticalIcon className="size-3.5" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-36">
-        {config.canEdit && onEdit && (
+      <DropdownMenuContent align="end" className="w-44">
+        {editable && onEdit && (
           <DropdownMenuItem onClick={() => onEdit(row)}>
             <PencilIcon className="size-3.5" /> Edit
           </DropdownMenuItem>
@@ -345,7 +368,7 @@ function RowMenu<T extends HasId>({
             {a.label}
           </DropdownMenuItem>
         ))}
-        {config.canDelete && onDelete && (
+        {deletable && onDelete && (
           <>
             <DropdownMenuSeparator />
             <DropdownMenuItem variant="destructive" onClick={() => onDelete([row])}>

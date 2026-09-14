@@ -40,7 +40,7 @@ describe("RootLayout", () => {
     // by exercising the callback we captured and checking real store state —
     // a stub that does nothing would satisfy "is a function" but fail this.
     useSessionStore.getState().setTokens({ accessToken: "a", refreshToken: "r", expiresIn: 60 })
-    useWorkspaceStore.getState().openWindow({ kind: "contacts" })
+    useWorkspaceStore.getState().openWindow({ kind: "data" })
 
     onAuthFailure!(null)
 

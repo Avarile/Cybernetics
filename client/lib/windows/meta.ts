@@ -1,6 +1,6 @@
 import {
-  FileIcon, FilePlusIcon, FileTextIcon, LockIcon, MicIcon,
-  PencilIcon, ShieldAlertIcon, TerminalIcon, UsersIcon,
+  DatabaseIcon, FilePlusIcon, FileTextIcon, LockIcon, MicIcon,
+  PencilIcon, ShieldAlertIcon, TerminalIcon,
 } from "lucide-react"
 import type { WindowKind, WindowMeta } from "./types"
 
@@ -17,8 +17,9 @@ export const WINDOW_META: Partial<Record<WindowKind, WindowMeta>> = {
   // reads its rect. Do not reinstate a rect here.
   auth: { kind: "auth", title: "Access", icon: LockIcon, singleton: true, modal: true, chrome: "none" },
   terminal: { kind: "terminal", title: "Terminal", icon: TerminalIcon, singleton: true, modal: false, defaultRect: { w: 900, h: 600 }, minSize: { w: 420, h: 320 } },
-  contacts: { kind: "contacts", title: "Contacts", icon: UsersIcon, singleton: true, modal: false, defaultRect: { w: 980, h: 620 }, minSize: { w: 520, h: 360 } },
-  files: { kind: "files", title: "Files", icon: FileIcon, singleton: true, modal: false, defaultRect: { w: 980, h: 660 }, minSize: { w: 520, h: 400 } },
+  // Wider and taller than the domain windows it replaces: it carries a sideNav
+  // rail (16rem) and a section tab row before the table gets any space.
+  data: { kind: "data", title: "Data", icon: DatabaseIcon, singleton: true, modal: false, defaultRect: { w: 1140, h: 720 }, minSize: { w: 640, h: 420 } },
   "record-create": { kind: "record-create", title: "New record", icon: FilePlusIcon, singleton: false, modal: false, defaultRect: { w: 460, h: 600 } },
   "record-edit": { kind: "record-edit", title: "Edit record", icon: PencilIcon, singleton: false, modal: false, defaultRect: { w: 460, h: 600 } },
   "record-detail": { kind: "record-detail", title: "Record", icon: FileTextIcon, singleton: false, modal: false, defaultRect: { w: 460, h: 600 } },

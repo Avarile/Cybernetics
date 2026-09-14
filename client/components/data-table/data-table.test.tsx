@@ -358,3 +358,180 @@ describe("list envelope shape", () => {
     expect(await screen.findByText("No widgets.")).toBeInTheDocument()
   })
 })
+
+describe("DataTable — per-row guards and selection", () => {
+  beforeEach(() => {
+    fetchImpl.mockReset()
+    fetchImpl.mockResolvedValue(page(ROWS))
+  })
+
+  it("hides Edit on a row the principal may not edit", async () => {
+    // PublicProject.access says what this principal may do to THIS row, so a
+    // viewer must not be offered an action that will 403.
+    render(
+      tableTree({
+        config: { ...CONFIG, canEdit: (r: Row) => r.id === "1", canDelete: false },
+        onEdit: () => {},
+      }),
+    )
+    await screen.findByText("Alpha")
+
+    const menus = screen.getAllByRole("button", { name: /row actions/i })
+    await userEvent.click(menus[0])
+    expect(await screen.findByRole("menuitem", { name: /edit/i })).toBeInTheDocument()
+    await userEvent.keyboard("{Escape}")
+
+    await userEvent.click(menus[1])
+    await waitFor(() =>
+      expect(screen.queryByRole("menuitem", { name: /edit/i })).not.toBeInTheDocument(),
+    )
+  })
+
+  it("renders no row menu at all when every action resolves away", async () => {
+    // An empty dropdown is a control that can never do anything.
+    render(
+      tableTree({
+        config: { ...CONFIG, canEdit: () => false, canDelete: () => false },
+        onEdit: () => {},
+        onDelete: () => {},
+      }),
+    )
+    await screen.findByText("Alpha")
+    expect(screen.queryByRole("button", { name: /row actions/i })).not.toBeInTheDocument()
+  })
+
+  it("reports a mixed selection honestly on the bulk delete button", async () => {
+    const onDelete = vi.fn()
+    render(
+      tableTree({ config: { ...CONFIG, canDelete: (r: Row) => r.id === "1" }, onDelete }),
+    )
+    await screen.findByText("Alpha")
+
+    await userEvent.click(screen.getByRole("checkbox", { name: /select all/i }))
+
+    // Two selected, one deletable. Saying "Delete 2" and removing one is the
+    // failure this wording exists to prevent.
+    const button = await screen.findByRole("button", { name: /delete 1 of 2/i })
+    await userEvent.click(button)
+    expect(onDelete).toHaveBeenCalledWith([ROWS[0]])
+  })
+
+  it("omits checkboxes entirely for a non-selectable table", async () => {
+    // Notification preferences: there is no "delete 3 preferences".
+    render(tableTree({ config: { ...CONFIG, selectable: false } }))
+    await screen.findByText("Alpha")
+    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument()
+  })
+
+  it("spans the empty state across the full width when not selectable", async () => {
+    fetchImpl.mockResolvedValue(page([], 0))
+    render(tableTree({ config: { ...CONFIG, selectable: false, canEdit: false, canDelete: false } }))
+
+    const cell = (await screen.findByText("No widgets.")).closest("td")!
+    // Two columns, no checkbox column, no actions column.
+    expect(cell.getAttribute("colspan")).toBe("2")
+  })
+
+  it("right-aligns a numeric column", async () => {
+    render(
+      tableTree({
+        config: {
+          ...CONFIG,
+          columns: [{ key: "name", header: "Name", cell: (r: Row) => r.name, numeric: true }],
+        },
+      }),
+    )
+    const cell = (await screen.findByText("Alpha")).closest("td")!
+    expect(cell.className).toContain("tabular-nums")
+  })
+
+  it("pages by totalBeforeAccess, not by the post-filter count", async () => {
+    // Verified live: /knowledge?limit=20 answers `total: 20,
+    // totalBeforeAccess: 186` on EVERY page — `total` is the visible count
+    // on this page, capped by limit. Dividing by it gave "Page 1 of 1" for
+    // 186 records and stranded the other 166.
+    fetchImpl.mockResolvedValue(
+      json({ data: ROWS, total: 2, totalBeforeAccess: 186, page: 1, limit: 20 }),
+    )
+    render(tableTree())
+
+    // 186 / 20 = 10 pages.
+    expect(await screen.findByText("Page 1 of 10")).toBeInTheDocument()
+  })
+
+  it("reports rows the server dropped from a short non-final page", async () => {
+    // 14 of a requested 20 came back, and page 1 is not the last page, so
+    // six were filtered out by access after the SQL page was taken.
+    const short = Array.from({ length: 14 }, (_, i) => ({
+      id: String(i),
+      name: `Row ${i}`,
+      status: "active",
+    }))
+    fetchImpl.mockResolvedValue(
+      json({ data: short, total: 14, totalBeforeAccess: 186, page: 1, limit: 20 }),
+    )
+    render(
+      tableTree({
+        config: {
+          ...CONFIG,
+          footnote: ({ hiddenOnPage }) =>
+            hiddenOnPage ? <p>{hiddenOnPage} hidden on this page</p> : null,
+        },
+      }),
+    )
+    expect(await screen.findByText("6 hidden on this page")).toBeInTheDocument()
+  })
+
+  it("does not call the end of the collection a hidden row", async () => {
+    // The last page is naturally short. Reporting that as "6 hidden" would
+    // accuse the server of filtering on every final page of every list.
+    fetchImpl.mockResolvedValue(
+      json({ data: ROWS, total: 2, totalBeforeAccess: 2, page: 1, limit: 20 }),
+    )
+    render(
+      tableTree({
+        config: {
+          ...CONFIG,
+          footnote: ({ hiddenOnPage }) =>
+            hiddenOnPage ? <p>{hiddenOnPage} hidden on this page</p> : null,
+        },
+      }),
+    )
+    await screen.findByText("Alpha")
+    expect(screen.queryByText(/hidden on this page/)).not.toBeInTheDocument()
+  })
+})
+
+describe("DataTable — sourced filters", () => {
+  beforeEach(() => {
+    fetchImpl.mockReset()
+  })
+
+  it("populates a filter's options from its source endpoint", async () => {
+    fetchImpl.mockImplementation((url: string) =>
+      Promise.resolve(
+        String(url).includes("/finance/accounts")
+          ? json([{ id: "a1", name: "Current" }])
+          : page(ROWS),
+      ),
+    )
+
+    render(
+      tableTree({
+        config: {
+          ...CONFIG,
+          filters: [
+            {
+              key: "accountId",
+              label: "Account",
+              source: { endpoint: "/finance/accounts", labelKey: "name" },
+            },
+          ],
+        },
+      }),
+    )
+
+    await userEvent.click(await screen.findByRole("combobox", { name: "Account" }))
+    expect(await screen.findByRole("option", { name: "Current" })).toBeInTheDocument()
+  })
+})

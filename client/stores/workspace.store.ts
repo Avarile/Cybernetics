@@ -60,6 +60,20 @@ interface WorkspaceState {
   zSeq: number
 
   openWindow: (input: OpenWindowInput) => string
+  /**
+   * Merge a patch into one window's props.
+   *
+   * Navigation state (which domain, which section, which scope the Data window
+   * shows) lives in props rather than a store of its own: props are already in
+   * the persisted slice, so a reopened workspace lands back where it was, and
+   * `openWindow({ kind: "data", props: { domain, section } })` is a deep link
+   * with no extra machinery.
+   *
+   * Deliberately does NOT touch zSeq or zIndex. Changing a section is
+   * navigation, not focus — a tab click that raised the window over a modal
+   * would be a bug.
+   */
+  patchWindowProps: (id: string, patch: JsonObject) => void
   closeWindow: (id: string) => void
   focusWindow: (id: string) => void
   minimiseWindow: (id: string) => void
@@ -170,6 +184,22 @@ export const useWorkspaceStore = create<WorkspaceState>()(
         })
         return id
       },
+
+      patchWindowProps: (id, patch) =>
+        set((state) => {
+          const win = state.windows.find((w) => w.id === id)
+          if (!win) return
+          // `__key` is the de-duplication identity `keyOf` reads. A patch that
+          // dropped or overwrote it would orphan the window from its own
+          // singleton slot, and the next openWindow for that kind would spawn
+          // a second one instead of focusing this.
+          const key = win.props?.__key
+          win.props = {
+            ...win.props,
+            ...patch,
+            ...(key === undefined ? {} : { __key: key }),
+          }
+        }),
 
       closeWindow: (id) =>
         set((state) => {

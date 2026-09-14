@@ -54,7 +54,7 @@ describe("useStateHydration", () => {
         windows: [
           {
             id: "w1",
-            kind: "contacts",
+            kind: "data",
             title: "Contacts",
             rect: { x: 10, y: 10, w: 400, h: 300 },
             zIndex: 4,
@@ -89,6 +89,6 @@ describe("useStateHydration", () => {
     // window intact — never an empty envelope.
     const windows = stored.windows ?? stored.state?.windows
     expect(windows).toHaveLength(1)
-    expect(windows[0].kind).toBe("contacts")
+    expect(windows[0].kind).toBe("data")
   })
 })
