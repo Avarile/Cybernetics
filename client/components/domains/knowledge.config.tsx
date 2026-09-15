@@ -232,7 +232,6 @@ export const knowledgeDomain: DomainSpec = {
     {
       key: "types",
       label: "Types",
-      secondary: true,
       hint: "Reference data. Only an administrator can change it.",
       body: {
         kind: "table",
@@ -243,7 +242,6 @@ export const knowledgeDomain: DomainSpec = {
     {
       key: "categories",
       label: "Categories",
-      secondary: true,
       hint: "Reference data. Only an administrator can change it.",
       body: {
         kind: "table",

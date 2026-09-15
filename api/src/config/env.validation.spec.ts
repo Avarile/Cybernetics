@@ -163,3 +163,37 @@ describe('production CORS guard', () => {
     expect(() => validateEnv({ NODE_ENV: 'development' })).not.toThrow();
   });
 });
+
+describe('production gateway-key guard', () => {
+  const prod = {
+    NODE_ENV: 'production',
+    MEILISEARCH_MASTER_KEY: 'a-real-master-key',
+    JWT_ACCESS_SECRET: 'a-real-jwt-secret-that-is-long-enough-32',
+    SEED_ADMIN_PASSWORD: 'a-real-admin-password',
+    MINIO_ROOT_USER: 'not-minioadmin',
+    MINIO_ROOT_PASSWORD: 'not-minioadmin',
+    PASSWORD_RESET_PEPPER: 'a-real-reset-pepper-value',
+    SYSTEM_ENCRYPTION_KEY: Buffer.from('a'.repeat(32)).toString('base64'),
+    CORS_ORIGINS: 'https://app.example.com',
+    FILE_ALLOWED_MIME: 'application/pdf',
+  };
+
+  it('rejects production with neither name set', () => {
+    expect(() => validateEnv(prod)).toThrow(/AI_GATEWAY_API_KEY/);
+  });
+
+  it('accepts AI_GATEWAY_API_KEY alone', () => {
+    expect(() =>
+      validateEnv({ ...prod, AI_GATEWAY_API_KEY: 'vck_primary' }),
+    ).not.toThrow();
+  });
+
+  // `vercel env pull` writes the credential as VERCEL_APIKEY. mastra.config.ts
+  // falls back to it, so a deployment keyed solely by the alias is correctly
+  // configured and must not be rejected at boot.
+  it('accepts VERCEL_APIKEY alone', () => {
+    expect(() =>
+      validateEnv({ ...prod, VERCEL_APIKEY: 'vck_alias' }),
+    ).not.toThrow();
+  });
+});

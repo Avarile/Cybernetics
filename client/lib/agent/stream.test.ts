@@ -260,8 +260,11 @@ describe("streamChat", () => {
       ),
     )
     const { seen, promise } = run({ signal: controller.signal })
-    // let the first frame land, then stop
-    await Promise.resolve()
+    // Let the first frame land, then stop. A macrotask, not `await
+    // Promise.resolve()`: that drains exactly one microtask, so it silently
+    // encoded how many `await`s deep the fetch happened to sit and broke when
+    // opening the stream moved into a helper.
+    await new Promise((resolve) => setTimeout(resolve, 0))
     controller.abort()
 
     const result = await promise

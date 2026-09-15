@@ -54,8 +54,8 @@ export interface SystemCoreCanvasProps {
   resetToken: number
   /** False while signed out: the poll is owner-scoped and the stack is inert. */
   active: boolean
-  /** A window is covering the canvas — stop redrawing behind it. */
-  obscured?: boolean
+  /** A window is open in front of the canvas — redraw at half cadence. */
+  backgrounded?: boolean
 }
 
 export function SystemCoreCanvas({
@@ -63,7 +63,7 @@ export function SystemCoreCanvas({
   panelOpen,
   resetToken,
   active,
-  obscured = false,
+  backgrounded = false,
 }: SystemCoreCanvasProps) {
   const live = useLive(active)
   const modules = useModules({
@@ -87,7 +87,7 @@ export function SystemCoreCanvas({
             onSelect={modules.select}
             scannerVisible={scannerVisible}
             resetToken={resetToken}
-            paused={obscured}
+            backgrounded={backgrounded}
           />
         </Boundary>
       </div>

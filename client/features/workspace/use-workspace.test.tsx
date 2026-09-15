@@ -2,7 +2,7 @@ import { act, renderHook } from "@testing-library/react"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { useViewportStore } from "@/stores/viewport.store"
 import { useWorkspaceStore } from "@/stores/workspace.store"
-import { useViewportSync, useWorkspace } from "./use-workspace"
+import { useHasOpenWindows, useViewportSync, useWorkspace } from "./use-workspace"
 
 const s = () => useWorkspaceStore.getState()
 
@@ -33,6 +33,48 @@ describe("useWorkspace", () => {
     rerender()
 
     expect(result.current.windows).toBe(first)
+  })
+})
+
+describe("useHasOpenWindows", () => {
+  beforeEach(() => {
+    s().closeAll()
+    useViewportStore.getState().setViewport({ w: 1400, h: 900 })
+  })
+
+  it("reports whether anything is open", () => {
+    const { result } = renderHook(() => useHasOpenWindows())
+    expect(result.current).toBe(false)
+
+    let id = ""
+    act(() => {
+      id = s().openWindow({ kind: "terminal" })
+    })
+    expect(result.current).toBe(true)
+
+    act(() => s().closeWindow(id))
+    expect(result.current).toBe(false)
+  })
+
+  it("does not re-render while a window is moved or focused", () => {
+    // The whole point of the hook. `useWorkspace().windows` allocates a sorted
+    // array per call, so the 3D canvas subscribed to it re-rendered on every
+    // frame of a drag. A boolean compares equal and must not.
+    const a = s().openWindow({ kind: "terminal" })
+    const b = s().openWindow({ kind: "data" })
+
+    let renders = 0
+    renderHook(() => {
+      renders++
+      return useHasOpenWindows()
+    })
+    const baseline = renders
+
+    act(() => s().moveWindow(a, { x: 10, y: 20, w: 600, h: 400 }))
+    act(() => s().focusWindow(a))
+    act(() => s().patchWindowProps(b, { section: "types" }))
+
+    expect(renders).toBe(baseline)
   })
 })
 

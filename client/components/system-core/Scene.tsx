@@ -28,7 +28,7 @@ import { createToneBus } from './scene/audio';
 import { stripSpec, appearanceOf } from './scene/resolve';
 import logger from '@/components/system-core/shims/logger';
 import { LIGHTS, STAGE_BACKGROUND } from './scene/palette';
-import { SCANNER, FRAME_FOV, FRAME_DISTANCE, FRAME_DIRECTION } from './scene/config';
+import { SCANNER, FRAME_FOV, FRAME_DISTANCE, FRAME_DIRECTION, BACKGROUND_HZ } from './scene/config';
 
 export interface SceneProps {
   modules: Module[];
@@ -43,18 +43,18 @@ export interface SceneProps {
   /** Bumped to re-run the framing pass. */
   resetToken: number;
   /**
-   * Nothing is looking: a window covers the canvas.
+   * A window is open in front of the canvas: half cadence, lower dpr.
    *
-   * Drops the render loop to "demand" rather than unmounting. The stack keeps
-   * its state, its materials and its WebGL context, and Orbit still invalidates
-   * on interaction, so the frame under the window stays correct — it simply
-   * stops being redrawn sixty times a second behind something opaque while
-   * React is re-rendering a table on the same thread.
+   * Throttled, never stopped. Freezing the loop here was wrong in every case it
+   * fired — no window covers the canvas, the modal scrim is translucent on
+   * purpose, and the auth gate is itself a window, so the login screen showed a
+   * dead stack. What survives of that idea is the halved frame cost, which is
+   * what the table re-rendering on the same thread actually needs.
    *
    * Affects the render loop and nothing else — in particular not `animate`,
    * which owns the tone bus and must stay session-constant.
    */
-  paused?: boolean;
+  backgrounded?: boolean;
 }
 
 /** The one default view: the framing direction, at the framed distance, looking
@@ -124,6 +124,48 @@ function Pulse({ mats, active }: { mats: MaterialRegistry; active: boolean }) {
       mats.pulse(clock.elapsedTime * 1000);
     }
   });
+  return null;
+}
+
+/**
+ * Caps the render rate without stopping the loop.
+ *
+ * Under `frameloop="demand"` nothing repaints unless something asks, so asking
+ * on a fixed cadence turns "demand" from frozen into throttled — the whole of
+ * what `backgrounded` means. `hz <= 0` is the un-throttled case and subscribes
+ * to nothing; the Canvas is in `"always"` mode there and would ignore this
+ * anyway (`invalidate` is a no-op under "always").
+ *
+ * rAF rather than setInterval: display-aligned, no drift against the loop it is
+ * driving, and it stops on its own in a hidden tab instead of firing into a
+ * document that cannot paint.
+ *
+ * Motion is unaffected by the cadence. R3F reads `delta` from `clock.getDelta()`
+ * inside its update step, which runs only on frames that actually render, and
+ * every useFrame consumer here integrates against that delta rather than
+ * counting frames. Half the frames, twice the delta, same speed.
+ */
+function FrameCap({ hz }: { hz: number }) {
+  const invalidate = useThree((state) => state.invalidate);
+
+  useEffect(() => {
+    if (hz <= 0) {
+      return;
+    }
+    const step = 1000 / hz;
+    let raf = 0;
+    let last = 0;
+    const tick = (now: number) => {
+      raf = requestAnimationFrame(tick);
+      if (now - last >= step) {
+        last = now;
+        invalidate();
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [hz, invalidate]);
+
   return null;
 }
 
@@ -315,14 +357,31 @@ export default function Scene(props: SceneProps) {
 
   return (
     <Canvas
-      // `paused` deliberately does NOT feed `animate` below. `animate` gates
-      // `createToneBus`, which owns an AudioContext, so routing a per-window
-      // flag through it tore the whole bus down and rebuilt it every time a
-      // window opened or closed — and the bus's deferred teardown throws
+      // Two different reasons to leave "always", and only one of them is a
+      // stop. Reduced motion means a static frame, so "demand" there repaints
+      // on interaction alone. `backgrounded` also lands on "demand", but the
+      // FrameCap below then drives it at BACKGROUND_HZ — half the frames, not
+      // none. Without that ticker this line is the freeze it used to be.
+      //
+      // `backgrounded` deliberately does NOT feed `animate` below. `animate`
+      // gates `createToneBus`, which owns an AudioContext, so routing a
+      // per-window flag through it tore the whole bus down and rebuilt it every
+      // time a window opened or closed — and the bus's deferred teardown throws
       // InvalidAccessError when it is churned that fast. `animate` is a
       // session-long property of the user's motion preference; this is not.
-      frameloop={animate && !props.paused ? 'always' : 'demand'}
-      dpr={[1, 2]}
+      frameloop={animate && !props.backgrounded ? 'always' : 'demand'}
+      // Fewer pixels behind a window as well as fewer frames. R3F only calls
+      // setDpr when the RESOLVED value changes, so a 1× display never pays a
+      // framebuffer realloc for this and a 2× one pays it on open/close only.
+      //
+      // Gated on `animate` as well, and that is not belt-and-braces: a dpr
+      // change resizes the renderer, `gl.setSize` clears the drawing buffer,
+      // and R3F does NOT invalidate afterwards. FrameCap covers that within a
+      // frame — but under reduced motion there is no FrameCap, so varying dpr
+      // there would clear the static frame and leave the canvas blank until
+      // the user happened to drag it. Nothing is redrawing in that mode anyway,
+      // so there is nothing to save.
+      dpr={animate && props.backgrounded ? [1, 1.5] : [1, 2]}
       gl={{ antialias: true, alpha: true }}
       camera={{
         fov: FRAME_FOV,
@@ -332,6 +391,10 @@ export default function Scene(props: SceneProps) {
       }}
     >
       <Core {...props} animate={animate} />
+      {/* Outside Core so it is unmistakably about the loop rather than the
+          model. Zero when the Canvas is already in "always", and zero under
+          reduced motion, where a static frame is the point. */}
+      <FrameCap hz={animate && props.backgrounded ? BACKGROUND_HZ : 0} />
     </Canvas>
   );
 }

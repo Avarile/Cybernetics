@@ -167,6 +167,14 @@ export const envSchema = z
 
     // Mastra AI agent
     AI_GATEWAY_API_KEY: z.string().default(''),
+    /**
+     * Alias for AI_GATEWAY_API_KEY. `vercel env pull` and the Vercel dashboard
+     * both name the AI Gateway credential this way, so a key pasted under that
+     * name works without being re-handled. AI_GATEWAY_API_KEY wins when both are
+     * set — it is the name `@ai-sdk/gateway` itself documents. Resolved into a
+     * single value by `configurations/mastra.config.ts`.
+     */
+    VERCEL_APIKEY: z.string().default(''),
     MASTRA_MODEL: z.string().min(1).default('anthropic/claude-sonnet-4.6'),
     MASTRA_MAX_RETRIES: z.coerce.number().int().min(0).default(2),
     MASTRA_MEMORY_LAST_MESSAGES: z.coerce.number().int().positive().default(20),
@@ -328,11 +336,18 @@ export const envSchema = z
       });
     }
 
-    if (env.NODE_ENV === 'production' && env.AI_GATEWAY_API_KEY.length === 0) {
+    // Either name satisfies this: mastra.config.ts falls back to VERCEL_APIKEY,
+    // so a deployment keyed solely by the alias is correctly configured.
+    if (
+      env.NODE_ENV === 'production' &&
+      env.AI_GATEWAY_API_KEY.length === 0 &&
+      env.VERCEL_APIKEY.length === 0
+    ) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ['AI_GATEWAY_API_KEY'],
-        message: 'AI_GATEWAY_API_KEY is required when NODE_ENV=production.',
+        message:
+          'AI_GATEWAY_API_KEY (or its alias VERCEL_APIKEY) is required when NODE_ENV=production.',
       });
     }
 

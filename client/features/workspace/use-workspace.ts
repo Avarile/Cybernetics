@@ -20,6 +20,22 @@ export function useWorkspace() {
 }
 
 /**
+ * Whether anything is open, as a boolean.
+ *
+ * Deliberately not `useWorkspace().windows.length > 0`: that selector sorts and
+ * allocates, so a consumer needing only this much re-renders on every move,
+ * focus and prop patch rather than on open and close. Zustand compares the
+ * boolean, so the subtree below is left alone for the whole of a drag.
+ *
+ * The 3D canvas is the caller that makes this worth having — it is the most
+ * expensive subtree in the app, and it only wants to know whether it is being
+ * looked at or looked past.
+ */
+export function useHasOpenWindows(): boolean {
+  return useWorkspaceStore((st) => st.windows.length > 0)
+}
+
+/**
  * Keeps the viewport store in step with the window, one write per frame.
  *
  * `resize` fires far faster than a frame while a window edge is dragged, and

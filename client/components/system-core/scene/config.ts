@@ -83,6 +83,13 @@ export const TONE_ARC = 0.5;
  *  a backgrounded tab hands over one enormous delta and every strip jumps. */
 export const MAX_DELTA = 0.1;
 
+/** Render cadence while a window is open and the canvas is being looked past
+ *  rather than at. Halves the frame cost without stopping the motion, which
+ *  freezing the loop outright did. Well inside MAX_DELTA above: 30fps is a
+ *  33ms delta against a 100ms clamp, so nothing integrates any differently
+ *  than it does at 60. */
+export const BACKGROUND_HZ = 30;
+
 /** Vertical field of view the scene is composed for. The canvas and the
  *  framing pass share it, so the default view is stated once. */
 export const FRAME_FOV = 45;
