@@ -4,7 +4,7 @@ import {
   ErrorCode,
   ExceptionService,
 } from '../../../infrastructure/exceptions';
-import { AGENT_ID } from '../mastra.constants';
+import { resolveAgentId } from '../mastra.constants';
 import { isAdmin, roleOf, userIdOrNull } from '../../../common/principal';
 import type { PrincipalRef } from '../mastra.types';
 import { AgentRunRepository } from '../repositories/agent-run.repository';
@@ -62,16 +62,25 @@ export class ApprovalService {
     // owner, but this mutation resumes a real side-effect (send-email/db-write),
     // so it must not be resolvable by an arbitrary authenticated caller.
     // Admins bypass; everyone else must own the approval's conversation.
+    // Fetched once; reused for the agent binding below. A second getOwned would
+    // re-run its admin cross-owner audit write.
+    let conv: Awaited<ReturnType<ConversationService['getOwned']>> | null =
+      null;
     if (!isAdmin(principal)) {
       if (!appr.conversationId) {
         throw this.errors.create(ErrorCode.AGENT_APPROVAL_FORBIDDEN);
       }
       // Throws FORBIDDEN/AGENT_CONVERSATION_NOT_FOUND for a non-owner.
-      await this.conversations.getOwned(principal, appr.conversationId);
+      conv = await this.conversations.getOwned(principal, appr.conversationId);
+    } else if (appr.conversationId) {
+      conv = await this.conversations.getOwned(principal, appr.conversationId);
     }
 
     try {
-      await resumeAfterApproval(this.mastra.getAgent(AGENT_ID) as never, {
+      // Resume on the agent the conversation is bound to, not a fixed constant:
+      // it must be the one holding the suspended run's snapshot.
+      const agent = this.mastra.getAgent(resolveAgentId(conv?.agentId));
+      await resumeAfterApproval(agent as never, {
         mastraRunId: appr.mastraRunId,
         toolCallId: appr.toolCallId,
         approved: decision.approved,

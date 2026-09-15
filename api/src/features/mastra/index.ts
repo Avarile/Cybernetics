@@ -1,9 +1,14 @@
 import { Mastra } from '@mastra/core';
 import type { Pool } from 'pg';
 import type { MastraConfig } from '../../config/configurations/mastra.config';
+import { buildAssistantAgent } from './agents/assistant.agent';
 import { buildOrchestratorAgent } from './agents/orchestrator.agent';
 import { buildStore } from './memory/memory.factory';
-import { AGENT_ID, SCHEDULED_REPORT_WORKFLOW_ID } from './mastra.constants';
+import {
+  ASSISTANT_AGENT_ID,
+  ORCHESTRATOR_AGENT_ID,
+  SCHEDULED_REPORT_WORKFLOW_ID,
+} from './mastra.constants';
 import type { ToolServices } from './mastra.types';
 import { buildScheduledReportWorkflow } from './workflows/scheduled-report.workflow';
 
@@ -30,15 +35,23 @@ export interface BuildMastraDeps {
  * `scheduled-report.workflow.ts` for the analogous hazard.
  */
 export function buildMastra(deps: BuildMastraDeps): Mastra {
-  const agent = buildOrchestratorAgent({
+  const orchestrator = buildOrchestratorAgent({
     cfg: deps.cfg,
     pool: deps.pool,
     services: deps.services,
     modelOverride: deps.modelOverride,
   });
+  const assistant = buildAssistantAgent({
+    cfg: deps.cfg,
+    pool: deps.pool,
+    modelOverride: deps.modelOverride,
+  });
   return new Mastra({
     storage: buildStore(deps.pool) as never,
-    agents: { [AGENT_ID]: agent },
+    agents: {
+      [ASSISTANT_AGENT_ID]: assistant,
+      [ORCHESTRATOR_AGENT_ID]: orchestrator,
+    },
     workflows: {
       [SCHEDULED_REPORT_WORKFLOW_ID]: buildScheduledReportWorkflow(),
     },

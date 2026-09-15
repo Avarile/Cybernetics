@@ -1,6 +1,9 @@
 import { createStep, createWorkflow } from '@mastra/core/workflows';
 import { z } from 'zod';
-import { AGENT_ID, SCHEDULED_REPORT_WORKFLOW_ID } from '../mastra.constants';
+import {
+  ORCHESTRATOR_AGENT_ID,
+  SCHEDULED_REPORT_WORKFLOW_ID,
+} from '../mastra.constants';
 import { AgentReportSchema } from '../mastra.types';
 
 const inputSchema = z.object({
@@ -56,7 +59,7 @@ export function buildScheduledReportWorkflow() {
       deliveryTarget: z.string().nullable().optional(),
     }),
     execute: async ({ inputData, mastra }) => {
-      const agent = mastra.getAgent(AGENT_ID);
+      const agent = mastra.getAgent(ORCHESTRATOR_AGENT_ID);
       const res = await agent.generate(inputData.promptTemplate, {
         structuredOutput: { schema: AgentReportSchema },
       } as never);

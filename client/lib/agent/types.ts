@@ -99,13 +99,33 @@ export interface ChatMessageDto {
   parts: ChatMessagePart[]
 }
 
+// ── Agents (`GET /agent/agents`) ────────────────────────────────────────────
+
+/** Mirrors `AGENT_IDS` in `api/src/features/mastra/mastra.constants.ts`. */
+export const AGENT_IDS = ["assistant", "orchestrator"] as const
+export type AgentId = (typeof AGENT_IDS)[number]
+
+/** A row of `AGENT_CATALOG`, as the roster endpoint returns it. */
+export interface AgentDescriptor {
+  id: AgentId
+  name: string
+  description: string
+  hasTools: boolean
+}
+
 // ── Conversations (`GET /agent/conversations`) ──────────────────────────────
 
 export type ConversationKind = "chat" | "scheduled" | "event"
 
+/** The two shelves a conversation can sit on, plus the "both" list filter. */
+export type ConversationStatus = "active" | "archived"
+export type ConversationFilter = ConversationStatus | "all"
+
 export interface PublicConversation {
   id: string
   title: string | null
+  /** Which agent the conversation is bound to. Fixed at creation. */
+  agentId: AgentId
   kind: ConversationKind
   status: string
   lastMessageAt: string | null
@@ -138,7 +158,7 @@ export interface PendingApprovalRow {
  * constructed here, rather than discovered as a 422.
  */
 export type ChatStreamRequest =
-  | { conversationId?: string; message: string }
+  | { conversationId?: string; agentId?: AgentId; message: string }
   | { conversationId?: string; resume: { approvalId: string; approved: boolean } }
 
 /** Backend caps the message at 8000 characters (`chatStreamSchema`). */

@@ -19,7 +19,15 @@ describe("createFetcher", () => {
   it("resolves the conversations key to its embedded url", async () => {
     const { client, get } = stubClient()
     await createFetcher(client)(keys.conversations(2, 10))
-    expect(get).toHaveBeenCalledWith("/agent/conversations?page=2&limit=10")
+    expect(get).toHaveBeenCalledWith(
+      "/agent/conversations?page=2&limit=10&status=active",
+    )
+  })
+
+  it("resolves the agents key to the roster route", async () => {
+    const { client, get } = stubClient()
+    await createFetcher(client)(keys.agents())
+    expect(get).toHaveBeenCalledWith("/agent/agents")
   })
 
   it("resolves a messages key to the conversation's messages route", async () => {

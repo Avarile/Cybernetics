@@ -9,6 +9,7 @@ import {
   agentConversations,
   type AgentConversationRow,
 } from '../../../infrastructure/database/schema/agent.schema';
+import type { ConversationStatus } from '../mastra.types';
 import { mastraThreads } from './mastra-threads.table';
 
 /** A conversation row plus the title Mastra generated for its backing thread. */
@@ -68,10 +69,15 @@ export class ConversationRepository extends BaseRepository<
     ownerUserId: string,
     page: number,
     limit: number,
+    status: ConversationStatus | 'all' = 'active',
   ): Promise<{ rows: ConversationListRow[]; total: number }> {
     const where = and(
       eq(agentConversations.ownerUserId, ownerUserId),
       eq(agentConversations.isDeleted, false),
+      // 'all' drops the predicate entirely rather than OR-ing the two values,
+      // so the planner still uses agent_conversation_kind_status_idx for the
+      // filtered cases.
+      status === 'all' ? undefined : eq(agentConversations.status, status),
     );
     // Without the generated title when Mastra has not created its table yet —
     // the conversation list is still perfectly useful, it just falls back to
@@ -125,6 +131,61 @@ export class ConversationRepository extends BaseRepository<
       .from(agentConversations)
       .where(where);
     return { rows, total: Number(totals[0]?.value ?? 0) };
+  }
+
+  /**
+   * One live conversation, carrying the Mastra-generated title like the list
+   * does. Used by the write paths so a PATCH response is projected exactly as
+   * the rail projects a row — in particular, clearing the title override must
+   * come back showing the generated title, not `null`.
+   */
+  async findLivePublicById(id: string): Promise<ConversationListRow | null> {
+    const base = await this.findLiveById(id);
+    if (!base) return null;
+    if (!(await this.threadsTableExists())) {
+      return { ...base, generatedTitle: null };
+    }
+    const rows = await this.db
+      .select({ title: mastraThreads.title })
+      .from(mastraThreads)
+      .where(eq(mastraThreads.id, id))
+      .limit(1);
+    return { ...base, generatedTitle: rows[0]?.title ?? null };
+  }
+
+  /**
+   * Set (or clear) the explicit title override.
+   *
+   * `null` is meaningful, not a no-op: it restores the fallback chain in
+   * `toPublicConversation`, so the row goes back to showing the title Mastra
+   * generated for its thread rather than keeping a stale user-typed one.
+   */
+  async rename(id: string, title: string | null): Promise<void> {
+    await this.db
+      .update(agentConversations)
+      .set({ title })
+      .where(eq(agentConversations.id, id));
+  }
+
+  /** Move a conversation between the active and archived shelves. */
+  async setStatus(id: string, status: ConversationStatus): Promise<void> {
+    await this.db
+      .update(agentConversations)
+      .set({ status })
+      .where(eq(agentConversations.id, id));
+  }
+
+  /**
+   * Soft-delete. Never a hard delete: `agent_run.conversation_id` and
+   * `agent_approval.conversation_id` are foreign keys to this row, so removing
+   * it would take the audit ledger with it. The transcript itself lives in
+   * Mastra's tables and is purged separately — see `ConversationService.remove`.
+   */
+  async softDelete(id: string): Promise<void> {
+    await this.db
+      .update(agentConversations)
+      .set({ isDeleted: true, deletedAt: new Date() })
+      .where(eq(agentConversations.id, id));
   }
 
   /** Bump `lastMessageAt` and increment `messageCount` for a conversation. */

@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MastraService } from '@mastra/nestjs';
 import type { MastraConfig } from '../../../config/configurations/mastra.config';
-import { AGENT_ID } from '../mastra.constants';
+import { resolveAgentId } from '../mastra.constants';
 import { isAdmin, userIdOrNull } from '../../../common/principal';
 import type { PrincipalRef } from '../mastra.types';
 import { AgentRunRepository } from '../repositories/agent-run.repository';
@@ -21,6 +21,7 @@ export interface StreamSink {
 }
 interface StreamInput {
   conversationId?: string;
+  agentId?: 'assistant' | 'orchestrator';
   message?: string;
   resume?: { approvalId: string; approved: boolean };
 }
@@ -69,20 +70,25 @@ export class ChatStreamService {
         principal,
         input.conversationId,
         'chat',
+        input.agentId,
       );
+      // The conversation's binding, never the request's: `ensure` ignores
+      // `agentId` on an existing conversation, so reading it back off the row is
+      // what makes the lock real rather than advisory.
+      const agentId = resolveAgentId(conv.agentId);
       run = await this.runs.create({
         conversationId: conv.id,
         trigger: 'user_message',
         triggeredByUserId: userIdOrNull(principal),
         status: 'running',
-        agentId: AGENT_ID,
+        agentId,
         input: { message: input.message },
         startedAt: new Date(),
       } as never);
       startedAt = Date.now();
       emit({ type: 'start', conversationId: conv.id, runId: run.id });
 
-      const agent = this.mastra.getAgent(AGENT_ID);
+      const agent = this.mastra.getAgent(agentId);
       const output = await agent.stream(
         input.message as string,
         {
@@ -234,6 +240,11 @@ export class ChatStreamService {
       emit({ type: 'done', status: 'failed' });
       return;
     }
+    // Fetched once and reused below for the agent binding. Calling `getOwned` a
+    // second time inside the try would re-run its admin cross-owner audit write,
+    // logging one resume as two reads of someone else's transcript.
+    let conv: Awaited<ReturnType<ConversationService['getOwned']>> | null =
+      null;
     if (!isAdmin(principal)) {
       if (!appr.conversationId) {
         emit({
@@ -243,7 +254,9 @@ export class ChatStreamService {
         emit({ type: 'done', status: 'failed' });
         return;
       }
-      await this.conversations.getOwned(principal, appr.conversationId); // throws 403/404
+      conv = await this.conversations.getOwned(principal, appr.conversationId); // throws 403/404
+    } else if (appr.conversationId) {
+      conv = await this.conversations.getOwned(principal, appr.conversationId);
     }
     emit({
       type: 'start',
@@ -252,7 +265,10 @@ export class ChatStreamService {
     });
     const startedAt = Date.now();
     try {
-      const agent = this.mastra.getAgent(AGENT_ID);
+      // Resume must run on the agent that suspended. Only a tool-bearing agent
+      // can suspend at all, but reading the binding keeps this correct if the
+      // roster ever grows a second one.
+      const agent = this.mastra.getAgent(resolveAgentId(conv?.agentId));
       const payload = {
         runId: appr.mastraRunId as string,
         toolCallId: appr.toolCallId ?? undefined,

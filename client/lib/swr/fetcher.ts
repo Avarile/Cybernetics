@@ -15,6 +15,8 @@ export function createFetcher(client: ApiClient) {
         return client.get("/auth/me")
       case "conversations":
         return client.get(key[1] as string)
+      case "agents":
+        return client.get(key[1] as string)
       case "conversation":
         return client.get(`/agent/conversations/${key[1] as string}/messages`)
       case "list":

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef } from "react"
 import { useSWRConfig } from "swr"
 import { streamChat } from "@/lib/agent/stream"
-import type { ChatStreamRequest } from "@/lib/agent/types"
+import type { AgentId, ChatStreamRequest } from "@/lib/agent/types"
 import { ApiError } from "@/lib/api/errors"
 import { keys, scopes } from "@/lib/swr/keys"
 import { useApi } from "@/lib/swr/provider"
@@ -99,12 +99,19 @@ export function useAgentChat() {
   )
 
   const sendMessage = useCallback(
-    async (text: string) => {
+    async (text: string, agentId?: AgentId) => {
       const trimmed = text.trim()
       if (!trimmed) return
       const conversationId = useTurnStore.getState().activeId ?? undefined
       useTurnStore.getState().appendOptimistic(trimmed)
-      await runStream(conversationId ? { conversationId, message: trimmed } : { message: trimmed })
+      // `agentId` is only sent when there is no conversation yet: the server
+      // fixes the binding at creation and ignores it afterwards, so including it
+      // on a continuation would imply a switch that cannot happen.
+      await runStream(
+        conversationId
+          ? { conversationId, message: trimmed }
+          : { agentId, message: trimmed },
+      )
     },
     [runStream],
   )

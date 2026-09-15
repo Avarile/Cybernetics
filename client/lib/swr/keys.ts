@@ -16,8 +16,18 @@ import type { TabSpec } from "@/components/data-table/types"
 export const keys = {
   session: () => ["session"] as const,
 
-  conversations: (page = 1, limit = 20) =>
-    ["conversations", `/agent/conversations?page=${page}&limit=${limit}`] as const,
+  /**
+   * One cache entry per (page, status). `status` is part of the key, not just
+   * the URL, so switching the rail's shelf cannot read the other shelf's page
+   * out of cache while its own request is in flight.
+   */
+  conversations: (page = 1, limit = 20, status = "active") =>
+    [
+      "conversations",
+      `/agent/conversations?page=${page}&limit=${limit}&status=${status}`,
+    ] as const,
+
+  agents: () => ["agents", "/agent/agents"] as const,
 
   messages: (id: string) => ["conversation", id, "messages"] as const,
 

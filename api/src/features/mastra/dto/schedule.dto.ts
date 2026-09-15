@@ -1,6 +1,6 @@
 import { createZodDto } from 'nestjs-zod';
 import { z } from 'zod';
-import { AGENT_ID } from '../mastra.constants';
+import { ORCHESTRATOR_AGENT_ID } from '../mastra.constants';
 
 export const createScheduleSchema = z.object({
   name: z.string().min(1).max(200),
@@ -12,7 +12,7 @@ export const createScheduleSchema = z.object({
    * always runs the scheduled-report workflow. Constrained to the one agent
    * that exists so the API cannot promise routing it does not do.
    */
-  agentId: z.literal(AGENT_ID).default(AGENT_ID),
+  agentId: z.literal(ORCHESTRATOR_AGENT_ID).default(ORCHESTRATOR_AGENT_ID),
   promptTemplate: z.string().min(1),
   params: z.record(z.string(), z.unknown()).default({}),
   /**

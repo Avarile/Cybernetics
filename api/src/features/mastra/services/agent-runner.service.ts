@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { MastraService } from '@mastra/nestjs';
 import { withTimeout } from '../../../common/with-timeout';
 import type { MastraConfig } from '../../../config/configurations/mastra.config';
-import { AGENT_ID } from '../mastra.constants';
+import { type AgentId, resolveAgentId } from '../mastra.constants';
 import { userIdOrNull } from '../../../common/principal';
 import type { PendingApproval, PrincipalRef } from '../mastra.types';
 import { AgentRunRepository } from '../repositories/agent-run.repository';
@@ -18,6 +18,8 @@ import {
 
 export interface ChatInput {
   conversationId?: string;
+  /** Binds a NEW conversation to an agent; ignored on an existing one. */
+  agentId?: AgentId;
   message: string;
 }
 export interface ChatResult {
@@ -67,19 +69,22 @@ export class AgentRunnerService {
       principal,
       input.conversationId,
       'chat',
+      input.agentId,
     );
+    // Read back off the row, not from the request — see ChatStreamService.
+    const agentId = resolveAgentId(conv.agentId);
     const run = await this.runs.create({
       conversationId: conv.id,
       trigger: 'user_message',
       triggeredByUserId: userIdOrNull(principal),
       status: 'running',
-      agentId: AGENT_ID,
+      agentId,
       input: { message: input.message },
       startedAt: new Date(),
     } as never);
     const startedAt = Date.now();
     try {
-      const agent = this.mastra.getAgent(AGENT_ID);
+      const agent = this.mastra.getAgent(agentId);
       // Bounded. Without a deadline a slow or hung provider call held an HTTP
       // request open for as long as it liked, and MASTRA_MAX_RETRIES multiplied
       // it. The run is still ledgered as failed by the catch below.

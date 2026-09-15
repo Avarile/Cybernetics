@@ -1,5 +1,8 @@
 import type {
+  AgentDescriptor,
   ChatMessageDto,
+  ConversationFilter,
+  ConversationStatus,
   PendingApprovalRow,
   PublicConversation,
 } from "@/lib/agent/types"
@@ -14,11 +17,31 @@ import type { Paginated } from "../types"
  */
 export function createAgentApi(client: ApiClient) {
   return {
-    /** `chat.controller.ts` — page/limit per listConversationsSchema. */
-    listConversations: (page = 1, limit = 20) =>
+    /** The agents a new conversation can be bound to. */
+    listAgents: () => client.get<AgentDescriptor[]>("/agent/agents"),
+
+    /** `chat.controller.ts` — page/limit/status per listConversationsSchema. */
+    listConversations: (page = 1, limit = 20, status: ConversationFilter = "active") =>
       client.get<Paginated<PublicConversation>>(
-        `/agent/conversations?page=${page}&limit=${limit}`,
+        `/agent/conversations?page=${page}&limit=${limit}&status=${status}`,
       ),
+
+    /**
+     * Set or clear the title override.
+     *
+     * `null` is not the same as omitting it: null clears the override and the
+     * row falls back to the title Mastra generated for the thread, which is what
+     * the server returns in the response.
+     */
+    renameConversation: (id: string, title: string | null) =>
+      client.patch<PublicConversation>(`/agent/conversations/${id}`, { title }),
+
+    setConversationStatus: (id: string, status: ConversationStatus) =>
+      client.patch<PublicConversation>(`/agent/conversations/${id}`, { status }),
+
+    /** Soft-deletes the row and purges the transcript. 204, so no body. */
+    deleteConversation: (id: string) =>
+      client.del<void>(`/agent/conversations/${id}`),
 
     messages: (conversationId: string) =>
       client.get<ChatMessageDto[]>(`/agent/conversations/${conversationId}/messages`),

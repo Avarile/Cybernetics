@@ -2,7 +2,10 @@ import { BullModule } from '@nestjs/bullmq';
 import { QueueModule } from '../../infrastructure/queue/queue.module';
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { MastraModule as MastraCoreModule } from '@mastra/nestjs';
+import {
+  MastraModule as MastraCoreModule,
+  MastraService,
+} from '@mastra/nestjs';
 import type { Pool } from 'pg';
 import { PG_POOL } from '../../infrastructure/database/drizzle.constants';
 import type { MastraConfig } from '../../config/configurations/mastra.config';
@@ -11,8 +14,8 @@ import { SearchRecordService } from '../search-service/search-record.service';
 import { MailerService } from '../../infrastructure/email/mailer.service';
 import { EmailModule } from '../../infrastructure/email/email.module';
 import { buildMastra } from './index';
-import { AGENT_RUN_QUEUE } from './mastra.constants';
-import type { ToolServices } from './mastra.types';
+import { AGENT_RUN_QUEUE, THREAD_STORE } from './mastra.constants';
+import type { ThreadStore, ToolServices } from './mastra.types';
 import { ChatController } from './controllers/chat.controller';
 import { ApprovalController } from './controllers/approval.controller';
 import { ScheduleController } from './controllers/schedule.controller';
@@ -85,6 +88,27 @@ import { AgentScheduleScheduler } from './schedulers/agent-schedule.scheduler';
   ],
   controllers: [ChatController, ApprovalController, ScheduleController],
   providers: [
+    {
+      /**
+       * Binds the thread-purge port. Lives here rather than in
+       * `ConversationService` so that service never imports `@mastra/nestjs` —
+       * see the note on THREAD_STORE in mastra.constants.ts.
+       *
+       * `getStore('memory')` yields the storage-domain memory store, whose
+       * `deleteThread` takes `{ threadId }` (not the bare string the `Memory`
+       * class takes). Under `@mastra/pg` it deletes the messages and the thread
+       * in one transaction.
+       */
+      provide: THREAD_STORE,
+      inject: [MastraService],
+      useFactory: (mastra: MastraService): ThreadStore => ({
+        async deleteThread(threadId: string): Promise<void> {
+          const store = mastra.getMastra().getStorage();
+          const memory = await store?.getStore('memory');
+          await memory?.deleteThread({ threadId });
+        },
+      }),
+    },
     ConversationService,
     ConversationMessagesService,
     AgentRunnerService,

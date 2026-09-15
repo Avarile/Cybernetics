@@ -52,6 +52,14 @@ export interface ToolRuntime {
   conversationId: string | null;
 }
 
+/**
+ * The single Mastra-storage operation `ConversationService` needs, behind a port
+ * so that service never imports `@mastra/nestjs`. Bound in `mastra.module.ts`.
+ */
+export interface ThreadStore {
+  deleteThread(threadId: string): Promise<void>;
+}
+
 /** Deps captured by tool closures at buildMastra time (app-lifetime services). */
 export interface ToolServices {
   searchRecords: Pick<SearchRecordService, 'search'>;

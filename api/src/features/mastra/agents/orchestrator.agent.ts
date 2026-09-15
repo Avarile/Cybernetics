@@ -1,7 +1,7 @@
 import { Agent } from '@mastra/core/agent';
 import type { Pool } from 'pg';
 import type { MastraConfig } from '../../../config/configurations/mastra.config';
-import { AGENT_ID } from '../mastra.constants';
+import { ORCHESTRATOR_AGENT_ID } from '../mastra.constants';
 import type { ToolServices } from '../mastra.types';
 import { buildMemory } from '../memory/memory.factory';
 import { buildModel } from '../memory/model.factory';
@@ -20,7 +20,7 @@ export interface BuildAgentParams {
 
 export function buildOrchestratorAgent(params: BuildAgentParams): Agent {
   return new Agent({
-    id: AGENT_ID,
+    id: ORCHESTRATOR_AGENT_ID,
     name: 'Orchestrator',
     instructions: ORCHESTRATOR_INSTRUCTIONS,
     model: (params.modelOverride ?? buildModel(params.cfg)) as never,

@@ -70,6 +70,13 @@ export const agentConversations = pgTable(
     ownerUserId: uuid('owner_user_id').references(() => users.id),
     resourceId: text('resource_id').notNull(),
     title: varchar('title', { length: 500 }),
+    /**
+     * Which registered agent this conversation is bound to. Free `text` rather
+     * than a pg enum, mirroring `agent_run.agent_id`: retiring an agent should
+     * not need a migration, and `resolveAgentId` (mastra.constants.ts) narrows
+     * an unknown value back to the default at read time.
+     */
+    agentId: text('agent_id').notNull().default('assistant'),
     kind: conversationKind('kind').notNull().default('chat'),
     status: conversationStatus('status').notNull().default('active'),
     lastMessageAt: timestamp('last_message_at', { withTimezone: true }),

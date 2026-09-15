@@ -19,11 +19,13 @@ import {
 import { Suggestion } from "@/components/ai-elements/suggestion"
 import { Skeleton } from "@/components/ui/skeleton"
 import { useAgentChat } from "@/features/agent/use-agent-chat"
-import { useConversations } from "@/features/agent/use-conversations"
+import { useAgents, useConversations } from "@/features/agent/use-conversations"
+import { useConversationMutations } from "@/features/agent/use-conversation-mutations"
 import { IN_FLIGHT_ID, useMessages } from "@/features/agent/use-messages"
 import { useTurn } from "@/features/agent/use-turn"
 import { ApiError } from "@/lib/api/errors"
-import { MESSAGE_MAX_LENGTH } from "@/lib/agent/types"
+import { MESSAGE_MAX_LENGTH, type AgentId, type ConversationFilter } from "@/lib/agent/types"
+import { AgentPicker } from "./agent-picker"
 import { ApprovalPanel } from "./approval-panel"
 import { ConversationRail } from "./conversation-rail"
 import { MessageParts } from "./message-parts"
@@ -41,11 +43,31 @@ function errorMessage(error: unknown, fallback: string): string {
 export function TerminalWindow() {
   const { openConversation, sendMessage, decideApproval, stop } = useAgentChat()
 
-  const { conversations, isLoading: railLoading, error: railError } = useConversations()
+  const [shelf, setShelf] = useState<ConversationFilter>("active")
+  const {
+    conversations,
+    hasMore,
+    loadMore,
+    isLoading: railLoading,
+    error: railError,
+  } = useConversations(shelf)
+  const { agents } = useAgents()
+  const { rename, setStatus, remove } = useConversationMutations()
   const { messages, isLoading: messagesLoading, error: messagesError } = useMessages()
   const { activeId, turn, approval } = useTurn()
 
   const [deciding, setDeciding] = useState(false)
+  // The binding for a chat that does not exist yet. Once the conversation is
+  // created the server owns the binding, and the row below is the source of
+  // truth — this only ever seeds the first turn.
+  const [draftAgentId, setDraftAgentId] = useState<AgentId>("assistant")
+
+  const active = conversations.find((c) => c.id === activeId)
+  const agentId = active?.agentId ?? draftAgentId
+  // Locked as soon as the conversation exists, not merely once it has messages:
+  // `ensure` fixes the binding at creation, so the very first turn already
+  // settles it and offering a live control afterwards would be a lie.
+  const agentLocked = Boolean(activeId)
 
   const streaming = turn?.status === "streaming"
   const status = streaming ? "streaming" : turn?.status === "failed" ? "error" : "ready"
@@ -53,7 +75,7 @@ export function TerminalWindow() {
   async function submit(message: PromptInputMessage) {
     const text = message.text.trim()
     if (!text || streaming) return
-    await sendMessage(text)
+    await sendMessage(text, agentId)
   }
 
   async function decide(approved: boolean) {
@@ -74,8 +96,20 @@ export function TerminalWindow() {
           status={railLoading ? "loading" : railError ? "error" : "ready"}
           error={railError ? errorMessage(railError, "Could not load conversations") : null}
           activeId={activeId}
+          shelf={shelf}
+          hasMore={hasMore}
           onSelect={(id) => void openConversation(id)}
-          onNew={() => void openConversation(null)}
+          onNew={() => {
+            setDraftAgentId("assistant")
+            void openConversation(null)
+          }}
+          onShelfChange={setShelf}
+          onLoadMore={loadMore}
+          onRename={(id, title) => void rename(id, title)}
+          onArchive={(id, archived) =>
+            void setStatus(id, archived ? "archived" : "active")
+          }
+          onDelete={(id) => void remove(id)}
         />
       </div>
 
@@ -107,7 +141,7 @@ export function TerminalWindow() {
                 </div>
                 <div className="mt-1 flex flex-wrap justify-center gap-1.5">
                   {SUGGESTIONS.map((s) => (
-                    <Suggestion key={s} suggestion={s} onClick={() => void sendMessage(s)} />
+                    <Suggestion key={s} suggestion={s} onClick={() => void sendMessage(s, agentId)} />
                   ))}
                 </div>
               </ConversationEmptyState>
@@ -152,6 +186,12 @@ export function TerminalWindow() {
               />
             </PromptInputBody>
             <PromptInputFooter>
+              <AgentPicker
+                agents={agents}
+                value={agentId}
+                locked={agentLocked}
+                onChange={setDraftAgentId}
+              />
               <div className="ml-auto">
                 <PromptInputSubmit status={status} onStop={stop} />
               </div>

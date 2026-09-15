@@ -18,13 +18,30 @@ function make(over: Record<string, any> = {}) {
   const repo = {
     create: jest.fn(async (v: any) => ({ id: 'conv-1', ...v })),
     findLiveById: jest.fn(async () => null),
+    findLivePublicById: jest.fn(async () => null),
     listByOwner: jest.fn(async () => ({ rows: [], total: 0 })),
+    rename: jest.fn(async () => undefined),
+    setStatus: jest.fn(async () => undefined),
+    softDelete: jest.fn(async () => undefined),
     touch: jest.fn(async () => undefined),
     ...over,
   };
+  delete (repo as Record<string, unknown>).threads;
+  // The thread-purge port, not MastraService: ConversationService takes the
+  // narrow THREAD_STORE interface so this file never loads `@mastra/nestjs`,
+  // which is ESM-only and would fail the whole suite at import time.
+  const threads = over.threads ?? {
+    deleteThread: jest.fn(async () => undefined),
+  };
   return {
-    service: new ConversationService(repo as never, new ExceptionService()),
+    service: new ConversationService(
+      repo as never,
+      new ExceptionService(),
+      undefined,
+      threads,
+    ),
     repo,
+    threads,
   };
 }
 
@@ -110,7 +127,15 @@ describe('ConversationService.listForOwner', () => {
   it('passes the owner id, page and limit through to the repository', async () => {
     const { service, repo } = withRows([]);
     await service.listForOwner(user, 2, 30);
-    expect(repo.listByOwner).toHaveBeenCalledWith('user-9', 2, 30);
+    // 'active' is the default shelf: archiving must hide a conversation from the
+    // rail without an explicit filter at the call site.
+    expect(repo.listByOwner).toHaveBeenCalledWith('user-9', 2, 30, 'active');
+  });
+
+  it('forwards an explicit status filter', async () => {
+    const { service, repo } = withRows([]);
+    await service.listForOwner(user, 1, 20, 'archived');
+    expect(repo.listByOwner).toHaveBeenCalledWith('user-9', 1, 20, 'archived');
   });
 
   it('falls back to the Mastra-generated title when no explicit title is set', async () => {
@@ -149,6 +174,7 @@ describe('ConversationService.listForOwner', () => {
     const { service } = withRows([row()]);
     const { data } = await service.listForOwner(user);
     expect(Object.keys(data[0]).sort()).toEqual([
+      'agentId',
       'createdAt',
       'id',
       'kind',
@@ -307,5 +333,176 @@ describe('ConversationService admin read auditing', () => {
     await expect(service.getOwned(user, 'conv-x')).rejects.toMatchObject({
       code: ErrorCode.FORBIDDEN,
     });
+  });
+});
+
+describe('ConversationService agent binding', () => {
+  it('binds a new conversation to the default agent', async () => {
+    const { service, repo } = make();
+    await service.ensure(user);
+    expect(repo.create).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: 'assistant' }),
+    );
+  });
+
+  it('binds a new conversation to an explicitly chosen agent', async () => {
+    const { service, repo } = make();
+    await service.ensure(user, undefined, 'chat', 'orchestrator');
+    expect(repo.create).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: 'orchestrator' }),
+    );
+  });
+
+  /**
+   * The lock. Mastra memory is per-thread, so re-pointing a live conversation at
+   * another agent would hand a different persona the first one's working memory
+   * and history. A stale client tab must not be able to do that.
+   */
+  it('ignores a requested agent on an existing conversation', async () => {
+    const { service } = make({
+      findLiveById: jest.fn(async () => ({
+        id: 'conv-2',
+        ownerUserId: 'user-9',
+        agentId: 'assistant',
+      })),
+    });
+    const conv = await service.ensure(user, 'conv-2', 'chat', 'orchestrator');
+    expect(conv.agentId).toBe('assistant');
+  });
+});
+
+describe('ConversationService.rename', () => {
+  const owned = {
+    id: 'conv-1',
+    ownerUserId: 'user-9',
+    agentId: 'assistant',
+    kind: 'chat',
+    status: 'active',
+    title: null,
+    lastMessageAt: null,
+    messageCount: 0,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  it('sanitises the title before storing it', async () => {
+    const { service, repo } = make({
+      findLiveById: jest.fn(async () => owned),
+      findLivePublicById: jest.fn(async () => ({
+        ...owned,
+        generatedTitle: null,
+      })),
+    });
+    await service.rename(user, 'conv-1', '  Quarterly   review  ');
+    expect(repo.rename).toHaveBeenCalledWith('conv-1', 'Quarterly review');
+  });
+
+  /**
+   * Blank must store null, not ''. Null restores the fallback to Mastra's
+   * generated title; an empty string would pin the rail to "Untitled" forever.
+   */
+  it('stores null for a blank title so the generated one returns', async () => {
+    const { service, repo } = make({
+      findLiveById: jest.fn(async () => owned),
+      findLivePublicById: jest.fn(async () => ({
+        ...owned,
+        generatedTitle: 'Mastra said this',
+      })),
+    });
+    const result = await service.rename(user, 'conv-1', '   ');
+    expect(repo.rename).toHaveBeenCalledWith('conv-1', null);
+    expect(result.title).toBe('Mastra said this');
+  });
+
+  it('403s for a non-owner', async () => {
+    const { service, repo } = make({
+      findLiveById: jest.fn(async () => ({ ...owned, ownerUserId: 'user-8' })),
+    });
+    await expect(service.rename(user, 'conv-1', 'nope')).rejects.toMatchObject({
+      code: ErrorCode.FORBIDDEN,
+    });
+    expect(repo.rename).not.toHaveBeenCalled();
+  });
+});
+
+describe('ConversationService.remove', () => {
+  const owned = { id: 'conv-1', ownerUserId: 'user-9', agentId: 'assistant' };
+
+  it('soft-deletes the row and purges the Mastra thread', async () => {
+    const { service, repo, threads } = make({
+      findLiveById: jest.fn(async () => owned),
+    });
+    await service.remove(user, 'conv-1');
+    expect(repo.softDelete).toHaveBeenCalledWith('conv-1');
+    expect(threads.deleteThread).toHaveBeenCalledWith('conv-1');
+  });
+
+  /**
+   * The tombstone is what the audit ledger hangs off — `agent_run` and
+   * `agent_approval` hold FKs to it — so a purge failure must not be reported as
+   * a failed delete for a conversation the user can no longer see.
+   */
+  it('still succeeds when the thread purge throws', async () => {
+    const { service, repo } = make({
+      findLiveById: jest.fn(async () => owned),
+      threads: {
+        deleteThread: jest.fn(async () => {
+          throw new Error('storage down');
+        }),
+      },
+    });
+    await expect(service.remove(user, 'conv-1')).resolves.toBeUndefined();
+    // The tombstone still landed — that is the half that must not be lost.
+    expect(repo.softDelete).toHaveBeenCalledWith('conv-1');
+  });
+
+  it('403s for a non-owner and deletes nothing', async () => {
+    const { service, repo, threads } = make({
+      findLiveById: jest.fn(async () => ({ ...owned, ownerUserId: 'user-8' })),
+    });
+    await expect(service.remove(user, 'conv-1')).rejects.toMatchObject({
+      code: ErrorCode.FORBIDDEN,
+    });
+    expect(repo.softDelete).not.toHaveBeenCalled();
+    expect(threads.deleteThread).not.toHaveBeenCalled();
+  });
+});
+
+describe('ConversationService.setStatus', () => {
+  const owned = {
+    id: 'conv-1',
+    ownerUserId: 'user-9',
+    agentId: 'assistant',
+    kind: 'chat',
+    status: 'active',
+    title: 'T',
+    lastMessageAt: null,
+    messageCount: 0,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  it('archives an owned conversation', async () => {
+    const { service, repo } = make({
+      findLiveById: jest.fn(async () => owned),
+      findLivePublicById: jest.fn(async () => ({
+        ...owned,
+        status: 'archived',
+        generatedTitle: null,
+      })),
+    });
+    const result = await service.setStatus(user, 'conv-1', 'archived');
+    expect(repo.setStatus).toHaveBeenCalledWith('conv-1', 'archived');
+    expect(result.status).toBe('archived');
+  });
+
+  it('403s for a non-owner', async () => {
+    const { service, repo } = make({
+      findLiveById: jest.fn(async () => ({ ...owned, ownerUserId: 'user-8' })),
+    });
+    await expect(
+      service.setStatus(user, 'conv-1', 'archived'),
+    ).rejects.toMatchObject({ code: ErrorCode.FORBIDDEN });
+    expect(repo.setStatus).not.toHaveBeenCalled();
   });
 });

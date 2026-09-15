@@ -1,10 +1,21 @@
-import { Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import {
   ErrorCode,
   ExceptionService,
 } from '../../../infrastructure/exceptions';
 import { isAdmin, userIdOrNull } from '../../../common/principal';
-import type { ConversationKind, PrincipalRef } from '../mastra.types';
+import {
+  type AgentId,
+  DEFAULT_AGENT_ID,
+  resolveAgentId,
+  THREAD_STORE,
+} from '../mastra.constants';
+import type {
+  ConversationKind,
+  ConversationStatus,
+  PrincipalRef,
+  ThreadStore,
+} from '../mastra.types';
 import {
   ConversationRepository,
   type ConversationListRow,
@@ -16,6 +27,8 @@ import { sanitizeTitle } from './conversation-title';
 export interface PublicConversation {
   id: string;
   title: string | null;
+  /** Which agent this conversation is bound to; the picker renders it. */
+  agentId: AgentId;
   kind: ConversationKind;
   status: string;
   lastMessageAt: Date | null;
@@ -32,6 +45,7 @@ function toPublicConversation(row: ConversationListRow): PublicConversation {
   return {
     id: row.id,
     title: sanitizeTitle(row.title) ?? sanitizeTitle(row.generatedTitle),
+    agentId: resolveAgentId(row.agentId),
     kind: row.kind,
     status: row.status,
     lastMessageAt: row.lastMessageAt,
@@ -55,6 +69,9 @@ export class ConversationService {
     // Optional so a module-subset e2e context that does not import
     // SystemAuditModule still boots; the access check itself never depends on it.
     @Optional() private readonly audit?: SystemAuditService,
+    // Optional for the same reason. Only `remove` uses it, to purge the Mastra
+    // thread; without it the metadata row is still soft-deleted.
+    @Optional() @Inject(THREAD_STORE) private readonly threads?: ThreadStore,
   ) {}
 
   private resourceOf(p: PrincipalRef): string {
@@ -107,6 +124,7 @@ export class ConversationService {
     principal: PrincipalRef,
     conversationId?: string,
     kind: ConversationKind = 'chat',
+    agentId: AgentId = DEFAULT_AGENT_ID,
   ) {
     if (conversationId) {
       const existing = await this.repo.findLiveById(conversationId);
@@ -114,6 +132,13 @@ export class ConversationService {
         throw this.errors.create(ErrorCode.AGENT_CONVERSATION_NOT_FOUND);
       }
       await this.assertCanAccess(principal, existing);
+      // `agentId` is deliberately NOT applied here. The binding is fixed at
+      // creation: Mastra memory is per-thread, so re-pointing a live thread at
+      // another agent hands a different persona someone else's working memory
+      // and history. A caller passing a new one on an existing conversation is
+      // ignored rather than refused — the client locks its picker once a
+      // conversation has messages, so reaching this branch means a stale tab,
+      // not a mistake worth a 422.
       return existing;
     }
     return this.repo.create({
@@ -122,6 +147,7 @@ export class ConversationService {
       ownerUserId: userIdOrNull(principal),
       resourceId: this.resourceOf(principal),
       kind,
+      agentId,
     } as never);
   }
 
@@ -135,6 +161,7 @@ export class ConversationService {
     principal: PrincipalRef,
     page = 1,
     limit = 20,
+    status: ConversationStatus | 'all' = 'active',
   ): Promise<{
     data: PublicConversation[];
     total: number;
@@ -143,7 +170,12 @@ export class ConversationService {
   }> {
     const userId = userIdOrNull(principal);
     if (!userId) return { data: [], total: 0, page, limit };
-    const { rows, total } = await this.repo.listByOwner(userId, page, limit);
+    const { rows, total } = await this.repo.listByOwner(
+      userId,
+      page,
+      limit,
+      status,
+    );
     return { data: rows.map(toPublicConversation), total, page, limit };
   }
 
@@ -153,6 +185,68 @@ export class ConversationService {
     if (!conv) throw this.errors.create(ErrorCode.AGENT_CONVERSATION_NOT_FOUND);
     await this.assertCanAccess(principal, conv);
     return conv;
+  }
+
+  /**
+   * Set or clear the user's title override.
+   *
+   * A blank title stores `null` rather than an empty string, which puts the row
+   * back on the Mastra-generated title (see `toPublicConversation`) instead of
+   * leaving the rail showing "Untitled" forever. `sanitizeTitle` is the same
+   * normaliser the read path uses, so a renamed title cannot be longer or
+   * differently-whitespaced than a generated one.
+   */
+  async rename(
+    principal: PrincipalRef,
+    id: string,
+    title: string | null,
+  ): Promise<PublicConversation> {
+    const conv = await this.getOwned(principal, id);
+    await this.repo.rename(conv.id, sanitizeTitle(title));
+    return this.publicById(conv.id);
+  }
+
+  /** Move a conversation between the active and archived shelves. */
+  async setStatus(
+    principal: PrincipalRef,
+    id: string,
+    status: ConversationStatus,
+  ): Promise<PublicConversation> {
+    const conv = await this.getOwned(principal, id);
+    await this.repo.setStatus(conv.id, status);
+    return this.publicById(conv.id);
+  }
+
+  /**
+   * Delete a conversation: soft-delete our metadata row, then purge the
+   * transcript from Mastra's own tables.
+   *
+   * The two halves are deliberately asymmetric. Our row must survive as a
+   * tombstone — `agent_run` and `agent_approval` hold foreign keys to it, and
+   * the audit ledger is the thing a deletion must NOT be able to erase. The
+   * messages are not ours and carry no such references, so "delete" means what
+   * the user thinks it means for the content itself.
+   *
+   * A failure to reach Mastra's store is swallowed: the metadata row is already
+   * gone from every listing, and throwing here would report a failed delete for
+   * a conversation the user can no longer see.
+   */
+  async remove(principal: PrincipalRef, id: string): Promise<void> {
+    const conv = await this.getOwned(principal, id);
+    await this.repo.softDelete(conv.id);
+    try {
+      await this.threads?.deleteThread(conv.id);
+    } catch {
+      // Tombstone stands; the orphaned thread is storage cost, not a data leak
+      // (nothing can reach it — every read path goes through a live row).
+    }
+  }
+
+  /** Re-read a row through the same projection the list endpoint returns. */
+  private async publicById(id: string): Promise<PublicConversation> {
+    const row = await this.repo.findLivePublicById(id);
+    if (!row) throw this.errors.create(ErrorCode.AGENT_CONVERSATION_NOT_FOUND);
+    return toPublicConversation(row);
   }
 
   /** Bump activity metadata (last message time / count) on a conversation. */

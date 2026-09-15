@@ -56,6 +56,22 @@ function truncatedSseResponse(events: SseEvent[], dangling: SseEvent) {
 
 const EMPTY_PAGE = { data: [], total: 0, page: 1, limit: 20 }
 
+/** Mirrors AGENT_CATALOG in `api/src/features/mastra/mastra.constants.ts`. */
+const AGENTS = [
+  {
+    id: "assistant",
+    name: "Assistant",
+    description: "General conversation.",
+    hasTools: false,
+  },
+  {
+    id: "orchestrator",
+    name: "Operations",
+    description: "Searches your records.",
+    hasTools: true,
+  },
+]
+
 /**
  * The response for any request a test isn't specifically stubbing: the rail's
  * list envelope for `/agent/conversations`, or an empty history array for
@@ -77,6 +93,11 @@ const EMPTY_PAGE = { data: [], total: 0, page: 1, limit: 20 }
  */
 function defaultResponse(url: string) {
   if (/\/agent\/conversations\/[^/]+\/messages$/.test(url)) return json([])
+  // A bare array, like the roster endpoint returns — NOT the paginated envelope.
+  // Handing the picker an envelope crashes it on `.find`; the terminal's other
+  // tests only survived it because SWR had not resolved this key before they
+  // asserted, which is a race, not safety.
+  if (/\/agent\/agents$/.test(url)) return json(AGENTS)
   return json(EMPTY_PAGE)
 }
 
@@ -524,5 +545,158 @@ describe("TerminalWindow", () => {
     // The rail's titles and counts move with every turn — a second GET must
     // follow the stream closing, not just the one on mount.
     await waitFor(() => expect(railCalls).toBe(2))
+  })
+})
+
+describe("TerminalWindow agent binding", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    useTurnStore.getState().reset()
+    vi.stubGlobal("fetch", fetchImpl)
+  })
+
+  it("defaults a new chat to the tool-less assistant", async () => {
+    fetchImpl.mockImplementation((url: string) => defaultResponse(url))
+    renderTerminal()
+    await waitFor(() =>
+      expect(screen.getByLabelText("Agent").textContent).toContain("Assistant"),
+    )
+  })
+
+  /**
+   * The binding is fixed server-side at creation, so the control must not offer
+   * a switch once a conversation exists — it would silently do nothing.
+   */
+  it("locks the picker once a conversation is open", async () => {
+    fetchImpl.mockImplementation((url: string) => defaultResponse(url))
+    useTurnStore.getState().selectConversation("c1")
+    renderTerminal()
+    await waitFor(() =>
+      expect(screen.getByLabelText("Agent")).toHaveAttribute("data-disabled"),
+    )
+  })
+
+  it("sends the chosen agent id only on the first turn of a new chat", async () => {
+    fetchImpl.mockImplementation((url: string) => {
+      if (url.endsWith("/agent/chat/stream")) {
+        return Promise.resolve(
+          sseResponse([
+            { type: "start", conversationId: "c9", runId: "r1" },
+            { type: "text-delta", delta: "hi" },
+            { type: "done", status: "succeeded" },
+          ]),
+        )
+      }
+      return Promise.resolve(defaultResponse(url))
+    })
+    renderTerminal()
+
+    await userEvent.type(
+      screen.getByPlaceholderText("Ask the system…"),
+      "hello{Enter}",
+    )
+
+    await waitFor(() => {
+      const call = fetchImpl.mock.calls.find((c) =>
+        String(c[0]).endsWith("/agent/chat/stream"),
+      )
+      expect(call).toBeTruthy()
+      expect(JSON.parse(call![1].body)).toEqual({
+        agentId: "assistant",
+        message: "hello",
+      })
+    })
+  })
+})
+
+describe("TerminalWindow conversation management", () => {
+  const rows = {
+    data: [
+      {
+        id: "c1",
+        title: "First chat",
+        agentId: "assistant",
+        kind: "chat",
+        status: "active",
+        lastMessageAt: null,
+        messageCount: 2,
+        createdAt: "2026-01-01T00:00:00Z",
+        updatedAt: "2026-01-01T00:00:00Z",
+      },
+    ],
+    total: 1,
+    page: 1,
+    limit: 20,
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    useTurnStore.getState().reset()
+    vi.stubGlobal("fetch", fetchImpl)
+    fetchImpl.mockImplementation((url: string) => {
+      if (/\/agent\/conversations\?/.test(url)) return Promise.resolve(json(rows))
+      return Promise.resolve(defaultResponse(url))
+    })
+  })
+
+  it("renames a conversation from the row menu", async () => {
+    renderTerminal()
+    await screen.findByText("First chat")
+
+    await userEvent.click(screen.getByLabelText("Actions for First chat"))
+    await userEvent.click(await screen.findByText("Rename"))
+
+    const field = await screen.findByLabelText("Conversation title")
+    await userEvent.clear(field)
+    await userEvent.type(field, "Renamed{Enter}")
+
+    await waitFor(() => {
+      const call = fetchImpl.mock.calls.find(
+        (c) => (c[1] as RequestInit | undefined)?.method === "PATCH",
+      )
+      expect(call).toBeTruthy()
+      expect(JSON.parse((call![1] as RequestInit).body as string)).toEqual({
+        title: "Renamed",
+      })
+    })
+  })
+
+  /** Delete is two-step, so a single stray click must not remove anything. */
+  it("requires a second click to delete", async () => {
+    renderTerminal()
+    await screen.findByText("First chat")
+
+    await userEvent.click(screen.getByLabelText("Actions for First chat"))
+    await userEvent.click(await screen.findByText("Delete"))
+
+    expect(
+      fetchImpl.mock.calls.some(
+        (c) => (c[1] as RequestInit | undefined)?.method === "DELETE",
+      ),
+    ).toBe(false)
+
+    await userEvent.click(await screen.findByText("Click again to delete"))
+    await waitFor(() =>
+      expect(
+        fetchImpl.mock.calls.some(
+          (c) => (c[1] as RequestInit | undefined)?.method === "DELETE",
+        ),
+      ).toBe(true),
+    )
+  })
+
+  it("switches shelf and asks the API for the archived one", async () => {
+    renderTerminal()
+    await screen.findByText("First chat")
+
+    await userEvent.click(screen.getByRole("tab", { name: "Archived" }))
+
+    await waitFor(() =>
+      expect(
+        fetchImpl.mock.calls.some((c) =>
+          String(c[0]).includes("status=archived"),
+        ),
+      ).toBe(true),
+    )
   })
 })
